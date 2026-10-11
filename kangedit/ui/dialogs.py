@@ -1,19 +1,23 @@
-"""Dialogs: auto edit, export, caption style and proxy settings."""
+"""Dialogs: auto edit, export, caption style, proxy and cache settings."""
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
-                               QSpinBox, QVBoxLayout, QWidget)
+                               QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
+                               QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+                               QRadioButton, QSpinBox, QVBoxLayout, QWidget)
 
-from ..autoedit import FORMAT_PRESETS, ORDERS, STYLE_LABELS, AutoEditSettings
-from ..captions import LANGUAGES, WHISPER_MODELS
-from ..config import ASPECT_RATIOS, FRAME_RATES, RESOLUTIONS, frame_size
+from .. import lut as lutlib
+from ..autoedit import (FORMAT_PRESETS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
+                        suggest_duration)
+from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS
+from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
+                      fmt_bytes, folder_size, frame_size, open_path)
 from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
 from ..models import CaptionStyle, Project
 
@@ -79,7 +83,14 @@ class AutoEditDialog(QDialog):
         clip_row.addWidget(self.sp_min)
         clip_row.addWidget(QLabel("to"))
         clip_row.addWidget(self.sp_max)
-        f.addRow("Target length", self.sp_target)
+        self.lbl_target = QLabel("")
+        self.lbl_target.setStyleSheet("color: #8b909a;")
+        self._target_auto = True     # follows the footage until the user types a length
+        self.sp_target.valueChanged.connect(lambda _: setattr(self, "_target_auto", False))
+        trow = QHBoxLayout()
+        trow.addWidget(self.sp_target)
+        trow.addWidget(self.lbl_target, 1)
+        f.addRow("Target length", trow)
         f.addRow("Clip length", clip_row)
         f.addRow("Gap between reuses", self.sp_gap)
         f.addRow("Max uses per footage", self.sp_uses)
@@ -100,6 +111,38 @@ class AutoEditDialog(QDialog):
         f.addRow(self.chk_replace)
         lay.addWidget(g)
 
+        # --- Transitions & story
+        g = QGroupBox("Transitions && story")
+        f = QFormLayout(g)
+        self.cb_trans = _combo(TRANSITION_MODES, last.transitions)
+        self.cb_tstyle = _combo(TRANSITION_STYLES, last.transition_style)
+        self.sp_tdur = QDoubleSpinBox(decimals=2, singleStep=0.1, suffix=" s")
+        self.sp_tdur.setRange(0.1, 3.0)
+        self.sp_tdur.setValue(last.transition_dur)
+        trow = QHBoxLayout()
+        trow.addWidget(self.cb_tstyle, 1)
+        trow.addWidget(self.sp_tdur)
+        self.cb_trans.currentIndexChanged.connect(
+            lambda: (self.cb_tstyle.setEnabled(self.cb_trans.currentData() != "off"),
+                     self.sp_tdur.setEnabled(self.cb_trans.currentData() != "off")))
+        self.chk_jl = QCheckBox("J / L cuts: let sound lead into or run on past a cut (long-form)")
+        self.chk_jl.setToolTip("Where the next scene starts with sound, it is heard just before the picture "
+                               "changes (J-cut); where a voice is still going at a cut, it finishes over the next "
+                               "picture (L-cut).")
+        self.chk_jl.setChecked(last.jl_cuts)
+        self.chk_bookends = QCheckBox("Find the opening and closing (file names, recording time, speech)")
+        self.chk_bookends.setToolTip("Puts the clips in recording order and looks for the greeting that opens the "
+                                     "video and the sign-off that closes it (\"hello…\", \"welcome…\", "
+                                     "\"assalamualaikum…\", \"thanks for watching\", \"sampai jumpa\"…) in "
+                                     "intro/outro-named files and the first/last recorded ones.\nFiles without a "
+                                     "transcript get a quick listen to their first/last 2 minutes.")
+        self.chk_bookends.setChecked(last.bookends)
+        f.addRow("Transitions", self.cb_trans)
+        f.addRow("Style / length", trow)
+        f.addRow(self.chk_jl)
+        f.addRow(self.chk_bookends)
+        lay.addWidget(g)
+
         # --- Footage
         g = QGroupBox("Footage to use")
         v = QVBoxLayout(g)
@@ -112,6 +155,7 @@ class AutoEditDialog(QDialog):
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if f_.id in use_ids else Qt.Unchecked)
             self.list.addItem(it)
+        self.list.itemChanged.connect(lambda _: self._suggest_target())
         v.addWidget(self.list)
         lay.addWidget(g)
 
@@ -130,6 +174,13 @@ class AutoEditDialog(QDialog):
         self.sp_gap.setValue(last.min_gap)
         self.sp_uses.setValue(last.max_uses)
         self.cb_order.setCurrentIndex(max(0, self.cb_order.findData(last.order)))
+        self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(last.transitions)))
+        self.cb_tstyle.setCurrentIndex(max(0, self.cb_tstyle.findData(last.transition_style)))
+        self.sp_tdur.setValue(last.transition_dur)
+        self.chk_jl.setChecked(last.jl_cuts)
+        self.chk_bookends.setChecked(last.bookends)
+        self._target_auto = last.video_format == "long"   # long-form length follows the footage
+        self._suggest_target()
 
     def _apply_format(self, key: str):
         preset = FORMAT_PRESETS[key]
@@ -143,6 +194,26 @@ class AutoEditDialog(QDialog):
         self.sp_max.setValue(s["clip_max"])
         self.sp_gap.setValue(s["min_gap"])
         self.cb_order.setCurrentIndex(max(0, self.cb_order.findData(s["order"])))
+        if hasattr(self, "cb_trans"):
+            self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(s["transitions"])))
+            self.cb_tstyle.setCurrentIndex(max(0, self.cb_tstyle.findData(s["transition_style"])))
+            self.sp_tdur.setValue(s["transition_dur"])
+            self.chk_jl.setChecked(s["jl_cuts"])
+            self.chk_bookends.setChecked(s["bookends"])
+            self._target_auto = True
+            self._suggest_target()
+
+    def _suggest_target(self):
+        """Long-form: target length from the total length of the checked footage."""
+        if not hasattr(self, "list"):
+            return
+        total = sum(self.project.footage[fid].duration for fid in self.footage_ids() if fid in self.project.footage)
+        d = suggest_duration(self.format_key(), total)
+        self.lbl_target.setText(f"of {total / 60:.1f} min footage" if total else "")
+        if d is not None and self._target_auto and self.format_key() == "long":
+            self.sp_target.blockSignals(True)
+            self.sp_target.setValue(d)
+            self.sp_target.blockSignals(False)
 
     def format_key(self) -> str:
         for k, b in self.fmt_buttons.items():
@@ -171,11 +242,16 @@ class AutoEditDialog(QDialog):
             order=self.cb_order.currentData(),
             style=self.cb_style.currentData(),
             replace_timeline=self.chk_replace.isChecked(),
+            transitions=self.cb_trans.currentData(),
+            transition_style=self.cb_tstyle.currentData(),
+            transition_dur=self.sp_tdur.value(),
+            jl_cuts=self.chk_jl.isChecked(),
+            bookends=self.chk_bookends.isChecked(),
         )
 
 
 class ExportDialog(QDialog):
-    def __init__(self, project: Project, has_captions: bool, parent=None):
+    def __init__(self, project: Project, has_captions: bool, parent=None, use_gpu: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Export video")
         self.setMinimumWidth(500)
@@ -206,6 +282,11 @@ class ExportDialog(QDialog):
         self.cb_caps = _combo(CAPTION_MODES, "burn" if has_captions and s.captions.enabled else "none")
         self.cb_caps.setEnabled(has_captions)
         self.chk_proxy = QCheckBox("Draft export from proxies (fast, lower quality)")
+        self.chk_gpu = QCheckBox("Encode on the graphics card when possible (faster)")
+        self.chk_gpu.setToolTip("Uses the GPU's H.264/H.265 encoder (NVIDIA NVENC, AMD AMF or Intel Quick Sync).\n"
+                                "Falls back to the CPU automatically if the card can't do it. ProRes always uses the CPU.\n"
+                                "GPU files are a little larger at the same quality setting.")
+        self.chk_gpu.setChecked(use_gpu)
         self.lbl_size = QLabel("")
         self.lbl_size.setStyleSheet("color: #8b909a;")
         for cb in (self.cb_aspect, self.cb_res):
@@ -220,6 +301,7 @@ class ExportDialog(QDialog):
         form.addRow("Quality", self.cb_quality)
         form.addRow("Captions", self.cb_caps)
         form.addRow(self.chk_proxy)
+        form.addRow(self.chk_gpu)
         lay.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Export")
@@ -237,6 +319,7 @@ class ExportDialog(QDialog):
         ext = CODECS[self.cb_codec.currentData()][1]
         self.ed_out.setText(os.path.splitext(self.ed_out.text())[0] + ext)
         self.cb_quality.setEnabled(self.cb_codec.currentData() != "prores")
+        self.chk_gpu.setEnabled(self.cb_codec.currentData() != "prores")
 
     def _browse(self):
         ext = CODECS[self.cb_codec.currentData()][1]
@@ -261,6 +344,7 @@ class ExportDialog(QDialog):
             quality=self.cb_quality.currentData(),
             captions=self.cb_caps.currentData() if self.cb_caps.isEnabled() else "none",
             use_proxies=self.chk_proxy.isChecked(),
+            use_gpu=self.chk_gpu.isChecked(),
         )
 
 
@@ -275,11 +359,11 @@ class CaptionStyleDialog(QDialog):
         g = QGroupBox("Speech recognition (Whisper, offline)")
         f = QFormLayout(g)
         self.cb_model = QComboBox()
-        for m in WHISPER_MODELS:
-            self.cb_model.addItem(m, m)
+        for m, label in WHISPER_MODELS.items():
+            self.cb_model.addItem(label, m)
         self.cb_model.setCurrentIndex(max(0, self.cb_model.findData(project.settings.whisper_model)))
-        self.cb_model.setToolTip("tiny/base: fastest · small: good balance · medium/large: most accurate, slower.\n"
-                                 "The model is downloaded once on first use.")
+        self.cb_model.setToolTip("large-v3 gives the most accurate captions; large-v3-turbo is almost as accurate and "
+                                 "several times faster.\nThe model is downloaded once on first use.")
         self.cb_lang = QComboBox()
         for code, name in LANGUAGES:
             self.cb_lang.addItem(name, code)
@@ -313,14 +397,31 @@ class CaptionStyleDialog(QDialog):
         self.chk_box.setChecked(st.box)
         self.color = st.color
         self.b_color = QPushButton()
-        self.b_color.clicked.connect(self._pick_color)
+        self.b_color.clicked.connect(lambda: self._pick_color("color"))
+        self.highlight = st.highlight
+        self.b_highlight = QPushButton()
+        self.b_highlight.clicked.connect(lambda: self._pick_color("highlight"))
         self._paint_color()
+        self.cb_anim = _combo(ANIMATIONS, st.animation)
+        self.cb_anim.setToolTip("Word-by-word animation, timed to the speech (like CapCut). Shown in the viewer "
+                                "and burned into the export.")
+        self.chk_auto = QCheckBox("Automatic size and position for the frame ratio and format")
+        self.chk_auto.setToolTip("Vertical 9:16: lower middle, clear of the app buttons and text at the bottom.\n"
+                                 "Square / 4:5: lower third.  Landscape: subtitles at the bottom "
+                                 "(bigger and shorter lines for short-form).")
+        self.chk_auto.setChecked(st.auto_layout)
+        self.chk_auto.toggled.connect(self._auto_toggled)
         presets = QHBoxLayout()
+        presets_buttons = []
         for name, cfg in (("Social (big, 1 line)", dict(size=8.0, chars=18, lines=1, dur=1.6, upper=True, pos="middle")),
                           ("Classic subtitles", dict(size=5.0, chars=42, lines=2, dur=5.0, upper=False, pos="bottom"))):
             b = QPushButton(name)
             b.clicked.connect(lambda _=False, c=cfg: self._preset(c))
             presets.addWidget(b)
+            presets_buttons.append(b)
+        f.addRow("Animation", self.cb_anim)
+        f.addRow("Highlight color", self.b_highlight)
+        f.addRow(self.chk_auto)
         f.addRow("Presets", presets)
         f.addRow("Font", self.cb_font)
         f.addRow("Size", self.sp_size)
@@ -329,6 +430,7 @@ class CaptionStyleDialog(QDialog):
         f.addRow("Max lines", self.sp_lines)
         f.addRow("Max duration", self.sp_dur)
         f.addRow("Text color", self.b_color)
+        self._manual = [self.sp_size, self.cb_pos, self.sp_chars, self.sp_lines, self.sp_dur] + presets_buttons
         row = QHBoxLayout()
         row.addWidget(self.chk_upper)
         row.addWidget(self.chk_outline)
@@ -339,6 +441,7 @@ class CaptionStyleDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        self._auto_toggled(self.chk_auto.isChecked())
 
     def _preset(self, c):
         self.sp_size.setValue(c["size"])
@@ -348,15 +451,20 @@ class CaptionStyleDialog(QDialog):
         self.chk_upper.setChecked(c["upper"])
         self.cb_pos.setCurrentIndex(self.cb_pos.findData(c["pos"]))
 
-    def _pick_color(self):
-        c = QColorDialog.getColor(QColor(self.color), self, "Caption color")
+    def _auto_toggled(self, on: bool):
+        for w in self._manual:
+            w.setEnabled(not on)
+
+    def _pick_color(self, which: str):
+        c = QColorDialog.getColor(QColor(getattr(self, which)), self, "Caption color")
         if c.isValid():
-            self.color = c.name()
+            setattr(self, which, c.name())
             self._paint_color()
 
     def _paint_color(self):
-        self.b_color.setText(self.color)
-        self.b_color.setStyleSheet(f"background: {self.color}; color: black;")
+        for b, col in ((self.b_color, self.color), (self.b_highlight, self.highlight)):
+            b.setText(col)
+            b.setStyleSheet(f"background: {col}; color: black;")
 
     def apply(self):
         s = self.project.settings
@@ -373,6 +481,9 @@ class CaptionStyleDialog(QDialog):
         st.outline = self.chk_outline.isChecked()
         st.box = self.chk_box.isChecked()
         st.color = self.color
+        st.highlight = self.highlight
+        st.animation = self.cb_anim.currentData()
+        st.auto_layout = self.chk_auto.isChecked()
 
 
 class ProxyDialog(QDialog):
@@ -396,3 +507,186 @@ class ProxyDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+
+class CacheDialog(QDialog):
+    """Where caches live and clearing them. The main window does the work through the two callbacks,
+    since it has to release open proxies and fix footage paths: change_folder(path or "") -> bool and
+    clear(kinds) -> None."""
+
+    def __init__(self, change_folder, clear, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Cache")
+        self.setMinimumWidth(560)
+        self._change_folder = change_folder
+        self._clear = clear
+        lay = QVBoxLayout(self)
+
+        g = QGroupBox("Cache folder")
+        v = QVBoxLayout(g)
+        info = QLabel("Proxies, analysis data and temporary files are stored here and reused across projects. "
+                      "Pick a fast drive with plenty of free space.")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        self.ed_path = QLineEdit(readOnly=True)
+        row = QHBoxLayout()
+        row.addWidget(self.ed_path, 1)
+        b_change = QPushButton("Change…")
+        b_change.clicked.connect(self._choose)
+        self.b_default = QPushButton("Use default")
+        self.b_default.clicked.connect(lambda: self._change_folder("") and self.refresh())
+        b_open = QPushButton("Open")
+        b_open.clicked.connect(lambda: open_path(str(cache_root())))
+        for b in (b_change, self.b_default, b_open):
+            row.addWidget(b)
+        v.addLayout(row)
+        lay.addWidget(g)
+
+        g = QGroupBox("Clear cache")
+        v = QVBoxLayout(g)
+        self.checks: dict[str, QCheckBox] = {}
+        for kind in CACHE_KINDS:
+            cb = QCheckBox()
+            cb.setChecked(True)
+            self.checks[kind] = cb
+            v.addWidget(cb)
+        hint = QLabel("Cleared proxies and analysis are recreated when needed. Imported LUTs are not affected.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9aa4b2;")
+        v.addWidget(hint)
+        row = QHBoxLayout()
+        self.lbl_total = QLabel()
+        row.addWidget(self.lbl_total, 1)
+        b_clear = QPushButton("Clear selected")
+        b_clear.clicked.connect(self._clear_selected)
+        row.addWidget(b_clear)
+        v.addLayout(row)
+        lay.addWidget(g)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.refresh()
+
+    def refresh(self):
+        root = cache_root()
+        self.ed_path.setText(str(root))
+        self.b_default.setEnabled(root != default_cache_root())
+        total = 0
+        for kind, cb in self.checks.items():
+            size = folder_size(root / kind)
+            total += size
+            cb.setText(f"{CACHE_KINDS[kind]}  —  {fmt_bytes(size)}")
+        self.lbl_total.setText(f"Total: {fmt_bytes(total)}")
+
+    def _choose(self):
+        path = QFileDialog.getExistingDirectory(self, "Choose cache folder", str(cache_root()))
+        if path and self._change_folder(os.path.normpath(path)):
+            self.refresh()
+
+    def _clear_selected(self):
+        kinds = [k for k, cb in self.checks.items() if cb.isChecked()]
+        if not kinds:
+            return
+        names = ", ".join(CACHE_KINDS[k].split(" (")[0].lower() for k in kinds)
+        if QMessageBox.question(self, "Clear cache", f"Delete cached {names}?") != QMessageBox.Yes:
+            return
+        self._clear(kinds)
+        self.refresh()
+
+
+class OfficialLutDialog(QDialog):
+    """Which manufacturer LUT converts each camera log profile (instead of the built-in curve).
+
+    mapping: {log profile: library LUT path}; import_files(paths) -> imported library paths.
+    """
+
+    def __init__(self, mapping: dict, auto: bool, import_files, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Official camera LUTs")
+        self.setMinimumWidth(760)
+        self.import_files = import_files
+        lay = QVBoxLayout(self)
+        intro = QLabel("Camera makers publish their own log → Rec.709 conversion LUTs. Download them from the "
+                       "official pages below, then import the .cube or .zip files: they are recognised by name and "
+                       "used instead of KangEdit's built-in conversion for that log profile.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.combos: dict[str, QComboBox] = {}
+        for row, e in enumerate(lutlib.OFFICIAL_LUTS):
+            name = QLabel(f"<b>{e.maker}</b>  {e.label}")
+            if e.hint:
+                name.setToolTip(e.hint)
+            cb = QComboBox()
+            cb.setToolTip(e.hint)
+            self.combos[e.profile] = cb
+            btn = QPushButton("Download page…" if e.url else "Where?")
+            if e.url:
+                btn.setToolTip(e.url)
+                btn.clicked.connect(lambda _=False, u=e.url: QDesktopServices.openUrl(QUrl(u)))
+            else:
+                btn.clicked.connect(lambda _=False, h=e.hint: QMessageBox.information(self, "Official LUT", h))
+            grid.addWidget(name, row, 0)
+            grid.addWidget(cb, row, 1)
+            grid.addWidget(btn, row, 2)
+        lay.addLayout(grid)
+        row = QHBoxLayout()
+        b_imp = QPushButton("Import LUT files (.cube / .zip)…")
+        b_imp.clicked.connect(self._import)
+        row.addWidget(b_imp)
+        self.resolve_dir = next((d for d in lutlib.RESOLVE_LUT_DIRS if os.path.isdir(d)), None)
+        b_res = QPushButton("Import from DaVinci Resolve")
+        b_res.setToolTip("Import the LUTs DaVinci Resolve installs (including several cameras' official ones)"
+                         + (f"\n{self.resolve_dir}" if self.resolve_dir else "\nDaVinci Resolve's LUT folder was not found"))
+        b_res.setEnabled(self.resolve_dir is not None)
+        b_res.clicked.connect(lambda: self._import_paths([self.resolve_dir]))
+        row.addWidget(b_res)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.chk_auto = QCheckBox("Use these LUTs automatically when a camera's log profile is detected")
+        self.chk_auto.setChecked(auto)
+        self.chk_apply = QCheckBox("Also switch footage already in the project to these LUTs")
+        self.chk_apply.setChecked(True)
+        lay.addWidget(self.chk_auto)
+        lay.addWidget(self.chk_apply)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._fill(mapping)
+
+    def _fill(self, mapping: dict):
+        luts = lutlib.library()
+        for e in lutlib.OFFICIAL_LUTS:
+            cb = self.combos[e.profile]
+            current = mapping.get(e.profile, cb.currentData() or "")
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItem("Built-in conversion", "")
+            matches = lutlib.official_matches(e, luts)
+            for path in matches:
+                cb.addItem(f"★ {lutlib.lut_name(path)}", path)
+            others = [(n, p) for n, p in luts if p not in matches]
+            if others:
+                cb.insertSeparator(cb.count())
+                for n, path in others:
+                    cb.addItem(n, path)
+            if not current and matches:
+                current = matches[0]   # pick the recognised official file by default
+            cb.setCurrentIndex(max(0, cb.findData(current)))
+            cb.blockSignals(False)
+
+    def _import(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import official LUTs", "",
+                                                "LUT or archive (*.cube *.zip);;All files (*)")
+        if paths:
+            self._import_paths(paths)
+
+    def _import_paths(self, paths: list[str]):
+        if self.import_files(paths):
+            self._fill(self.mapping())
+
+    def mapping(self) -> dict:
+        return {k: cb.currentData() for k, cb in self.combos.items() if cb.currentData()}

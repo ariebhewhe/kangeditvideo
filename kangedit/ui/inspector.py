@@ -8,7 +8,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
 
-from ..color import LOG_CHOICES, TONEMAPS
+from .. import lut as lutlib
+from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, lut_profile, profile_label
+from ..edits import TRANSITIONS
 from ..models import Project, TimelineClip
 
 
@@ -79,11 +81,41 @@ GRADE_PARAMS = [
 ]
 
 
+IMPORT_LUT = "__import_lut__"
+
+
+def fill_lut_combo(cb: QComboBox, base: list[tuple[str, str]], key_of=lambda path: path) -> None:
+    """Fixed choices, then every library LUT, then an "Import LUT..." entry."""
+    cb.blockSignals(True)
+    cb.clear()
+    for key, label in base:
+        cb.addItem(label, key)
+    luts = lutlib.library()
+    if luts:
+        cb.insertSeparator(cb.count())
+        for name, path in luts:
+            cb.addItem(f"LUT: {name}", key_of(path))
+    cb.insertSeparator(cb.count())
+    cb.addItem("Import LUT (.cube)…", IMPORT_LUT)
+    cb.blockSignals(False)
+
+
+def select_data(cb: QComboBox, key: str, label: str) -> None:
+    """Select `key`, adding it first if the combo doesn't list it (e.g. a LUT from another machine)."""
+    idx = cb.findData(key)
+    if idx < 0:
+        cb.insertItem(cb.count() - 2, label, key)
+        idx = cb.findData(key)
+    cb.setCurrentIndex(idx)
+
+
 class Inspector(QScrollArea):
     # kind: "trim" | "grade" | "footage_color" | "reframe" | "audio"
     before_change = Signal(str)
     changed = Signal(str)
-    request = Signal(str)   # auto_color | auto_color_all | copy_grade_all | copy_grade_footage | reset_color
+    # auto_color | auto_color_all | copy_grade_all | reset_color | detect_log | detect_log_all
+    # | import_lut_log | import_lut_look
+    request = Signal(str)
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -115,17 +147,55 @@ class Inspector(QScrollArea):
         f.addRow("Duration", self.lbl_dur)
         lay.addWidget(g)
 
+        # --- Edit into this clip (from the previous one)
+        g = QGroupBox("Edit into this clip")
+        f = QFormLayout(g)
+        self.cb_trans = QComboBox()
+        self.cb_trans.addItem("None (cut)", "")
+        for key, (label, _) in TRANSITIONS.items():
+            self.cb_trans.addItem(label, key)
+        self.sp_tdur = QDoubleSpinBox(decimals=2, singleStep=0.1, suffix=" s")
+        self.sp_tdur.setRange(0.1, 3.0)
+        self.sp_tdur.setToolTip("Centered on the cut; shortened automatically when the footage has no "
+                                "spare frames before/after the clips")
+        self.sp_split = QDoubleSpinBox(decimals=2, singleStep=0.1, suffix=" s")
+        self.sp_split.setRange(-3.0, 3.0)
+        self.sp_split.setToolTip("Move the audio cut:\n  negative = J-cut (this clip's sound starts early, "
+                                 "under the previous picture)\n  positive = L-cut (the previous clip's sound "
+                                 "runs on under this picture)")
+        self.cb_trans.currentIndexChanged.connect(self._set_edit)
+        self.sp_tdur.valueChanged.connect(self._set_edit)
+        self.sp_split.valueChanged.connect(self._set_edit)
+        f.addRow("Transition", self.cb_trans)
+        f.addRow("Length", self.sp_tdur)
+        f.addRow("Audio J / L", self.sp_split)
+        self.grp_edit = g
+        lay.addWidget(g)
+
         # --- Log conversion (per footage)
         g = QGroupBox("Log → Rec.709 (applies to the whole footage)")
         f = QFormLayout(g)
+        self.lbl_camera = QLabel("")
+        self.lbl_camera.setWordWrap(True)
+        self.lbl_camera.setStyleSheet("color: #9aa4b2;")
+        b_detect = QPushButton("Detect")
+        b_detect.setToolTip("Identify the camera from the file's metadata and picture, and choose its log profile")
+        b_detect.clicked.connect(lambda: self.request.emit("detect_log"))
+        b_detect_all = QPushButton("Detect all")
+        b_detect_all.setToolTip("Identify the camera of every imported file and choose each one's log profile")
+        b_detect_all.clicked.connect(lambda: self.request.emit("detect_log_all"))
+        cam_row = QHBoxLayout()
+        cam_row.addWidget(self.lbl_camera, 1)
+        cam_row.addWidget(b_detect)
+        cam_row.addWidget(b_detect_all)
         self.cb_log = QComboBox()
-        for key, label in LOG_CHOICES:
-            self.cb_log.addItem(label, key)
+        self.cb_log.setToolTip("Built-in camera conversion, or an imported .cube LUT that converts log to Rec.709")
         self.cb_tone = QComboBox()
         for key, label in TONEMAPS:
             self.cb_tone.addItem(label, key)
         self.cb_log.currentIndexChanged.connect(self._footage_color)
         self.cb_tone.currentIndexChanged.connect(self._footage_color)
+        f.addRow("Camera", cam_row)
         f.addRow("Camera profile", self.cb_log)
         f.addRow("Conversion", self.cb_tone)
         lay.addWidget(g)
@@ -157,6 +227,14 @@ class Inspector(QScrollArea):
             ps.changed.connect(lambda val, k=key: self._set_grade(k, val))
             self.params[key] = ps
             form.addRow(label, ps)
+        self.cb_look = QComboBox()
+        self.cb_look.setToolTip("Creative color grading LUT (.cube), applied after the adjustments above")
+        self.cb_look.currentIndexChanged.connect(self._set_look)
+        self.look_mix = ParamSlider(0, 100, 100, 1, 0, " %")
+        self.look_mix.setToolTip("How strongly the look LUT is applied. Double-click to reset")
+        self.look_mix.changed.connect(lambda val: self._set_grade("look_mix", val))
+        form.addRow("Look (LUT)", self.cb_look)
+        form.addRow("Look strength", self.look_mix)
         v.addLayout(form)
         lay.addWidget(g)
 
@@ -181,7 +259,13 @@ class Inspector(QScrollArea):
         f.addRow("Volume", self.vol)
         lay.addWidget(g)
         lay.addStretch(1)
-        self.set_clip(None)
+        self.reload_luts()
+
+    def reload_luts(self):
+        """Refresh the LUT lists (after an import) and re-select the current clip's values."""
+        fill_lut_combo(self.cb_log, LOG_CHOICES, lut_profile)
+        fill_lut_combo(self.cb_look, [("", "None")])
+        self.set_clip(self.clip)
 
     def set_project(self, project: Project):
         self.project = project
@@ -196,17 +280,27 @@ class Inspector(QScrollArea):
         f = self.project.footage[clip.footage_id]
         score = f"  ·  score {clip.score * 100:.0f}" if clip.score is not None else ""
         self.lbl_title.setText(f"{f.name}{score}")
-        for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone):
+        for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
+                  self.sp_split):
             w.blockSignals(True)
+        self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
+        self.sp_tdur.setValue(clip.transition_dur)
+        self.sp_split.setValue(clip.audio_split)
+        self.grp_edit.setEnabled(self.project.index_of(clip.id) > 0)
         self.sp_in.setMaximum(f.duration)
         self.sp_out.setMaximum(f.duration)
         self.sp_in.setValue(clip.src_in)
         self.sp_out.setValue(clip.src_out)
-        self.cb_log.setCurrentIndex(max(0, self.cb_log.findData(f.log_profile)))
+        select_data(self.cb_log, f.log_profile, profile_label(f.log_profile))
         self.cb_tone.setCurrentIndex(max(0, self.cb_tone.findData(f.tonemap)))
-        self.cb_tone.setEnabled(f.log_profile != "none")
-        for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone):
+        self.cb_tone.setEnabled(f.log_profile in LOG_PROFILES)
+        select_data(self.cb_look, clip.grade.look, f"LUT: {lutlib.lut_name(clip.grade.look)}")
+        self.look_mix.setEnabled(bool(clip.grade.look))
+        self.look_mix.set_value(clip.grade.look_mix)
+        for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
+                  self.sp_split):
             w.blockSignals(False)
+        self._show_camera(f)
         self.lbl_dur.setText(f"{clip.duration:.2f} s")
         for key, ps in self.params.items():
             ps.set_value(getattr(clip.grade, key))
@@ -228,16 +322,49 @@ class Inspector(QScrollArea):
         self.lbl_dur.setText(f"{c.duration:.2f} s")
         self.changed.emit("trim")
 
+    def _set_edit(self):
+        c = self.clip
+        if c is None:
+            return
+        self.before_change.emit("trim:edit")
+        c.transition = self.cb_trans.currentData() or ""
+        c.transition_dur = self.sp_tdur.value()
+        c.audio_split = self.sp_split.value()
+        self.changed.emit("trim")
+
     def _footage_color(self):
         c = self.clip
         if c is None:
             return
         f = self.project.footage[c.footage_id]
+        if self.cb_log.currentData() == IMPORT_LUT:
+            self.set_clip(c)   # put the previous choice back; the import selects the new LUT
+            self.request.emit("import_lut_log")
+            return
         self.before_change.emit("footage_color")
-        f.log_profile = self.cb_log.currentData()
+        if f.log_profile != self.cb_log.currentData():
+            f.log_profile = self.cb_log.currentData()
+            f.log_note, f.log_pending = "Chosen manually", False
         f.tonemap = self.cb_tone.currentData()
-        self.cb_tone.setEnabled(f.log_profile != "none")
+        self.cb_tone.setEnabled(f.log_profile in LOG_PROFILES)
+        self._show_camera(f)
         self.changed.emit("footage_color")
+
+    def _show_camera(self, f):
+        self.lbl_camera.setText((f.camera or "Not identified") + (f"\n{f.log_note}" if f.log_note else ""))
+
+    def _set_look(self):
+        c = self.clip
+        if c is None:
+            return
+        if self.cb_look.currentData() == IMPORT_LUT:
+            self.set_clip(c)
+            self.request.emit("import_lut_look")
+            return
+        self.before_change.emit("grade:look")
+        c.grade.look = self.cb_look.currentData() or ""
+        self.look_mix.setEnabled(bool(c.grade.look))
+        self.changed.emit("grade")
 
     def _set_grade(self, key: str, val: float):
         if self.clip is None:

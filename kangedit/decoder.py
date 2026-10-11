@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import av
 import numpy as np
@@ -42,16 +43,26 @@ class FrameDecoder:
         self.out_w = max(2, int(self.src_w * scale) // 2 * 2)
         self.out_h = max(2, int(self.src_h * scale) // 2 * 2)
         self._iter = None
-        self._last_t: Optional[float] = None
+        self._pos_t: Optional[float] = None      # time of the last frame consumed from the stream
+        self._last_t: Optional[float] = None     # time of the last frame returned (_last_img)
         self._last_img: Optional[np.ndarray] = None
         self._next_frame = None
+        self._closing = False
+        # While catching up to a target far ahead (after a keyframe seek), non-reference frames are
+        # skipped: nothing depends on them and they're about half the frames of a long GOP. Frame
+        # threads keep packets in flight, so full decoding resumes this far before the target.
+        self._skip_margin = ((os.cpu_count() or 4) + 4) * self.frame_dur
+        self._skip_until: Optional[float] = None
         self.lock = threading.Lock()
 
     def close(self):
-        try:
-            self.container.close()
-        except Exception:
-            pass
+        self._closing = True   # makes a decode running in another thread bail out quickly
+        with self.lock:
+            try:
+                self.container.close()
+            except Exception:
+                pass
+            self._iter = None
 
     def _frames(self):
         for packet in self.container.demux(self.stream):
@@ -74,24 +85,52 @@ class FrameDecoder:
         self.container.seek(max(0, target), stream=self.stream, backward=True, any_frame=False)
         self._iter = self._frames()
         self._next_frame = None
+        self._skip_nonref(t - self._skip_margin)
 
-    def frame_at(self, t: float) -> Optional[np.ndarray]:
-        """RGB uint8 frame shown at source time t (seconds from file start)."""
+    def _skip_nonref(self, until: Optional[float]):
+        if until is not None and until <= 0:
+            until = None
+        if (until is None) != (self._skip_until is None):
+            try:
+                self.stream.codec_context.skip_frame = "NONREF" if until is not None else "DEFAULT"
+            except Exception:  # noqa: BLE001 — an optimisation only
+                until = None
+        self._skip_until = until
+
+    def frame_at(self, t: float, interrupt: Optional[Callable[[], bool]] = None) -> Optional[np.ndarray]:
+        """RGB uint8 frame shown at source time t (seconds from file start).
+
+        `interrupt` is polled while decoding forward to t (long-GOP seeks can take a second). When it
+        returns True the nearest frame decoded so far is returned instead, so a newer request isn't
+        stuck behind a stale one; the decoder stays positioned for the next call.
+        """
         with self.lock:
+            if self._closing:
+                return None
             if self._last_t is not None and abs(t - self._last_t) < self.frame_dur * 0.5 and self._last_img is not None:
                 return self._last_img
-            forward_ok = (self._iter is not None and self._last_t is not None
-                          and self._last_t - self.frame_dur * 0.5 <= t <= self._last_t + 2.0)
+            forward_ok = (self._iter is not None and self._pos_t is not None
+                          and self._pos_t - self.frame_dur * 0.5 <= t <= self._pos_t + 2.0)
             if not forward_ok:
                 self._seek(t)
+            elif t - self._pos_t > 2 * self._skip_margin:
+                self._skip_nonref(t - self._skip_margin)
             best = None
+            interrupted = False
             try:
                 while True:
                     frame = self._next_frame if self._next_frame is not None else next(self._iter)
                     self._next_frame = None
                     ft = (frame.time if frame.time is not None else 0.0) - self.start
+                    if self._skip_until is not None and ft >= self._skip_until:
+                        self._skip_nonref(None)
                     if ft + self.frame_dur * 0.5 < t:
                         best = frame
+                        if self._closing:
+                            return None
+                        if interrupt is not None and interrupt():
+                            interrupted = True
+                            break
                         continue
                     if ft > t + self.frame_dur * 0.5 and best is not None:
                         self._next_frame = frame
@@ -102,41 +141,50 @@ class FrameDecoder:
                 self._iter = None
             except av.error.FFmpegError:
                 self._iter = None
+            if self._skip_until is not None and (self._iter is None or interrupted):
+                self._skip_nonref(None)
             if best is None:
                 return self._last_img
             bt = (best.time or 0.0) - self.start
-            self._last_t = bt if abs(bt - t) < 1.0 else t
+            self._pos_t = bt
+            self._last_t = bt if interrupted or abs(bt - t) < 1.0 else t
             self._last_img = self._to_rgb(best)
             return self._last_img
 
 
 class DecoderPool:
-    """Keeps one open decoder per media file (proxy or original)."""
+    """Keeps one open decoder per media file (proxy or original). Safe to use from several threads."""
 
-    def __init__(self, limit: int = 8):
+    def __init__(self, limit: int = 12):
         self._pool: dict[str, FrameDecoder] = {}
         self._limit = limit
+        self._lock = threading.Lock()
 
-    def get(self, footage: Footage, use_proxy: bool, max_height: int = 720) -> FrameDecoder:
+    def get(self, footage: Footage, use_proxy: bool, max_height: int = 720, slot: int = 0) -> FrameDecoder:
+        """`slot` > 0 opens extra decoders on the same file, so two positions can be read independently."""
         proxy = use_proxy and footage.has_proxy()
         path = footage.proxy_path if proxy else footage.path
-        key = f"{path}|{max_height}"
-        dec = self._pool.get(key)
-        if dec is None:
-            if len(self._pool) >= self._limit:
-                old_key = next(iter(self._pool))
-                self._pool.pop(old_key).close()
-            dec = FrameDecoder(path, 0 if proxy else footage.rotation,
-                               "bt709" if proxy else footage.color_space, max_height)
-            self._pool[key] = dec
-        else:
-            self._pool[key] = self._pool.pop(key)  # LRU bump
+        key = f"{path}|{max_height}|{slot}"
+        evicted = None
+        with self._lock:
+            dec = self._pool.get(key)
+            if dec is None:
+                if len(self._pool) >= self._limit:
+                    evicted = self._pool.pop(next(iter(self._pool)))
+                dec = FrameDecoder(path, 0 if proxy else footage.rotation,
+                                   "bt709" if proxy else footage.color_space, max_height)
+                self._pool[key] = dec
+            else:
+                self._pool[key] = self._pool.pop(key)  # LRU bump
+        if evicted is not None:
+            evicted.close()
         return dec
 
     def drop(self, path_prefix: str = "") -> None:
-        for k in list(self._pool):
-            if k.startswith(path_prefix):
-                self._pool.pop(k).close()
+        with self._lock:
+            gone = [self._pool.pop(k) for k in list(self._pool) if k.startswith(path_prefix)]
+        for dec in gone:
+            dec.close()
 
     def close(self):
         self.drop("")

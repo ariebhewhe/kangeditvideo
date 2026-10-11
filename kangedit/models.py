@@ -32,8 +32,12 @@ class Footage:
     color_transfer: str = ""
     rotation: int = 0
     creation_time: str = ""
-    log_profile: str = "none"
+    log_profile: str = "none"      # built-in camera profile key, "lut:<path>" or "none"
     tonemap: str = "filmic"
+    camera: str = ""               # identified camera make/model
+    log_note: str = ""             # how log_profile was chosen (shown in tooltips)
+    log_pending: bool = False      # waiting for the picture check after analysis (see camera.py)
+    log_guess: str = ""            # the camera's usual log profile, applied if the picture looks log
     proxy_path: Optional[str] = None
     analysis_path: Optional[str] = None
     # Word-level transcript in source time: [{"s": start, "e": end, "w": text}, ...]
@@ -68,6 +72,13 @@ class TimelineClip:
     offset_x: float = 0.0   # -1..1 reframe pan
     offset_y: float = 0.0
     score: Optional[float] = None
+    # Edit from the previous clip into this one (see edits.py). transition: "" (cut) or an edits.TRANSITIONS
+    # key, centered on the cut. audio_split: where the audio cut sits relative to the picture cut
+    # (< 0: J-cut, this clip's sound starts early; > 0: L-cut, the previous clip's sound runs on).
+    transition: str = ""
+    transition_dur: float = 0.5
+    audio_split: float = 0.0
+    label: str = ""                # "opening" | "closing" when auto edit placed it as a bookend
     id: str = field(default_factory=new_id)
 
     @property
@@ -88,6 +99,33 @@ class TimelineClip:
 
 
 @dataclass
+class SoundClip:
+    """A sound effect on the SFX layer: placed at a timeline time, independent of the video clips."""
+    path: str
+    start: float                   # timeline position, seconds
+    src_in: float = 0.0
+    src_out: float = 0.0
+    volume: float = 1.0
+    name: str = ""
+    id: str = field(default_factory=new_id)
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "SoundClip":
+        return SoundClip(**{k: v for k, v in d.items() if k in SoundClip.__dataclass_fields__})
+
+
+@dataclass
 class CaptionStyle:
     enabled: bool = True
     font: str = "Arial"
@@ -100,6 +138,9 @@ class CaptionStyle:
     color: str = "#FFFFFF"
     outline: bool = True
     box: bool = False
+    animation: str = "none"        # see captions.ANIMATIONS
+    highlight: str = "#FFD400"     # active-word color for the animations
+    auto_layout: bool = True       # size / position / line length chosen from the frame ratio and format
 
 
 @dataclass
@@ -110,7 +151,7 @@ class ProjectSettings:
     fit_mode: str = "fill"         # fill | fit | blur
     use_proxies: bool = True
     proxy_height: int = 540
-    whisper_model: str = "small"
+    whisper_model: str = "large-v3"
     whisper_language: str = ""     # "" = auto detect
     captions: CaptionStyle = field(default_factory=CaptionStyle)
     video_format: str = "short"    # short | long | custom (auto-edit preset)
@@ -133,6 +174,7 @@ class Project:
     def __init__(self):
         self.footage: dict[str, Footage] = {}
         self.clips: list[TimelineClip] = []
+        self.sounds: list[SoundClip] = []
         self.settings = ProjectSettings()
         self.path: Optional[str] = None
         self.dirty = False
@@ -186,6 +228,7 @@ class Project:
     def _snapshot(self) -> dict:
         return {
             "clips": [c.to_dict() for c in self.clips],
+            "sounds": [x.to_dict() for x in self.sounds],
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
@@ -193,12 +236,30 @@ class Project:
 
     def _restore(self, snap: dict) -> None:
         self.clips = [TimelineClip.from_dict(d) for d in snap["clips"]]
+        self.sounds = [SoundClip.from_dict(d) for d in snap.get("sounds", [])]
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
                 f.log_profile = d["log_profile"]
                 f.tonemap = d["tonemap"]
                 f.transcript = d["transcript"]
+
+    def set_detected_profile(self, footage_id: str, profile: str, note: str) -> None:
+        """Apply an automatically detected log profile.
+
+        Detection finishes in the background after the user may already have edited, so the result is
+        written into the undo/redo snapshots too -- otherwise undoing an unrelated edit would revert it.
+        """
+        f = self.footage.get(footage_id)
+        if f is None:
+            return
+        old = f.log_profile
+        f.log_profile, f.log_note, f.log_pending = profile, note, False
+        for snap in self._undo + self._redo:
+            d = snap["footage"].get(footage_id)
+            if d is not None and d["log_profile"] == old:
+                d["log_profile"] = profile
+        self.dirty = True
 
     def checkpoint(self) -> None:
         """Call before a modification to make it undoable."""
@@ -232,6 +293,7 @@ class Project:
             "settings": self.settings.to_dict(),
             "footage": [f.to_dict() for f in self.footage.values()],
             "clips": [c.to_dict() for c in self.clips],
+            "sounds": [x.to_dict() for x in self.sounds],
         }
 
     def save(self, path: str) -> None:
@@ -252,5 +314,6 @@ class Project:
             f = Footage.from_dict(fd)
             p.footage[f.id] = f
         p.clips = [TimelineClip.from_dict(c) for c in data.get("clips", []) if c.get("footage_id") in p.footage]
+        p.sounds = [SoundClip.from_dict(x) for x in data.get("sounds", [])]
         p.path = path
         return p

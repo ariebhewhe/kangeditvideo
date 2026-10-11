@@ -4,31 +4,43 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import threading
 import time
+import zipfile
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QTabWidget,
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
+                               QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
+                               QTabWidget, QWidget)
 
-from .. import APP_NAME, __version__
-from ..analysis import Analysis, analysis_path_for, load_or_analyze
-from ..autoedit import AutoEditSettings, select
-from ..captions import Caption, build_captions, edit_caption, transcribe, write_srt
-from ..color import Grade, auto_correct
-from ..config import ASPECT_RATIOS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir
+from .. import APP_NAME, __version__, camera
+from .. import lut as lutlib
+from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
+from ..autoedit import AutoEditSettings, apply_edit_style, select
+from .. import sfx
+from ..bookends import find_bookends, story_order
+from ..captions import Caption, build_captions, edit_caption, listen, project_layout, transcribe, write_srt
+from ..color import Grade, auto_correct, lut_profile, profile_label
+from ..decoder import DecoderPool
+from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
+                      clear_cache, default_cache_root, fmt_bytes, folder_size, legacy_cache_root, lut_dir,
+                      open_path, set_cache_root, sfx_dir)
 from ..export import export, render_audio
-from ..ffmpeg import probe
-from ..models import Footage, Project, TimelineClip, new_id
+from ..ffmpeg import Cancelled, probe
+from ..models import Footage, Project, SoundClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
 from ..tasks import TaskQueue
 from .captions_panel import CaptionsPanel
-from .dialogs import FIT_MODES, AutoEditDialog, CaptionStyleDialog, ExportDialog, ProxyDialog
+from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
+                      ProxyDialog)
 from .inspector import Inspector
 from .media_bin import MediaBin
+from .sfx_panel import SoundPanel
+from .theme import fmt_time
 from .timeline import TimelinePanel
 from .viewer import Viewer
 
@@ -37,6 +49,7 @@ PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 
 class MainWindow(QMainWindow):
     audio_ready = Signal(int, str)
+    analysis_ready = Signal(str, object)   # footage id, Analysis (from worker threads)
 
     def __init__(self):
         super().__init__()
@@ -44,8 +57,11 @@ class MainWindow(QMainWindow):
         self.analyses: dict[str, Analysis] = {}
         self.captions: list[Caption] = []
         self.qs = QSettings(APP_NAME, APP_NAME)
+        self._init_cache_root()
         self.tasks = TaskQueue()
         self.last_auto = self._load_auto_settings()
+        self._auto_ids: list[str] = []     # footage the last auto edit used (for regenerate)
+        self._progress_text = ""
         self._last_ckpt: tuple = ("", 0.0)
         self._audio_version = 0
         self._audio_pending: Optional[str] = None
@@ -61,13 +77,14 @@ class MainWindow(QMainWindow):
         self.bin = MediaBin(self.project)
         self.inspector = Inspector(self.project)
         self.caps_panel = CaptionsPanel()
+        self.sfx_panel = SoundPanel()
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(self.viewer)
         split.addWidget(self.timeline)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
-        split.setSizes([600, 230])
+        split.setSizes([560, 280])
         self.setCentralWidget(split)
 
         d_bin = QDockWidget("Media", self)
@@ -78,6 +95,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self.inspector, "Inspector")
         tabs.addTab(self.caps_panel, "Captions")
+        tabs.addTab(self.sfx_panel, "Sounds")
         self.right_tabs = tabs
         d_right = QDockWidget("Clip", self)
         d_right.setObjectName("clip")
@@ -94,6 +112,7 @@ class MainWindow(QMainWindow):
 
         self._audio_timer = QTimer(self, singleShot=True, interval=700)
         self._audio_timer.timeout.connect(self._render_audio)
+        QTimer.singleShot(800, self._offer_legacy_cache)
 
     # ================================================================== construction
     def _act(self, text, slot, shortcut=None, tip=None) -> QAction:
@@ -126,7 +145,8 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Redo", self.redo, "Ctrl+Shift+Z"))
         m.addSeparator()
         m.addAction(self._act("Split at playhead", self.split_at_playhead, "S"))
-        m.addAction(self._act("Delete clip", lambda: self.clip_action("delete", self.tl.selected), "Del"))
+        m.addAction(self._act("Select all clips", self.tl.select_all, "Ctrl+A"))
+        m.addAction(self._act("Delete selected clips / sound", self._delete_selected, "Del"))
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
         m.addAction(self._act("Replace with another best moment",
                               lambda: self.clip_action("alt_moment", self.tl.selected), "R"))
@@ -135,6 +155,12 @@ class MainWindow(QMainWindow):
         self.a_auto = self._act("Auto Edit…", self.auto_edit_dialog, "Ctrl+Shift+A",
                                 "Pick the best moments from your footage automatically")
         m.addAction(self.a_auto)
+        m.addAction(self._act("Regenerate auto edit shorter (−25%)", lambda: self.regenerate_auto_edit(0.75),
+                              "Ctrl+Shift+-", "Rebuild the automatic edit about a quarter shorter than the timeline"))
+        m.addAction(self._act("Regenerate auto edit longer (+25%)", lambda: self.regenerate_auto_edit(1.25),
+                              "Ctrl+Shift+=", "Rebuild the automatic edit about a quarter longer than the timeline"))
+        m.addAction(self._act("Regenerate auto edit at length…", lambda: self.regenerate_auto_edit(None), None,
+                              "Rebuild the automatic edit with the same settings at a length you choose"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -142,16 +168,36 @@ class MainWindow(QMainWindow):
         self.a_auto_proxy.setChecked(self.qs.value("auto_proxy", False, type=bool))
         self.a_auto_proxy.toggled.connect(lambda v: self.qs.setValue("auto_proxy", v))
         m.addAction(self.a_auto_proxy)
+        self.a_gpu_analysis = QAction("Use GPU to speed up analysis", self, checkable=True)
+        self.a_gpu_analysis.setToolTip("Decode footage on the graphics card (NVIDIA, AMD or Intel) while the CPU "
+                                       "analyzes other clips")
+        self.a_gpu_analysis.setChecked(self.qs.value("gpu_analysis", True, type=bool))
+        self.a_gpu_analysis.toggled.connect(lambda v: self.qs.setValue("gpu_analysis", v))
+        m.addAction(self.a_gpu_analysis)
+        self.a_auto_log = QAction("Detect camera log profile on import", self, checkable=True)
+        self.a_auto_log.setToolTip("Identify the camera of imported footage and choose its log → Rec.709 "
+                                   "conversion automatically")
+        self.a_auto_log.setChecked(self.qs.value("auto_log", True, type=bool))
+        self.a_auto_log.toggled.connect(lambda v: self.qs.setValue("auto_log", v))
+        m.addAction(self.a_auto_log)
+        m.addAction(self._act("Detect log profile for all footage", lambda: self.detect_log(list(self.project.footage)),
+                              None, "Identify the camera of every imported file and choose its log → Rec.709 conversion"))
         m.addSeparator()
         self.a_color_all = self._act("Auto color all clips", lambda: self.inspector_request("auto_color_all"))
         m.addAction(self.a_color_all)
+        m.addAction(self._act("Import LUT (.cube)…", lambda: self.import_lut("library"), None,
+                              "Add log-conversion or color-grading LUTs to the LUT library"))
+        m.addAction(self._act("Official camera LUTs…", self.official_luts_dialog, None,
+                              "Use the camera makers' own log → Rec.709 LUTs (DJI D-Log M, Sony, Panasonic…)"))
+        m.addAction(self._act("Open LUT folder", lambda: open_path(str(lut_dir()))))
         self.a_captions = self._act("Generate captions", self.generate_captions, None,
                                     "Transcribe speech and create captions")
         m.addAction(self.a_captions)
         m.addAction(self._act("Caption style…", self.caption_style_dialog))
         m.addSeparator()
         m.addAction(self._act("Re-analyze all footage", lambda: self.queue_analysis(list(self.project.footage), True)))
-        m.addAction(self._act("Open cache folder", lambda: os.startfile(str(cache_dir("")))))
+        m.addAction(self._act("Cache folder && clearing…", self.cache_dialog, None,
+                              "Choose where proxies and analysis are stored, and clear them"))
 
         m = mb.addMenu("&View")
         m.addAction(self._act("Fit timeline", self.tl.fit, "Shift+Z"))
@@ -184,6 +230,12 @@ class MainWindow(QMainWindow):
         b.setToolTip("Find the best moments and build the edit (Short or Long format)")
         b.clicked.connect(self.auto_edit_dialog)
         tb.addWidget(b)
+        for text, factor, tip in (("− Shorter", 0.75, "Regenerate the auto edit about 25% shorter"),
+                                  ("+ Longer", 1.25, "Regenerate the auto edit about 25% longer")):
+            rb = QPushButton(text)
+            rb.setToolTip(tip + " (same settings and footage)")
+            rb.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
+            tb.addWidget(rb)
         tb.addSeparator()
         tb.addAction(self.a_proxies)
         self.chk_proxy = QCheckBox("Use proxies")
@@ -238,9 +290,10 @@ class MainWindow(QMainWindow):
     def _connect(self):
         t = self.tasks
         t.progress.connect(self._on_progress)
-        t.started.connect(lambda name: self.lbl_status.setText(name))
+        t.started.connect(self._status_progress)
         t.pending_changed.connect(self._on_pending)
-        t.idle.connect(lambda: self.lbl_status.setText("Ready"))
+        # "Ready" replaces progress text only, not the result message a finished task just showed.
+        t.idle.connect(lambda: self.lbl_status.text() == self._progress_text and self.lbl_status.setText("Ready"))
 
         self.viewer.time_changed.connect(lambda tt: self.tl.set_playhead(tt, follow=self.viewer.playing))
         self.viewer.play_state.connect(self._on_play_state)
@@ -252,6 +305,9 @@ class MainWindow(QMainWindow):
         self.tl.edit_finished.connect(self._on_timeline_finished)
         self.tl.slip_preview.connect(self.viewer.show_source)
         self.tl.slip_end.connect(lambda: self.viewer.show_source(None))
+        self.tl.sounds_changed.connect(self._sounds_changed)
+        self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
+        self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
         self.tl.context_action.connect(self.clip_action)
         self.tl.caption_clicked.connect(lambda i: (self.right_tabs.setCurrentWidget(self.caps_panel),
                                                    self.caps_panel.select(i)))
@@ -275,6 +331,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.toggled.connect(self._toggle_captions)
 
         self.audio_ready.connect(self._on_audio_ready)
+        self.analysis_ready.connect(self._on_analysis_ready)
 
     # ================================================================== project state
     def _sync_project_controls(self):
@@ -351,6 +408,8 @@ class MainWindow(QMainWindow):
             a = Analysis.load(path) if os.path.exists(path) else None
             if a is not None:
                 self.analyses[fid] = a
+                if f.log_pending:
+                    self._log_from_picture(f, list(a.thumbs))
             elif os.path.exists(f.path):
                 missing.append(fid)
         if missing:
@@ -436,8 +495,7 @@ class MainWindow(QMainWindow):
                             bit_depth=info.bit_depth, color_space=info.color_space, color_range=info.color_range,
                             color_transfer=info.color_transfer, rotation=info.rotation,
                             creation_time=info.creation_time)
-                if info.color_transfer == "arib-std-b67":
-                    f.log_profile = "hlg"
+                self._identify_camera(f, info)
                 for h in (self.project.settings.proxy_height, 360, 540, 720, 1080):
                     pp = proxy_path_for(f, h)
                     if os.path.exists(pp):
@@ -463,10 +521,14 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"Imported {len(added)} file(s). Analyzing in the background…")
 
     # ================================================================== background jobs
+    def _status_progress(self, text: str):
+        self._progress_text = text
+        self.lbl_status.setText(text)
+
     def _on_progress(self, p: float, msg: str):
         self.progress.setValue(int(p * 1000))
         pending = self.tasks._pending
-        self.lbl_status.setText(msg + (f"   (+{pending - 1} queued)" if pending > 1 else ""))
+        self._status_progress(msg + (f"   (+{pending - 1} queued)" if pending > 1 else ""))
 
     def _on_pending(self, n: int):
         self.progress.setVisible(n > 0)
@@ -483,26 +545,49 @@ class MainWindow(QMainWindow):
         return handler
 
     def queue_analysis(self, ids: list[str], force: bool = False):
-        for fid in ids:
-            f = self.project.footage.get(fid)
-            if f is None or (fid in self.analyses and not force):
-                continue
+        """Analyze footage as one background task; clips run in parallel and appear as each one finishes."""
+        todo = [self.project.footage[fid] for fid in ids
+                if fid in self.project.footage and (force or fid not in self.analyses)]
+        if not todo:
+            return
+        use_gpu = self.a_gpu_analysis.isChecked()
 
-            def job(progress, cancel, f=f):
+        def job(progress, cancel):
+            pending = []
+            for f in todo:
+                path = analysis_path_for(f)
                 if force:
                     try:
-                        os.remove(analysis_path_for(f))
+                        os.remove(path)
                     except OSError:
                         pass
-                return load_or_analyze(f, progress, cancel)
+                a = Analysis.load(path) if os.path.exists(path) else None
+                if a is not None:
+                    f.analysis_path = path
+                    self.analysis_ready.emit(f.id, a)
+                else:
+                    pending.append(f)
+            failed: list[str] = []
+            analyze_many(pending, progress, cancel,
+                         on_result=lambda f, a: self.analysis_ready.emit(f.id, a),
+                         on_error=lambda f, msg: failed.append(f"{f.name}: {msg}"), use_gpu=use_gpu)
+            return failed
 
-            def done(a, fid=fid):
-                if fid in self.project.footage:
-                    self.analyses[fid] = a
-                    self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] != fid}
-                    self.refresh_all(captions=False)
+        def done(failed):
+            if failed:
+                QMessageBox.warning(self, APP_NAME, "Analysis failed:\n\n" + "\n".join(failed)[-1500:])
 
-            self.tasks.submit(f"Analyzing {f.name}", job, done, self._task_error(f"Analysis of {f.name}"))
+        name = f"Analyzing {todo[0].name}" if len(todo) == 1 else f"Analyzing {len(todo)} clips"
+        self.tasks.submit(name, job, done, self._task_error("Analysis"))
+
+    def _on_analysis_ready(self, fid: str, a: Analysis):
+        if fid in self.project.footage:
+            self.analyses[fid] = a
+            self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] != fid}
+            f = self.project.footage[fid]
+            if f.log_pending:
+                self._log_from_picture(f, list(a.thumbs))
+            self.refresh_all(captions=False)
 
     def queue_proxies(self, ids: list[str]):
         height = self.project.settings.proxy_height
@@ -515,7 +600,7 @@ class MainWindow(QMainWindow):
                 ff = self.project.footage.get(fid)
                 if ff:
                     ff.proxy_path = path
-                    self.viewer.decoders.drop()
+                    self.viewer.drop_decoders()
                     self.project.dirty = True
                     self.refresh_all(captions=False)
                     self._schedule_audio()
@@ -565,18 +650,71 @@ class MainWindow(QMainWindow):
         self.last_auto = s
         for k, v in s.to_dict().items():
             self.qs.setValue(f"auto/{k}", v)
-        aspect = dlg.aspect()
+        self._run_auto_edit(s, ids, dlg.aspect())
+
+    def regenerate_auto_edit(self, factor: Optional[float]):
+        """Rebuild the automatic edit with the last settings and footage, shorter / longer than the timeline
+        (factor), or at a length the user enters (None)."""
+        ids = [fid for fid in self._auto_ids if fid in self.project.footage] \
+            or list(dict.fromkeys(c.footage_id for c in self.project.clips)) or list(self.project.footage)
+        if not ids:
+            self.auto_edit_dialog()
+            return
+        current = self.project.duration or self.last_auto.target_duration
+        if factor is None:
+            v, ok = QInputDialog.getDouble(self, "Regenerate auto edit",
+                                           f"New length in seconds (the timeline is {current:.0f} s):",
+                                           round(current), 5, 3600, 0)
+            if not ok:
+                return
+            target = v
+        else:
+            target = current * factor
+        total = sum(self.project.footage[fid].duration for fid in ids)
+        target = float(round(max(5.0, min(target, total * 0.9))))
+        s = copy.copy(self.last_auto)
+        s.target_duration = target
+        s.replace_timeline = True
+        s.clip_min = min(s.clip_min, target)
+        self.last_auto.target_duration = target
+        self.qs.setValue("auto/target_duration", target)
+        self._run_auto_edit(s, ids, None, f"Regenerating the edit at {target:.0f} s")
+
+    def _run_auto_edit(self, s: AutoEditSettings, ids: list[str], aspect: Optional[str], name: str = "Auto edit"):
+        self._auto_ids = list(ids)
         self.queue_analysis(ids)
         footage = {fid: self.project.footage[fid] for fid in ids}
         existing = [] if s.replace_timeline else list(self.project.clips)
+        use_gpu = self.a_gpu_analysis.isChecked()
+        lang = self.project.settings.whisper_language
 
         def job(progress, cancel):
-            progress(0.5, "Choosing the best moments…")
-            analyses = {fid: load_or_analyze(f) for fid, f in footage.items()}
-            return analyses, select(footage, analyses, s, ids, existing=existing)
+            progress(0.3, "Analyzing footage…")
+            analyses = {fid: load_or_analyze(f, use_gpu=use_gpu) for fid, f in footage.items()}
+            order = story_order(footage, ids)
+            intro = outro = None
+            notes: list[str] = []
+            sel = s
+            if s.bookends:
+                progress(0.5, "Finding the opening and closing…")
+                max_len = 20.0 if s.video_format == "long" else max(4.0, s.clip_max * 2)
+                intro, outro, notes = find_bookends(
+                    footage, order, max_len, s.clip_min,
+                    listen=lambda f, a, d: listen(f, a, d, "small", lang, cancel),
+                    progress=lambda msg: progress(0.5, msg), cancel=cancel)
+                if cancel.is_set():
+                    raise Cancelled()
+                ends = [c for c in (intro, outro) if c is not None]
+                sel = copy.copy(s)
+                sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
+            progress(0.8, "Choosing the best moments…")
+            body = select(footage, analyses, sel, order, existing=existing + [c for c in (intro, outro) if c])
+            clips = ([intro] if intro else []) + body + ([outro] if outro else [])
+            apply_edit_style(clips, footage, analyses, s)
+            return analyses, clips, notes
 
         def done(res):
-            analyses, clips = res
+            analyses, clips, notes = res
             self.analyses.update(analyses)
             if not clips:
                 QMessageBox.information(self, APP_NAME, "No suitable moments were found. Try shorter clip lengths "
@@ -596,9 +734,13 @@ class MainWindow(QMainWindow):
             self.tl.fit()
             self.viewer.seek(0)
             self._schedule_audio()
-            self.lbl_status.setText(f"Auto edit: {len(clips)} clips, {self.project.duration:.1f} s")
+            msg = f"Auto edit: {len(clips)} clips, {self.project.duration:.1f} s"
+            if s.replace_timeline and self.project.duration < 0.85 * s.target_duration:
+                msg += (f" (only this much distinct material for the {s.target_duration:.0f} s target — "
+                        "lower 'Gap between reuses' or allow more uses per footage)")
+            self.lbl_status.setText(msg + (" · " + " · ".join(notes) if notes else ""))
 
-        self.tasks.submit("Auto edit", job, done, self._task_error("Auto edit"))
+        self.tasks.submit(name, job, done, self._task_error("Auto edit"))
 
     def _best_for(self, fid: str, duration: Optional[float] = None, existing=None) -> Optional[TimelineClip]:
         a = self.analyses.get(fid)
@@ -658,7 +800,7 @@ class MainWindow(QMainWindow):
         elif action == "delete_proxy":
             for fid in ids:
                 f = self.project.footage[fid]
-                self.viewer.decoders.drop()
+                self.viewer.drop_decoders()
                 if f.proxy_path and os.path.exists(f.proxy_path):
                     try:
                         os.remove(f.proxy_path)
@@ -670,13 +812,348 @@ class MainWindow(QMainWindow):
             self.queue_analysis(ids, force=True)
         elif action == "transcribe":
             self.queue_transcription(ids, force=True)
+        elif action == "detect_log":
+            self.detect_log(ids)
+        elif action == "import_lut_log":
+            self.import_lut("log", ids)
 
     def set_log_profile(self, ids: list[str], key: str):
         self.project_checkpoint()
         for fid in ids:
-            if fid in self.project.footage:
-                self.project.footage[fid].log_profile = key
+            f = self.project.footage.get(fid)
+            if f is not None:
+                f.log_profile, f.log_note, f.log_pending = key, "Chosen manually", False
         self.refresh_all(captions=False)
+
+    # ================================================================== camera / log detection
+    def _identify_camera(self, f: Footage, info) -> None:
+        """At import: name the camera and apply a log profile the file states outright. When only the camera
+        is known, the profile is decided from the picture once analysis has thumbnails."""
+        try:
+            cam = camera.detect(f.path, info)
+        except Exception:  # noqa: BLE001 - identification is best effort
+            return
+        f.camera = cam.label
+        if not self.a_auto_log.isChecked():
+            return
+        if cam.log_profile is not None:
+            f.log_profile, f.log_note = self._official_profile(cam.log_profile), f"Detected from {cam.source}"
+        else:
+            f.log_guess, f.log_pending = cam.guess, True
+
+    def _log_from_picture(self, f: Footage, frames) -> None:
+        profile, note = camera.decide_from_picture(f.log_guess, f.camera, frames)
+        if profile is not None and profile != f.log_profile and f.log_profile == "none":
+            self.project.set_detected_profile(f.id, self._official_profile(profile), f"Detected: {note}")
+            self.lbl_status.setText(f"{f.name}: {profile_label(profile)} ({note})")
+        else:
+            f.log_note, f.log_pending = note, False
+
+    def detect_log(self, ids: list[str]):
+        """Re-run camera identification and choose the log profile for the given footage (in the background)."""
+        ids = [fid for fid in ids if fid in self.project.footage]
+        if not ids:
+            return
+        footage = {fid: self.project.footage[fid] for fid in ids}
+        thumbs = {fid: list(self.analyses[fid].thumbs) for fid in ids
+                  if fid in self.analyses and len(self.analyses[fid].thumbs)}
+        use_proxies = self.project.settings.use_proxies
+        name = "Detect log profile" + (f" ({len(ids)} files)" if len(ids) > 1 else "")
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=2)
+            results = []
+            try:
+                for k, (fid, f) in enumerate(footage.items()):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    progress(k / len(footage), f"{name}: {f.name}")
+                    try:
+                        cam = camera.detect(f.path, probe(f.path))
+                        if cam.log_profile is not None:
+                            profile, note = cam.log_profile, f"from {cam.source}"
+                        else:
+                            frames = thumbs.get(fid)
+                            if frames is None:   # not analyzed yet: sample the picture
+                                dec = pool.get(f, use_proxies, 360)
+                                frames = [img for img in (dec.frame_at(f.duration * (i + 0.5) / 5) for i in range(5))
+                                          if img is not None]
+                            profile, note = camera.decide_from_picture(cam.guess, cam.label, frames)
+                        results.append((fid, cam.label, profile, note, None))
+                    except Exception as e:  # noqa: BLE001
+                        results.append((fid, None, None, None, str(e)))
+                return results
+            finally:
+                pool.close()
+
+        def done(results):
+            self.project_checkpoint()
+            lines = []
+            for fid, label, profile, note, err in results:
+                f = self.project.footage.get(fid)
+                if f is None:
+                    continue
+                if err:
+                    lines.append(f"{f.name}: {err}")
+                    continue
+                f.camera = label
+                if profile is not None:
+                    f.log_profile = self._official_profile(profile)
+                f.log_note, f.log_pending = (f"Detected {note}" if profile else note), False
+                lines.append(f"{f.name}: {f.camera or 'unknown camera'} → {profile_label(f.log_profile)}"
+                             + ("" if profile else f"  ({note})"))
+            self.project.dirty = True
+            self.refresh_all(captions=False)
+            self.inspector.set_clip(self.selected_clip())
+            self.viewer.refresh()
+            if len(lines) == 1:
+                QTimer.singleShot(0, lambda: self.lbl_status.setText(lines[0]))
+            elif lines:
+                QMessageBox.information(self, APP_NAME, "Camera detection:\n\n" + "\n".join(lines[:25])
+                                        + (f"\n… and {len(lines) - 25} more" if len(lines) > 25 else ""))
+
+        self.tasks.submit(name, job, done, self._task_error(name))
+
+    # ================================================================== LUTs
+    def import_lut(self, target: str, ids: Optional[list[str]] = None):
+        """Import .cube files into the LUT library. target: "library", "log" (conversion for footage `ids` or
+        the selected clip's footage) or "look" (creative LUT on the selected clip)."""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import LUT", self.qs.value("lut_import_dir", ""),
+                                                "Cube LUT or .zip (*.cube *.zip);;All files (*)")
+        if not paths:
+            return
+        imported = self._import_lut_files(paths)
+        if not imported:
+            return
+        lut = imported[0]
+        clip = self.selected_clip()
+        if target == "log":
+            ids = ids or ([clip.footage_id] if clip else [])
+            if ids:
+                self.set_log_profile(ids, lut_profile(lut))
+        elif target == "look" and clip is not None:
+            self.project_checkpoint()
+            clip.grade.look = lut
+            self.inspector.set_clip(clip)
+            self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText(f"Imported {len(imported)} LUT(s)" if len(imported) > 1
+                                else f"Imported LUT {lutlib.lut_name(lut)}")
+
+    def _import_lut_files(self, paths: list[str]) -> list[str]:
+        """Copy .cube files (or those inside .zip archives / folders) into the LUT library."""
+        if os.path.isfile(paths[0]):
+            self.qs.setValue("lut_import_dir", os.path.dirname(paths[0]))
+        imported, errors = [], []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for path in paths:
+                try:
+                    imported += lutlib.import_any(path)
+                except (lutlib.LutError, OSError, zipfile.BadZipFile) as e:
+                    errors.append(f"{os.path.basename(path)}: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if errors:
+            QMessageBox.warning(self, APP_NAME, "Some LUTs could not be imported:\n\n" + "\n".join(errors[:12]))
+        self.inspector.reload_luts()
+        return imported
+
+    def _official_luts(self) -> dict:
+        """{built-in log profile: official LUT path} chosen in the official-LUT dialog (existing files only)."""
+        out = {}
+        for e in lutlib.OFFICIAL_LUTS:
+            path = self.qs.value(f"official_lut/{e.profile}", "", type=str)
+            if path and os.path.exists(path):
+                out[e.profile] = path
+        return out
+
+    def _official_profile(self, profile: str) -> str:
+        """The official LUT to use instead of a detected built-in profile, when the user set one up."""
+        if not self.qs.value("official_lut_auto", True, type=bool):
+            return profile
+        path = self._official_luts().get(profile)
+        return lut_profile(path) if path else profile
+
+    def official_luts_dialog(self):
+        dlg = OfficialLutDialog(self._official_luts(), self.qs.value("official_lut_auto", True, type=bool),
+                                self._import_lut_files, self)
+        if dlg.exec() != OfficialLutDialog.Accepted:
+            return
+        mapping = dlg.mapping()
+        for e in lutlib.OFFICIAL_LUTS:
+            self.qs.setValue(f"official_lut/{e.profile}", mapping.get(e.profile, ""))
+        self.qs.setValue("official_lut_auto", dlg.chk_auto.isChecked())
+        if not dlg.chk_apply.isChecked():
+            return
+        # Footage converted with a built-in profile that now has an official LUT.
+        changed = 0
+        self.project_checkpoint()
+        for f in self.project.footage.values():
+            if f.log_profile in mapping:
+                f.log_profile = lut_profile(mapping[f.log_profile])
+                changed += 1
+        self.project.dirty = changed > 0 or self.project.dirty
+        self.refresh_all(captions=False)
+        self.inspector.set_clip(self.selected_clip())
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText(f"Official LUTs: {changed} footage file(s) switched" if changed
+                                else "Official LUTs saved")
+
+    # ================================================================== cache
+    def _init_cache_root(self):
+        path = self.qs.value("cache_dir", "", type=str)
+        if not path:
+            return
+        set_cache_root(path)
+        try:
+            cache_root()
+        except OSError:
+            set_cache_root(None)   # keep the setting: the drive may just be disconnected
+            QTimer.singleShot(0, lambda: QMessageBox.warning(
+                self, APP_NAME, f"The cache folder is not available:\n{path}\n\n"
+                                "The default cache folder is used for this session."))
+
+    def cache_dialog(self):
+        CacheDialog(self._change_cache_folder, self._clear_cache, self).exec()
+
+    def _change_cache_folder(self, path: str) -> bool:
+        if self.tasks.busy:
+            QMessageBox.information(self, APP_NAME, "Wait for the background tasks to finish (or cancel them) "
+                                                    "before changing the cache folder.")
+            return False
+        old = cache_root()
+        new = Path(path) if path else default_cache_root()
+        if os.path.normcase(str(new.resolve())) == os.path.normcase(str(old.resolve())):
+            return False
+        if any(new.resolve().is_relative_to((old / kind).resolve()) for kind in CACHE_KINDS):
+            QMessageBox.warning(self, APP_NAME, "Choose a folder outside the current cache's sub-folders.")
+            return False
+        try:
+            new.mkdir(parents=True, exist_ok=True)
+            test = new / ".kangedit_write_test"
+            test.write_bytes(b"")
+            test.unlink()
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"This folder cannot be used for the cache:\n{e}")
+            return False
+        copyable = folder_size(old / "proxies") + folder_size(old / "analysis")
+        copy_files = False
+        if copyable:
+            r = QMessageBox.question(
+                self, APP_NAME, f"Copy the files from the current cache folder to the new one?\n\n"
+                                f"From: {old}\nTo: {new}\n\nProxies and analysis, {fmt_bytes(copyable)}. The old folder "
+                                f"is left as it is (delete it yourself when you no longer need it). If you don't copy, "
+                                f"they are recreated in the new folder when needed.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            if r == QMessageBox.Cancel:
+                return False
+            copy_files = r == QMessageBox.Yes
+        set_cache_root(path or None)
+        if path:
+            self.qs.setValue("cache_dir", path)
+        else:
+            self.qs.remove("cache_dir")
+        self._schedule_audio()
+        if copy_files:
+            self._copy_cache(old, cache_root())
+        self.lbl_status.setText(f"Cache folder: {cache_root()}")
+        return True
+
+    def _copy_cache(self, old: Path, new: Path):
+        """Copy proxies and analysis from `old` into the cache folder `new` (in the background) and point the
+        project's footage at the copies. The old folder is not touched."""
+
+        def job(progress, cancel):
+            files = [(kind, e) for kind in ("proxies", "analysis") if (old / kind).is_dir()
+                     for e in os.scandir(old / kind) if e.is_file()]
+            total = sum(e.stat().st_size for _, e in files) or 1
+            done_bytes, copied = 0, 0
+            for kind, e in files:
+                if cancel.is_set():
+                    break
+                size = e.stat().st_size
+                dst = new / kind / e.name
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if not (dst.exists() and dst.stat().st_size == size):   # same cache key -> same content
+                        part = dst.with_name(dst.name + ".part")
+                        shutil.copy2(e.path, part)
+                        os.replace(part, dst)
+                    copied += 1
+                except OSError:
+                    pass   # unreadable: recreated when needed
+                done_bytes += size
+                progress(done_bytes / total, f"Copying cache {copied}/{len(files)}")
+            return copied
+
+        def finish(_=None):
+            self.viewer.drop_decoders()
+            self._relink_cache_paths(old)
+            self.refresh_all(captions=False)
+            self.viewer.refresh()
+
+        def failed(msg: str):
+            finish()
+            self._task_error("Copying the cache")(msg)
+
+        self.tasks.submit("Copying cache", job, finish, failed)
+
+    def _offer_legacy_cache(self):
+        """Caches used to live in the per-user data folder; offer once to copy them next to the app."""
+        if self.qs.value("cache_dir", "", type=str) or self.qs.value("legacy_cache_offered", False, type=bool):
+            return
+        old, new = legacy_cache_root(), cache_root()
+        if not old.is_dir() or os.path.normcase(str(old.resolve())) == os.path.normcase(str(new.resolve())):
+            return
+        size = folder_size(old / "proxies") + folder_size(old / "analysis")
+        self.qs.setValue("legacy_cache_offered", True)
+        if not size:
+            return
+        r = QMessageBox.question(
+            self, APP_NAME, f"The cache folder is now next to the app:\n{new}\n\nCopy the proxies and analysis from "
+                            f"the previous cache folder ({fmt_bytes(size)})?\n{old}\n\nThe old folder is left as it is.")
+        if r == QMessageBox.Yes:
+            self._copy_cache(old, new)
+
+    def _relink_cache_paths(self, old: Path):
+        """Point footage at its cache files in the current cache folder after they were moved from `old`."""
+        old_key = os.path.normcase(str(old.resolve()))
+        for f in self.project.footage.values():
+            for attr in ("proxy_path", "analysis_path"):
+                p = getattr(f, attr)
+                if not p:
+                    continue
+                pp = Path(p)
+                if os.path.normcase(str(pp.parent.parent.resolve())) != old_key:
+                    continue
+                cand = cache_root() / pp.parent.name / pp.name
+                if cand.exists():
+                    setattr(f, attr, str(cand))
+                    self.project.dirty = True
+
+    def _clear_cache(self, kinds: list[str]):
+        if self.tasks.busy:
+            QMessageBox.information(self, APP_NAME, "Wait for the background tasks to finish (or cancel them) "
+                                                    "before clearing the cache.")
+            return
+        if "proxies" in kinds:
+            self.viewer.drop_decoders()
+        if "tmp" in kinds:
+            self.viewer.stop()
+            self.viewer.set_audio(None)   # releases the preview audio file
+        freed, locked = clear_cache(kinds)
+        for f in self.project.footage.values():
+            if f.proxy_path and not os.path.exists(f.proxy_path):
+                f.proxy_path = None
+            if f.analysis_path and not os.path.exists(f.analysis_path):
+                f.analysis_path = None
+        self.refresh_all(captions=False)
+        if "tmp" in kinds:
+            self._schedule_audio()
+        self.lbl_status.setText(f"Cleared {fmt_bytes(freed)} from the cache"
+                                + (f" ({locked} item(s) in use were kept)" if locked else ""))
 
     # ================================================================== timeline editing
     def _after_structure_change(self):
@@ -717,20 +1194,51 @@ class MainWindow(QMainWindow):
         self._after_structure_change()
 
     def clip_action(self, action: str, clip_id: str):
+        if action == "select_all":
+            self.tl.select_all()
+            return
+        if action.startswith("sound_"):
+            self._sound_action(action, clip_id)
+            return
+        if action.startswith(("transition:", "split:")):
+            key, val = action.split(":", 1)
+            ids = set(self.tl.selected_ids()) if clip_id in self.tl.selected_ids() else {clip_id}
+            self.project_checkpoint()
+            for x in self.project.clips:
+                if x.id in ids:
+                    if key == "transition":
+                        x.transition = val
+                        if val:
+                            x.audio_split = 0.0
+                    else:
+                        x.audio_split = float(val)
+                        if x.audio_split:
+                            x.transition = ""
+            self._on_timeline_edited()
+            self.tl.refresh()
+            self.inspector.set_clip(self.selected_clip())
+            self._schedule_audio()
+            self._update_title()
+            return
         i = self.project.index_of(clip_id) if clip_id else -1
         if i < 0:
             return
         c = self.project.clips[i]
+        # Act on the whole selection when the clip is part of it.
+        sel = self.tl.selected_ids()
+        targets = [x for x in self.project.clips if x.id in sel] if clip_id in sel else [c]
         if action == "delete":
             self.project_checkpoint()
-            self.project.clips.pop(i)
+            gone = {x.id for x in targets}
+            self.project.clips = [x for x in self.project.clips if x.id not in gone]
             self.tl.selected = ""
             self._after_structure_change()
         elif action == "duplicate":
             self.project_checkpoint()
-            d = TimelineClip.from_dict(c.to_dict())
-            d.id = new_id()
-            self.project.clips.insert(i + 1, d)
+            for x in reversed(targets):
+                d = TimelineClip.from_dict(x.to_dict())
+                d.id = new_id()
+                self.project.clips.insert(self.project.index_of(x.id) + 1, d)
             self._after_structure_change()
         elif action == "split":
             starts = self.project.clip_starts()
@@ -738,19 +1246,100 @@ class MainWindow(QMainWindow):
                 self.viewer.seek(starts[i] + c.duration / 2)
             self.split_at_playhead()
         elif action == "alt_moment":
-            if c.footage_id not in self.analyses:
-                return
-            alt = self._best_for(c.footage_id, c.duration, existing=list(self.project.clips))
-            if alt is None:
+            replaced = 0
+            self.project_checkpoint()
+            for x in targets:
+                if x.footage_id not in self.analyses:
+                    continue
+                alt = self._best_for(x.footage_id, x.duration, existing=list(self.project.clips))
+                if alt is not None:
+                    x.src_in, x.src_out, x.score = alt.src_in, alt.src_out, alt.score
+                    replaced += 1
+            if not replaced:
                 self.lbl_status.setText("No other moment available in this footage (gap / repeat rules).")
                 return
-            self.project_checkpoint()
-            c.src_in, c.src_out, c.score = alt.src_in, alt.src_out, alt.score
             self._after_structure_change()
-        elif action in ("auto_color", "reset_color", "copy_grade"):
-            self.tl.selected = clip_id
-            self.inspector.set_clip(c)
-            self.inspector_request({"copy_grade": "copy_grade_all"}.get(action, action))
+        elif action == "auto_color":
+            self._auto_color(targets)
+        elif action == "reset_color":
+            self.project_checkpoint()
+            for x in targets:
+                x.grade = Grade()
+            self.inspector.set_clip(self.selected_clip())
+            self.viewer.refresh()
+            self._update_title()
+        elif action == "copy_grade":
+            if len(targets) > 1:
+                self.project_checkpoint()
+                for x in targets:
+                    x.grade = Grade.from_dict(c.grade.to_dict())
+                self.viewer.refresh()
+                self._update_title()
+            else:
+                self.tl.selected = clip_id
+                self.inspector.set_clip(c)
+                self.inspector_request("copy_grade_all")
+
+    # ================================================================== sound effects
+    def add_sounds(self, paths: list[str], t: Optional[float] = None, names: Optional[list[str]] = None):
+        """Put audio files on the SFX layer at timeline time t (default: the playhead), one after another."""
+        t = self.viewer.t if t is None else t
+        added, bad = [], []
+        for k, path in enumerate(paths):
+            if os.path.normcase(os.path.dirname(os.path.abspath(path))) != os.path.normcase(str(sfx_dir())):
+                try:
+                    path = sfx.import_file(path)     # keep projects working if the original moves
+                except OSError as e:
+                    bad.append(f"{os.path.basename(path)}: {e}")
+                    continue
+            dur = sfx.duration(path)
+            if dur <= 0:
+                bad.append(f"{os.path.basename(path)}: not a readable audio file")
+                continue
+            name = names[k] if names and k < len(names) else os.path.splitext(os.path.basename(path))[0]
+            added.append(SoundClip(path, round(t, 3), 0.0, round(dur, 3), 1.0, name))
+            t += dur
+        if bad:
+            QMessageBox.warning(self, APP_NAME, "Some sounds could not be added:\n\n" + "\n".join(bad[:10]))
+        if not added:
+            return
+        self.project_checkpoint()
+        self.project.sounds += added
+        self.sfx_panel.refresh_library()
+        self.tl.selected_sound = added[-1].id
+        self.tl.refresh()
+        self._sounds_changed()
+        self.lbl_status.setText(f"Added sound “{added[0].name}” at {fmt_time(added[0].start, frames=False)}"
+                                if len(added) == 1 else f"Added {len(added)} sounds")
+
+    def _sounds_changed(self):
+        self.project.dirty = True
+        self._schedule_audio()
+        self._update_title()
+
+    def _sound_action(self, action: str, sound_id: str):
+        x = next((s for s in self.project.sounds if s.id == sound_id), None)
+        if x is None:
+            return
+        if action == "sound_preview":
+            self.sfx_panel.preview_file(x.path)
+            return
+        self.project_checkpoint()
+        if action == "sound_delete":
+            self.project.sounds.remove(x)
+            self.tl.selected_sound = ""
+        elif action == "sound_to_playhead":
+            x.start = round(self.viewer.t, 3)
+        elif action.startswith("sound_volume:"):
+            x.volume = float(action.split(":", 1)[1])
+        self.tl.refresh()
+        self._sounds_changed()
+
+    def _delete_selected(self):
+        if self.tl.selected_sound:
+            self._sound_action("sound_delete", self.tl.selected_sound)
+        else:
+            self.clip_action("delete", self.tl.selected)
 
     def undo(self):
         if self.project.undo():
@@ -785,28 +1374,24 @@ class MainWindow(QMainWindow):
 
     def inspector_request(self, req: str):
         clip = self.selected_clip()
+        if req in ("import_lut_log", "import_lut_look"):
+            self.import_lut(req.rsplit("_", 1)[1])
+            return
+        if req == "detect_log":
+            if clip is not None:
+                self.detect_log([clip.footage_id])
+            return
+        if req == "detect_log_all":
+            self.detect_log(list(self.project.footage))
+            return
         if req == "auto_color_all":
-            if not self.project.clips:
-                return
-            self.project_checkpoint()
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                for k, c in enumerate(self.project.clips):
-                    self.lbl_status.setText(f"Auto color {k + 1}/{len(self.project.clips)}")
-                    QApplication.processEvents()
-                    self._auto_color(c)
-            finally:
-                QApplication.restoreOverrideCursor()
-            self.lbl_status.setText("Auto color applied to all clips")
+            self._auto_color(list(self.project.clips))
+            return
         elif clip is None:
             return
         elif req == "auto_color":
-            self.project_checkpoint()
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                self._auto_color(clip)
-            finally:
-                QApplication.restoreOverrideCursor()
+            self._auto_color([clip])
+            return
         elif req == "reset_color":
             self.project_checkpoint()
             clip.grade = Grade()
@@ -818,10 +1403,53 @@ class MainWindow(QMainWindow):
         self.viewer.refresh()
         self._update_title()
 
-    def _auto_color(self, clip: TimelineClip):
-        f = self.project.footage[clip.footage_id]
-        frames = self.viewer.grab_frames(clip)
-        clip.grade = auto_correct(frames, f.log_profile, f.tonemap, base=clip.grade)
+    def _auto_color(self, clips: list[TimelineClip]):
+        """Auto-grade clips in the background (progress + Cancel in the status bar); applied in one undo step."""
+        jobs = []
+        for c in clips:
+            f = self.project.footage.get(c.footage_id)
+            if f is not None:
+                probe_clip = TimelineClip(c.footage_id, c.src_in, c.src_out, id=c.id)
+                jobs.append((probe_clip, f.log_profile, f.tonemap, Grade.from_dict(c.grade.to_dict())))
+        if not jobs:
+            return
+        use_proxies = self.project.settings.use_proxies
+        footage = dict(self.project.footage)
+        name = "Auto color" if len(jobs) == 1 else f"Auto color {len(jobs)} clips"
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=4)   # own decoders: don't disturb the viewer's
+            try:
+                grades = {}
+                for k, (c, lp, tm, base) in enumerate(jobs):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    progress(k / len(jobs), f"{name}: {k + 1}/{len(jobs)}")
+                    dec = pool.get(footage[c.footage_id], use_proxies, 360)
+                    frames = []
+                    for i in range(5):
+                        img = dec.frame_at(c.src_in + c.duration * (i + 0.5) / 5)
+                        if img is not None:
+                            frames.append(img.copy())
+                    grades[c.id] = auto_correct(frames, lp, tm, base=base)
+                progress(1.0, name)
+                return grades
+            finally:
+                pool.close()
+
+        def done(grades: dict):
+            targets = [(c, grades[c.id]) for c in self.project.clips if c.id in grades]
+            if not targets:
+                return
+            self.project_checkpoint()
+            for c, g in targets:
+                c.grade = g
+            self.project.dirty = True
+            self.inspector.set_clip(self.selected_clip())
+            self.viewer.refresh()
+            self._update_title()
+
+        self.tasks.submit(name, job, done, self._task_error(name))
 
     # ================================================================== captions
     def update_captions(self):
@@ -896,7 +1524,7 @@ class MainWindow(QMainWindow):
         start = os.path.splitext(self.project.path)[0] + ".srt" if self.project.path else "captions.srt"
         path, _ = QFileDialog.getSaveFileName(self, "Save subtitles", start, "SubRip (*.srt)")
         if path:
-            write_srt(path, self.captions, self.project.settings.captions)
+            write_srt(path, self.captions, self.project.settings.captions, project_layout(self.project))
             self.lbl_status.setText(f"Saved {path}")
 
     # ================================================================== export
@@ -909,17 +1537,18 @@ class MainWindow(QMainWindow):
         if missing:
             QMessageBox.warning(self, APP_NAME, "Missing source files:\n" + "\n".join(sorted(missing)))
             return
-        dlg = ExportDialog(self.project, bool(self.captions), self)
+        dlg = ExportDialog(self.project, bool(self.captions), self, self.qs.value("gpu_export", True, type=bool))
         if dlg.exec() != ExportDialog.Accepted:
             return
         es = dlg.settings()
+        self.qs.setValue("gpu_export", es.use_gpu)
         proj = self._clone_project()
 
         def done(path):
             r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
                                         QMessageBox.Open | QMessageBox.Ok)
             if r == QMessageBox.Open:
-                os.startfile(path)
+                open_path(path)
 
         self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
                           lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
@@ -930,6 +1559,7 @@ class MainWindow(QMainWindow):
         p.settings = copy.deepcopy(self.project.settings)
         p.footage = {fid: copy.deepcopy(f) for fid, f in self.project.footage.items()}
         p.clips = [TimelineClip.from_dict(c.to_dict()) for c in self.project.clips]
+        p.sounds = [SoundClip.from_dict(x.to_dict()) for x in self.project.sounds]
         return p
 
     # ================================================================== preview audio
@@ -978,12 +1608,15 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Keyboard shortcuts", (
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
-            "S — split at playhead\nDel — delete clip\nCtrl+D — duplicate clip\n"
-            "R — replace clip with another best moment\n"
+            "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
+            "Ctrl+A — select all clips\nR — replace clip with another best moment\n"
+            "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline\n"
             "Ctrl+wheel on timeline — zoom\n\n"
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
-            "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip"))
+            "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
+            "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
+            "SFX layer: drag sounds to move, edges to trim, right-click for volume"))
 
     def closeEvent(self, e):
         if not self._confirm_discard():
@@ -992,5 +1625,5 @@ class MainWindow(QMainWindow):
         self.viewer.stop()
         self.tasks.shutdown()
         self._audio_cancel.set()
-        self.viewer.decoders.close()
+        self.viewer.shutdown()
         e.accept()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -42,19 +43,24 @@ def place(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float = 1.0,
 
 
 def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
-           ox: float = 0.0, oy: float = 0.0) -> np.ndarray:
-    """Reframe an RGB image onto a tw x th canvas (viewer path)."""
+           ox: float = 0.0, oy: float = 0.0,
+           pixel_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None) -> np.ndarray:
+    """Reframe an RGB image onto a tw x th canvas (viewer path).
+
+    `pixel_fn` (a per-pixel color transform) is applied only to the visible pixels, before padding.
+    """
+    fn = pixel_fn or (lambda a: a)
     sh, sw = img.shape[:2]
     p = place(sw, sh, tw, th, mode, zoom, ox, oy)
     scaled = cv2.resize(img, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA
                         if p.scaled_w < sw else cv2.INTER_LINEAR)
-    crop = scaled[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w]
+    crop = fn(np.ascontiguousarray(scaled[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w]))
     if p.crop_w == tw and p.crop_h == th:
         return np.ascontiguousarray(crop)
     if mode == "blur":
         bp = place(sw, sh, tw, th, "fill")
         bg = cv2.resize(img, (max(2, bp.scaled_w // 8), max(2, bp.scaled_h // 8)), interpolation=cv2.INTER_AREA)
-        bg = cv2.GaussianBlur(bg, (0, 0), 3)
+        bg = cv2.GaussianBlur(fn(bg), (0, 0), 3)
         bg = cv2.resize(bg, (bp.scaled_w, bp.scaled_h), interpolation=cv2.INTER_LINEAR)
         canvas = np.ascontiguousarray(bg[bp.crop_y:bp.crop_y + th, bp.crop_x:bp.crop_x + tw])
         canvas = (canvas * 0.7).astype(np.uint8)

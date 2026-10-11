@@ -15,7 +15,8 @@ from typing import Optional
 
 import numpy as np
 
-from .analysis import SAMPLE_RATE, Analysis
+from .analysis import SAMPLE_RATE, WAVE_RATE, Analysis
+from .edits import TRANSITIONS
 from .models import Footage, TimelineClip
 
 
@@ -31,6 +32,14 @@ STYLE_LABELS = {
     "people": "People / talking (faces + speech)",
     "scenic": "Scenic / travel (colour + stable shots)",
 }
+
+TRANSITION_MODES = {
+    "off": "Off (straight cuts)",
+    "scenes": "Between scenes (different footage)",
+    "all": "Every cut",
+}
+TRANSITION_STYLES = {k: v[0] for k, v in TRANSITIONS.items()} | {"mixed": "Mixed (varies)"}
+_MIXED = ["dissolve", "slide", "zoom", "dip_black", "wipe"]
 
 ORDERS = {
     "hook": "Hook first (best clip, then chronological)",
@@ -52,6 +61,11 @@ class AutoEditSettings:
     style: str = "balanced"
     similarity: float = 0.93        # cosine similarity above which segments count as repeats
     replace_timeline: bool = True
+    transitions: str = "off"        # TRANSITION_MODES key
+    transition_style: str = "dissolve"
+    transition_dur: float = 0.5
+    jl_cuts: bool = False           # J/L split edits where the sound leads or trails a cut
+    bookends: bool = False          # find the opening and closing (file names, recording time, speech)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -62,17 +76,81 @@ FORMAT_PRESETS = {
     "short": dict(
         label="Short-form (Reels / TikTok / Shorts)",
         aspect="9:16 (Vertical)",
-        settings=dict(target_duration=30.0, clip_min=1.2, clip_max=3.0, min_gap=3.0, order="hook"),
+        settings=dict(target_duration=30.0, clip_min=1.2, clip_max=3.0, min_gap=3.0, order="hook",
+                      transitions="off", transition_style="slide", transition_dur=0.3, jl_cuts=False,
+                      bookends=False),
         hint="Vertical 9:16, 15-60 s, fast 1-3 s cuts, strongest moment first as the hook.",
     ),
     "long": dict(
         label="Long-form (YouTube / film)",
         aspect="16:9 (Landscape)",
-        settings=dict(target_duration=180.0, clip_min=4.0, clip_max=10.0, min_gap=8.0, order="chronological"),
+        settings=dict(target_duration=180.0, clip_min=4.0, clip_max=10.0, min_gap=8.0, order="chronological",
+                      transitions="scenes", transition_style="dissolve", transition_dur=0.8, jl_cuts=True,
+                      bookends=True),
         hint="Landscape 16:9, several minutes, longer 4-10 s shots in story order.",
     ),
     "custom": dict(label="Custom", aspect=None, settings={}, hint="Set every option yourself."),
 }
+
+
+def suggest_duration(video_format: str, total: float) -> Optional[float]:
+    """Default target length from the total length of the footage used.
+
+    Long-form keeps about a quarter of the footage (1-20 min, and never more than the footage can give
+    once segments keep their gaps); short-form stays a short social clip."""
+    if total <= 0:
+        return None
+    if video_format == "long":
+        d = min(max(total * 0.25, 60.0), 20 * 60.0, total * 0.7)
+        return float(max(10.0, round(d / 10.0) * 10.0))
+    if video_format == "short":
+        return float(min(30.0, max(10.0, round(total * 0.5))))
+    return None
+
+
+def _loud(a: Optional[Analysis], t0: float, t1: float) -> bool:
+    """Speech / sound present in [t0, t1] (source time), relative to the footage's own level."""
+    if a is None or a.wave.size < 2:
+        return False
+    i0, i1 = int(max(0.0, t0) * WAVE_RATE), int(max(0.0, t1) * WAVE_RATE) + 1
+    seg = a.wave[i0:i1]
+    if seg.size == 0:
+        return False
+    return float(seg.mean()) > max(0.12, 1.3 * float(np.median(a.wave)))
+
+
+def apply_edit_style(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict[str, Analysis],
+                     s: AutoEditSettings) -> None:
+    """Transitions and J/L cuts for an automatic edit (in place)."""
+    n_style = 0
+    for k in range(1, len(clips)):
+        a, b = clips[k - 1], clips[k]
+        b.transition, b.audio_split = "", 0.0
+        scene = a.footage_id != b.footage_id or abs(b.src_in - a.src_out) > 30.0
+        bookend = a.label == "opening" or b.label == "closing"
+        if s.transitions == "all" or (s.transitions == "scenes" and (scene or bookend)):
+            style = s.transition_style
+            if style == "mixed":
+                style = _MIXED[n_style % len(_MIXED)]
+                n_style += 1
+            b.transition = "dissolve" if bookend and style not in ("dissolve", "dip_black") else style
+            b.transition_dur = s.transition_dur
+            continue
+        if not s.jl_cuts:
+            continue
+        fa, fb = footage.get(a.footage_id), footage.get(b.footage_id)
+        if not (fa and fb and fa.has_audio and fb.has_audio):
+            continue
+        lead = min(0.8, a.duration / 3, b.duration / 3, b.src_in)                  # J needs room before b
+        lag = min(0.6, a.duration / 3, b.duration / 3, fa.duration - a.src_out)    # L needs room after a
+        b_talks = _loud(analyses.get(b.footage_id), b.src_in, b.src_in + 0.6)
+        a_talks = _loud(analyses.get(a.footage_id), a.src_out - 0.6, a.src_out)
+        # Let the next scene's sound lead in when it starts with sound; let a voice finish over the next
+        # picture when the outgoing clip ends mid-sound. Alternate when both apply.
+        if b_talks and lead >= 0.3 and not (a_talks and k % 2 and lag >= 0.3):
+            b.audio_split = -round(lead, 2)
+        elif a_talks and lag >= 0.3:
+            b.audio_split = round(lag, 2)
 
 
 def _rank(x: np.ndarray) -> np.ndarray:

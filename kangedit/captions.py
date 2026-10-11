@@ -15,10 +15,31 @@ from typing import Optional
 
 import numpy as np
 
+from .config import frame_size
 from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, run
 from .models import CaptionStyle, Footage, Project
 
-WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+WHISPER_MODELS = {
+    "large-v3": "large-v3 — most accurate (slowest)",
+    "large-v3-turbo": "large-v3-turbo — nearly as accurate, much faster",
+    "medium": "medium",
+    "small": "small — fast",
+    "base": "base — faster, less accurate",
+    "tiny": "tiny — fastest, least accurate",
+}
+
+# Word-by-word caption animations (preview and burned-in export draw them the same way).
+ANIMATIONS = {
+    "none": "None (whole caption at once)",
+    "highlight": "Highlight the spoken word (karaoke)",
+    "box": "Highlight box behind the spoken word",
+    "pop": "Pop: words appear as spoken, current word bounces",
+    "reveal": "Reveal: words appear as spoken",
+    "word": "One word at a time (big)",
+}
+POP_MS = 140          # pop-in duration
+POP_SCALE = 1.25      # starting scale of a popping word
+WORD_SCALE = 1.5      # size of the single word in "word" mode
 
 LANGUAGES = [
     ("", "Auto detect"), ("en", "English"), ("id", "Indonesian"), ("es", "Spanish"), ("fr", "French"),
@@ -49,50 +70,77 @@ def _get_model(name: str):
         return _model
 
 
-def _load_audio_16k(path: str) -> np.ndarray:
-    """Decode audio to 16 kHz mono float32 with ffmpeg (independent of PyAV versions)."""
-    res = run([ffmpeg_bin(), "-v", "error", "-nostdin", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = None) -> np.ndarray:
+    """Decode audio (or the part from `start`) to 16 kHz mono float32 with ffmpeg."""
+    rng = (["-ss", f"{start:.3f}"] if start > 0 else []) + (["-t", f"{duration:.3f}"] if duration else [])
+    res = run([ffmpeg_bin(), "-v", "error", "-nostdin"] + rng + ["-i", path, "-vn", "-ac", "1", "-ar", "16000",
                "-f", "f32le", "-"])
     if res.returncode != 0:
         raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or "audio decode failed")
     return np.frombuffer(res.stdout, dtype=np.float32).copy()
 
 
-def transcribe(footage: Footage, model_name: str = "small", language: str = "",
+def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
+                     progress=None, cancel: Optional[threading.Event] = None, offset: float = 0.0) -> tuple[list[dict], str]:
+    """Words [{"s", "e", "w"}] (times + offset) and the detected language, decoded for accuracy:
+    beam search with temperature fallback, voice-activity filtering, and hallucination guards."""
+    model = _get_model(model_name)
+    segments, info = model.transcribe(
+        audio,
+        language=language or None,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+        beam_size=5,
+        best_of=5,
+        temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        condition_on_previous_text=False,       # no runaway repetition from earlier mistakes
+        hallucination_silence_threshold=2.0,    # drop invented text over long silences
+    )
+    words: list[dict] = []
+    dur = info.duration or 1.0
+    for seg in segments:
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        if seg.no_speech_prob > 0.75 and seg.avg_logprob < -0.8:
+            continue    # almost certainly noise transcribed as words
+        for w in seg.words or []:
+            text = w.word.strip()
+            if text:
+                words.append({"s": round(float(w.start) + offset, 3), "e": round(float(w.end) + offset, 3), "w": text})
+        if progress:
+            progress(min(0.99, seg.end / dur))
+    return words, info.language or language
+
+
+def listen(footage: Footage, start: float, duration: float, model_name: str = "small",
+           language: str = "", cancel: Optional[threading.Event] = None) -> list[dict]:
+    """Quick transcript of part of a file (source times), e.g. to spot an opening or closing phrase."""
+    audio = _load_audio_16k(footage.path, start, duration)
+    if audio.size == 0:
+        return []
+    return transcribe_audio(audio, model_name, language, None, cancel, offset=start)[0]
+
+
+def transcribe(footage: Footage, model_name: str = "large-v3", language: str = "",
                progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None) -> list[dict]:
     if not footage.has_audio:
         footage.transcript = []
         return []
     if progress:
         progress(0.0, f"Loading speech model '{model_name}' (first run downloads it)…")
-    model = _get_model(model_name)
-    src = footage.proxy_path if footage.has_proxy() else footage.path
-    audio = _load_audio_16k(src)
+    audio = _load_audio_16k(footage.path)   # the original's audio: proxies may be re-encoded
     if audio.size == 0:
         footage.transcript = []
         return []
-    segments, info = model.transcribe(
-        audio,
-        language=language or None,
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=400),
-        beam_size=5,
-        condition_on_previous_text=False,
-    )
-    words: list[dict] = []
-    dur = info.duration or footage.duration or 1.0
-    for seg in segments:
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()
-        for w in seg.words or []:
-            text = w.word.strip()
-            if text:
-                words.append({"s": round(float(w.start), 3), "e": round(float(w.end), 3), "w": text})
-        if progress:
-            progress(min(0.99, seg.end / dur), f"Transcribing {footage.name}")
+    words, lang = transcribe_audio(audio, model_name, language,
+                                   (lambda p: progress(p, f"Transcribing {footage.name}")) if progress else None,
+                                   cancel)
     footage.transcript = words
-    footage.transcript_lang = info.language or language
+    footage.transcript_lang = lang
     return words
 
 
@@ -104,14 +152,61 @@ class Caption:
     footage_id: str
     word_idx: list[int] = field(default_factory=list)
     clip_id: str = ""
+    words: list[tuple[float, float, str]] = field(default_factory=list)   # timeline times
+
+    def active_word(self, t: float) -> int:
+        """Index of the word being spoken at timeline time t (the last one started), -1 before the first."""
+        k = -1
+        for i, (s, _, _) in enumerate(self.words):
+            if s <= t + 1e-6:
+                k = i
+            else:
+                break
+        return k
+
+
+@dataclass
+class CaptionLayout:
+    size_pct: float      # font height, % of frame height
+    anchor: str          # "bottom" | "center" | "top": which edge of the text block sits at y
+    y: float             # 0..1 of frame height
+    max_chars: int       # per line
+    max_lines: int
+    max_duration: float  # seconds per caption
+    margin_x: float      # fraction of the width kept clear on each side
+
+
+def caption_layout(style: CaptionStyle, width: int, height: int, video_format: str = "") -> CaptionLayout:
+    """Where and how big captions are. With auto layout this follows the frame ratio and the format:
+    vertical social video keeps them in the lower middle, clear of the app overlays at the bottom and
+    side; landscape long-form uses classic bottom subtitles."""
+    if not style.auto_layout:
+        y = {"bottom": 0.92, "middle": 0.5, "top": 0.08}.get(style.position, 0.92)
+        anchor = {"bottom": "bottom", "middle": "center", "top": "top"}.get(style.position, "bottom")
+        return CaptionLayout(style.size_pct, anchor, y, style.max_chars, style.max_lines, style.max_duration, 0.06)
+    ratio = width / max(1, height)
+    short = video_format != "long"
+    if ratio < 0.75:          # 9:16 Reels / TikTok / Shorts
+        return CaptionLayout(3.9, "center", 0.66, 16, 2, 1.6 if short else 2.5, 0.10)
+    if ratio <= 1.4:          # 1:1, 4:5, 4:3
+        return CaptionLayout(5.0, "bottom", 0.85, 22, 2, 2.0 if short else 3.5, 0.08)
+    if short:                 # landscape social: big and punchy
+        return CaptionLayout(6.0, "bottom", 0.88, 26, 2, 2.0, 0.08)
+    return CaptionLayout(4.8, "bottom", 0.92, 42, 2, 5.0, 0.06)   # landscape long-form subtitles
+
+
+def project_layout(project: Project, aspect: Optional[str] = None, style: Optional[CaptionStyle] = None) -> CaptionLayout:
+    w, h = frame_size(aspect or project.settings.aspect, "1080p")
+    return caption_layout(style or project.settings.captions, w, h, project.settings.video_format)
 
 
 _SENT_END = re.compile(r"[.!?…。！？]$")
 
 
-def build_captions(project: Project, style: Optional[CaptionStyle] = None) -> list[Caption]:
+def build_captions(project: Project, style: Optional[CaptionStyle] = None, aspect: Optional[str] = None) -> list[Caption]:
     style = style or project.settings.captions
-    max_chars_total = style.max_chars * max(1, style.max_lines)
+    lay = project_layout(project, aspect, style)
+    max_chars_total = lay.max_chars * max(1, lay.max_lines)
     out: list[Caption] = []
     t0 = 0.0
     for clip in project.clips:
@@ -130,16 +225,17 @@ def build_captions(project: Project, style: Optional[CaptionStyle] = None) -> li
                 if cur is not None:
                     new_len = len(cur.text) + 1 + len(text)
                     gap = ts - last_end if last_end is not None else 0
-                    if (new_len > max_chars_total or te - cur.start > style.max_duration or gap > 0.7
+                    if (new_len > max_chars_total or te - cur.start > lay.max_duration or gap > 0.7
                             or (_SENT_END.search(cur.text) and len(cur.word_idx) >= 3)):
                         out.append(cur)
                         cur = None
                 if cur is None:
-                    cur = Caption(ts, te, text, clip.footage_id, [idx], clip.id)
+                    cur = Caption(ts, te, text, clip.footage_id, [idx], clip.id, [(ts, te, text)])
                 else:
                     cur.text += " " + text
                     cur.end = te
                     cur.word_idx.append(idx)
+                    cur.words.append((ts, te, text))
                 last_end = te
             if cur is not None:
                 out.append(cur)
@@ -150,9 +246,31 @@ def build_captions(project: Project, style: Optional[CaptionStyle] = None) -> li
             a.end = min(a.end + 0.25, b.start)
     if out:
         out[-1].end = min(out[-1].end + 0.25, project.duration)
-    for c in out:
-        c.text = c.text.upper() if style.uppercase else c.text
+    if style.uppercase:
+        for c in out:
+            c.text = c.text.upper()
+            c.words = [(a, b, w.upper()) for a, b, w in c.words]
     return out
+
+
+def wrap_words(words: list[str], max_chars: int, max_lines: int) -> list[list[int]]:
+    """Word indices per line, balanced like wrap()."""
+    if not words:
+        return []
+    text = " ".join(words)
+    if len(text) <= max_chars or max_lines <= 1:
+        return [list(range(len(words)))]
+    lines, cur, cur_len = [], [], 0
+    target = max(max_chars // 2, len(text) // max_lines + 1)
+    for i, w in enumerate(words):
+        if cur and cur_len + 1 + len(w) > target and len(lines) < max_lines - 1:
+            lines.append(cur)
+            cur, cur_len = [i], len(w)
+        else:
+            cur_len = cur_len + 1 + len(w) if cur else len(w)
+            cur.append(i)
+    lines.append(cur)
+    return lines
 
 
 def wrap(text: str, max_chars: int, max_lines: int) -> list[str]:
@@ -179,13 +297,23 @@ def edit_caption(project: Project, cap: Caption, new_text: str) -> None:
     if not f or not f.transcript or not cap.word_idx:
         return
     idx = sorted(cap.word_idx)
-    first, last = f.transcript[idx[0]], f.transcript[idx[-1]]
-    new_text = new_text.strip()
-    keep = {"s": first["s"], "e": last["e"], "w": new_text}
+    old = [f.transcript[k] for k in idx]
+    new_words = new_text.split()
+    if len(new_words) == len(old):
+        # Same word count: keep every word's timing (needed by the word-by-word animations).
+        new = [{"s": o["s"], "e": o["e"], "w": w} for o, w in zip(old, new_words)]
+    else:
+        # Spread the new words over the old span in proportion to their length.
+        s0, e0 = old[0]["s"], old[-1]["e"]
+        total = sum(len(w) + 1 for w in new_words) or 1
+        new, t = [], s0
+        for w in new_words:
+            d = (e0 - s0) * (len(w) + 1) / total
+            new.append({"s": round(t, 3), "e": round(t + d, 3), "w": w})
+            t += d
     for k in reversed(idx):
         del f.transcript[k]
-    if new_text:
-        f.transcript.insert(idx[0], keep)
+    f.transcript[idx[0]:idx[0]] = new
 
 
 def _ts(t: float, sep: str = ",") -> str:
@@ -199,10 +327,12 @@ def _ts(t: float, sep: str = ",") -> str:
     return f"{h:02d}:{m:02d}:{s:02d}{sep}{ms:03d}"
 
 
-def write_srt(path: str, caps: list[Caption], style: CaptionStyle) -> None:
+def write_srt(path: str, caps: list[Caption], style: CaptionStyle, layout: Optional[CaptionLayout] = None) -> None:
+    max_chars = layout.max_chars if layout else style.max_chars
+    max_lines = layout.max_lines if layout else style.max_lines
     with open(path, "w", encoding="utf-8") as fh:
         for i, c in enumerate(caps, 1):
-            lines = wrap(c.text, style.max_chars, style.max_lines)
+            lines = wrap(c.text, max_chars, max_lines)
             fh.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n" + "\n".join(lines) + "\n\n")
 
 
@@ -212,27 +342,80 @@ def _ass_color(hex_color: str, alpha: int = 0) -> str:
     return f"&H{alpha:02X}{b}{g}{r}".upper()
 
 
-def write_ass(path: str, caps: list[Caption], style: CaptionStyle, width: int, height: int) -> None:
-    size = max(10, int(round(height * style.size_pct / 100.0)))
-    align = {"bottom": 2, "middle": 5, "top": 8}.get(style.position, 2)
-    margin_v = int(height * 0.08) if style.position != "middle" else 0
-    border = 3 if style.box else 1
-    outline = max(1, size // 14) if style.outline or style.box else 0
-    if style.box:
+def _ass_text(t: str) -> str:
+    return t.replace("\\", "/").replace("{", "(").replace("}", ")")
+
+
+def _ass_time(t: float) -> str:
+    t = max(0.0, t)
+    cs = int(round(t * 100))
+    return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
+
+
+def write_ass(path: str, caps: list[Caption], style: CaptionStyle, width: int, height: int,
+              layout: Optional[CaptionLayout] = None) -> None:
+    lay = layout or caption_layout(style, width, height)
+    anim = style.animation if style.animation in ANIMATIONS else "none"
+    size = max(10, int(round(height * lay.size_pct / 100.0)))
+    box = style.box and anim != "box"          # the box animation draws its own highlight
+    border = 3 if box else 1
+    outline = max(1, size // 14) if style.outline or box else 0
+    if box:
         outline = max(4, size // 5)
     back = "&H80000000"
-    out_col = "&H90000000" if style.box else "&H00000000"
+    out_col = "&H90000000" if box else "&H00000000"
+    an = {"bottom": 2, "center": 5, "top": 8}[lay.anchor]
+    pos = f"\\an{an}\\pos({width // 2},{int(round(lay.y * height))})"
+    hl = _ass_color(style.highlight)
+    base = _ass_color(style.color)
+    hl_bord = max(4, size // 4)
+
+    def word_tag(i: int, w: str, active: int, t_rel_ms: int) -> str:
+        w = _ass_text(w)
+        if anim == "highlight" and i == active:
+            return f"{{\\c{hl}}}{w}{{\\c{base}}}"
+        if anim == "box" and i == active:
+            return f"{{\\3c{hl}\\bord{hl_bord}\\shad0}}{w}{{\\3c&H000000&\\bord{outline}}}"
+        if anim in ("pop", "reveal") and i > active:
+            return f"{{\\alpha&HFF&}}{w}{{\\alpha&H00&}}"
+        if anim == "pop" and i == active:
+            s0 = int(POP_SCALE * 100)
+            return (f"{{\\fscx{s0}\\fscy{s0}\\t(0,{POP_MS},\\fscx100\\fscy100)}}{w}"
+                    f"{{\\fscx100\\fscy100}}")
+        return w
+
+    def render(c: Caption, active: int) -> str:
+        words = [w for _, _, w in c.words] or c.text.split()
+        lines = wrap_words(words, lay.max_chars, lay.max_lines)
+        return "\\N".join(" ".join(word_tag(i, words[i], active, 0) for i in line) for line in lines)
+
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\n")
         fh.write(f"PlayResX: {width}\nPlayResY: {height}\n\n")
         fh.write("[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
                  "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
                  "Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        fh.write(f"Style: Default,{style.font},{size},{_ass_color(style.color)},&H000000FF,{out_col},{back},"
-                 f"-1,0,0,0,100,100,0,0,{border},{outline},{0 if style.box else 1},{align},"
-                 f"{int(width * 0.06)},{int(width * 0.06)},{margin_v},1\n\n")
+        fh.write(f"Style: Default,{style.font},{size},{base},&H000000FF,{out_col},{back},"
+                 f"-1,0,0,0,100,100,0,0,{border},{outline},{0 if box else 1},{an},"
+                 f"{int(width * lay.margin_x)},{int(width * lay.margin_x)},0,1\n\n")
         fh.write("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+        def event(t0: float, t1: float, text: str):
+            if t1 - t0 >= 0.01 and text:
+                fh.write(f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{{{pos}}}{text}\n")
+
         for c in caps:
-            lines = wrap(c.text, style.max_chars, style.max_lines)
-            text = r"\N".join(l.replace("{", "(").replace("}", ")") for l in lines)
-            fh.write(f"Dialogue: 0,{_ts(c.start, '.')[:-1]},{_ts(c.end, '.')[:-1]},Default,,0,0,0,,{text}\n")
+            if anim == "none" or not c.words:
+                event(c.start, c.end, render(c, -1) if anim in ("none", "highlight", "box") else _ass_text(c.text))
+                continue
+            starts = [max(c.start, s) for s, _, _ in c.words]
+            if anim in ("highlight", "box") and starts[0] > c.start:
+                event(c.start, starts[0], render(c, -1))
+            for i, (t0, (_, _, w)) in enumerate(zip(starts, c.words)):
+                t1 = starts[i + 1] if i + 1 < len(starts) else c.end
+                if anim == "word":
+                    fs = int(size * WORD_SCALE)
+                    pop = f"\\fscx{int(POP_SCALE * 100)}\\fscy{int(POP_SCALE * 100)}\\t(0,{POP_MS},\\fscx100\\fscy100)"
+                    event(t0, t1, f"{{\\fs{fs}{pop}}}{_ass_text(w)}")
+                else:
+                    event(t0, t1, render(c, i))

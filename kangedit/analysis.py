@@ -1,18 +1,25 @@
-"""Per-footage content analysis: the raw signals used to find the best moments."""
+"""Per-footage content analysis: the raw signals used to find the best moments.
+
+Speed: ffmpeg decodes at the 4 fps sample rate and skips non-reference frames (they are never sampled).
+Long clips are split into segments, and the segments of every queued clip are spread over several CPU
+lanes plus one GPU lane (hardware decoding on NVIDIA, AMD or Intel) when one is available.
+"""
 
 from __future__ import annotations
 
 import os
 import subprocess
 import threading
-from dataclasses import dataclass
-from typing import Optional
+import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
 
 from .config import cache_dir, file_key
-from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, ffmpeg_matrix, popen
+from .ffmpeg import HW_OUTPUT_FORMAT, Cancelled, ProgressCb, ffmpeg_bin, ffmpeg_matrix, hw_decoder, popen
 from .models import Footage
 
 SAMPLE_RATE = 4.0       # analysis samples per second
@@ -21,6 +28,17 @@ THUMB_W = 128
 ANALYSIS_W = 320
 WAVE_RATE = 20          # waveform envelope points per second
 CACHE_VERSION = 2
+
+SEGMENT_MIN = 20.0      # seconds; clips are split into segments at least this long
+OVERLAP = 2             # samples decoded before a segment to seed motion and shake
+
+HW_CODECS = {"h264", "hevc", "vp9", "av1", "mpeg2video", "vc1"}
+# Source pixel format -> format of the frames downloaded from the GPU (4:2:0 only; others decode on the CPU).
+_HW_FORMATS = {"yuv420p": "nv12", "yuvj420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}
+# Rotation (counter-clockwise degrees) applied by hand when ffmpeg's autorotate is off (GPU path).
+_ROTATE = {90: ",transpose=cclock", 180: ",hflip,vflip", 270: ",transpose=clock"}
+
+_hw_failed: set[tuple[str, str]] = set()   # (codec, pix_fmt) the GPU could not decode this session
 
 
 @dataclass
@@ -59,19 +77,20 @@ def analysis_path_for(footage: Footage) -> str:
     return str(cache_dir("analysis") / f"{file_key(footage.path)}_v{CACHE_VERSION}.npz")
 
 
-_face_cascade = None
+_local = threading.local()   # CascadeClassifier is not safe to share between threads
 
 
 def _faces():
-    global _face_cascade
-    if _face_cascade is None:
+    cascade = getattr(_local, "cascade", None)
+    if cascade is None:
         try:
             path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
             c = cv2.CascadeClassifier(path)
-            _face_cascade = c if not c.empty() else False
+            cascade = c if not c.empty() else False
         except Exception:
-            _face_cascade = False
-    return _face_cascade
+            cascade = False
+        _local.cascade = cascade
+    return cascade
 
 
 def _colorfulness(img: np.ndarray) -> float:
@@ -81,49 +100,126 @@ def _colorfulness(img: np.ndarray) -> float:
     return float(np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
 
 
-def _read_audio(path: str, duration: float, cancel: Optional[threading.Event]) -> np.ndarray:
+def _read_audio(path: str, cancel: threading.Event) -> np.ndarray:
     exe = ffmpeg_bin()
     proc = popen([exe, "-v", "error", "-nostdin", "-i", path, "-vn", "-ac", "1", "-ar", "8000",
                   "-f", "s16le", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     chunks = []
-    while True:
-        if cancel is not None and cancel.is_set():
+    try:
+        while True:
+            if cancel.is_set():
+                raise Cancelled()
+            buf = proc.stdout.read(8000 * 2 * 4)
+            if not buf:
+                break
+            chunks.append(buf)
+    finally:
+        if proc.poll() is None:
             proc.kill()
-            raise Cancelled()
-        buf = proc.stdout.read(8000 * 2 * 4)
-        if not buf:
-            break
-        chunks.append(buf)
-    proc.wait()
+        proc.wait()
     if not chunks:
         return np.zeros(0, dtype=np.float32)
     return np.frombuffer(b"".join(chunks), dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def analyze(footage: Footage, progress: Optional[ProgressCb] = None,
-            cancel: Optional[threading.Event] = None) -> Analysis:
-    src = footage.proxy_path if footage.has_proxy() else footage.path
-    w = ANALYSIS_W
-    h = max(2, int(round(ANALYSIS_W * footage.height / max(1, footage.width) / 2)) * 2)
-    matrix = "bt709" if src != footage.path else ffmpeg_matrix(footage.color_space, min(footage.width, footage.height))
-    vf = f"fps={SAMPLE_RATE},scale={w}:{h}:flags=area:in_color_matrix={matrix}:in_range=auto:out_range=pc"
-    exe = ffmpeg_bin()
-    proc = popen([exe, "-v", "error", "-nostdin", "-i", src, "-an", "-sn", "-vf", vf,
-                  "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    frame_bytes = w * h * 3
-    expected = max(1, int(footage.duration * SAMPLE_RATE))
-    th = int(round(THUMB_W * h / w / 2)) * 2
+_SERIES = ("sharp", "activity", "motion", "jerk", "bright", "clipped", "colorful", "faces", "hists", "embeds")
 
-    sharp, activity, motion, jerk, bright, clipped, colorful, faces = ([] for _ in range(8))
-    hists, embeds, thumbs, thumb_t = [], [], [], []
+
+@dataclass
+class _Job:
+    """One footage being analyzed, possibly as several segments decoded in parallel."""
+    footage: Footage
+    src: str
+    w: int
+    h: int
+    matrix: str
+    rotation: int            # only honoured on the GPU path; the CPU path lets ffmpeg autorotate
+    hw_format: Optional[str]  # download format when the GPU may decode this file
+    expected: int
+    parts: dict = field(default_factory=dict)
+    remaining: int = 0
+    audio: Optional[Future] = None
+    failed: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @staticmethod
+    def create(footage: Footage, hw: Optional[str]) -> "_Job":
+        src = footage.proxy_path if footage.has_proxy() else footage.path
+        original = src == footage.path
+        w = ANALYSIS_W
+        h = max(2, int(round(ANALYSIS_W * footage.height / max(1, footage.width) / 2)) * 2)
+        fmt = _HW_FORMATS.get(footage.pix_fmt)
+        gpu = (hw is not None and original and footage.codec in HW_CODECS and fmt is not None
+               and (footage.codec, footage.pix_fmt) not in _hw_failed)
+        return _Job(footage, src, w, h,
+                    matrix=ffmpeg_matrix(footage.color_space, min(footage.width, footage.height)) if original else "bt709",
+                    rotation=footage.rotation % 360 if original else 0,
+                    hw_format=fmt if gpu else None,
+                    expected=max(1, int(footage.duration * SAMPLE_RATE)))
+
+    def split(self, lanes: int) -> list["_Unit"]:
+        k = max(1, min(lanes, int(self.footage.duration // SEGMENT_MIN)))
+        bounds = [round(i * self.expected / k) for i in range(k + 1)]
+        self.remaining = k
+        return [_Unit(self, i, bounds[i], bounds[i + 1] - bounds[i] if i < k - 1 else None) for i in range(k)]
+
+    def gpu_ok(self) -> bool:
+        return self.hw_format is not None and (self.footage.codec, self.footage.pix_fmt) not in _hw_failed
+
+    def put(self, index: int, data: dict) -> bool:
+        """Store a finished segment; True when it was the last one."""
+        with self.lock:
+            self.parts[index] = data
+            self.remaining -= 1
+            return self.remaining == 0
+
+
+@dataclass
+class _Unit:
+    job: _Job
+    index: int
+    first: int               # first sample index kept
+    count: Optional[int]     # samples to keep, None = until the end of the file
+
+
+def _scan(u: _Unit, hw: Optional[str], threads: int, cancel: threading.Event,
+          tick: Callable[[], None]) -> Optional[dict]:
+    """Decode one segment and extract per-sample signals. Returns None if GPU decoding failed."""
+    j = u.job
+    start = max(0, u.first - OVERLAP)
+    skip = u.first - start
+    w, h = j.w, j.h
+    scale = f"scale={{}}:{{}}:flags=area:in_color_matrix={j.matrix}:in_range=auto:out_range=pc"
+    args = [ffmpeg_bin(), "-v", "error", "-nostdin", "-skip_frame", "noref"]
+    if hw:
+        args += ["-hwaccel", hw, "-hwaccel_output_format", HW_OUTPUT_FORMAT[hw], "-noautorotate"]
+        sw, sh = (h, w) if j.rotation in (90, 270) else (w, h)
+        vf = f"fps={SAMPLE_RATE},hwdownload,format={j.hw_format}," + scale.format(sw, sh) + _ROTATE.get(j.rotation, "")
+    else:
+        if threads:
+            args += ["-threads", str(threads)]
+        vf = f"fps={SAMPLE_RATE}," + scale.format(w, h)
+    if start:
+        args += ["-ss", f"{start / SAMPLE_RATE:.3f}"]
+    args += ["-i", j.src, "-an", "-sn", "-dn", "-vf", vf]
+    if u.count is not None:
+        args += ["-frames:v", str(u.count + skip)]
+    args += ["-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+    proc = popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    frame_bytes = w * h * 3
+    th = int(round(THUMB_W * h / w / 2)) * 2
+    out = {k: [] for k in _SERIES}
+    sharp, activity, motion, jerk, bright, clipped, colorful, faces, hists, embeds = (out[k] for k in _SERIES)
+    thumbs, thumb_t = [], []
     prev_gray = None
     prev_shift = np.zeros(2)
     hann = None
     cascade = _faces()
-    i = 0
+    i = start
     try:
         while True:
-            if cancel is not None and cancel.is_set():
+            if cancel.is_set():
                 raise Cancelled()
             buf = proc.stdout.read(frame_bytes)
             if len(buf) < frame_bytes:
@@ -160,24 +256,38 @@ def analyze(footage: Footage, progress: Optional[ProgressCb] = None,
             elif faces:
                 area = faces[-1]
             faces.append(area)
-            if i % THUMB_EVERY == 0:
-                thumbs.append(cv2.resize(img, (THUMB_W, th), interpolation=cv2.INTER_AREA))
-                thumb_t.append(i / SAMPLE_RATE)
+            if i >= u.first:
+                if i % THUMB_EVERY == 0:
+                    thumbs.append(cv2.resize(img, (THUMB_W, th), interpolation=cv2.INTER_AREA))
+                    thumb_t.append(i / SAMPLE_RATE)
+                tick()
             i += 1
-            if progress and i % 8 == 0:
-                progress(min(0.9, 0.9 * i / expected), f"Analyzing {footage.name}")
     finally:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+    if hw and (proc.returncode != 0 or i == start):
+        return None
+    for k in _SERIES:
+        out[k] = out[k][skip:]
+    out["thumbs"], out["thumb_t"] = thumbs, thumb_t
+    return out
 
-    n = len(sharp)
+
+def _finish(j: _Job) -> Analysis:
+    """Join the segments of a job, then add scene cuts and audio."""
+    data = {k: [] for k in _SERIES + ("thumbs", "thumb_t")}
+    for idx in sorted(j.parts):
+        for k, v in j.parts[idx].items():
+            data[k] += v
+    footage = j.footage
+    n = len(data["sharp"])
     if n == 0:
         raise RuntimeError(f"Could not decode frames from {footage.name}")
     times = np.arange(n, dtype=np.float32) / SAMPLE_RATE
 
     # Scene cuts: big jumps in colour histogram.
-    hists_a = np.array(hists)
+    hists_a = np.array(data["hists"])
     cuts = []
     if n > 2:
         d = np.r_[0.0, 0.5 * np.abs(np.diff(hists_a, axis=0)).sum(axis=1)]
@@ -187,10 +297,8 @@ def analyze(footage: Footage, progress: Optional[ProgressCb] = None,
     # Audio loudness per analysis sample + waveform envelope.
     audio_db = np.full(n, -60.0, dtype=np.float32)
     wave = np.zeros(max(1, int(footage.duration * WAVE_RATE)), dtype=np.float32)
-    if footage.has_audio:
-        if progress:
-            progress(0.92, f"Analyzing audio {footage.name}")
-        pcm = _read_audio(src, footage.duration, cancel)
+    if j.audio is not None:
+        pcm = j.audio.result()
         if pcm.size:
             win = int(8000 / SAMPLE_RATE)
             m = min(n, pcm.size // win)
@@ -203,37 +311,160 @@ def analyze(footage: Footage, progress: Optional[ProgressCb] = None,
                 env = np.abs(pcm[: k * ww]).reshape(k, ww).max(axis=1)
                 wave = np.clip(env / max(1e-3, float(np.percentile(env, 99))), 0, 1).astype(np.float32)
 
-    a = Analysis(
+    return Analysis(
         times=times,
-        sharp=np.array(sharp, np.float32),
-        activity=np.array(activity, np.float32),
-        motion=np.array(motion, np.float32),
-        jerk=np.array(jerk, np.float32),
-        brightness=np.array(bright, np.float32),
-        clipped=np.array(clipped, np.float32),
-        colorful=np.array(colorful, np.float32),
-        faces=np.array(faces, np.float32),
+        sharp=np.array(data["sharp"], np.float32),
+        activity=np.array(data["activity"], np.float32),
+        motion=np.array(data["motion"], np.float32),
+        jerk=np.array(data["jerk"], np.float32),
+        brightness=np.array(data["bright"], np.float32),
+        clipped=np.array(data["clipped"], np.float32),
+        colorful=np.array(data["colorful"], np.float32),
+        faces=np.array(data["faces"], np.float32),
         audio=audio_db,
         cuts=np.array(cuts, np.float32),
-        embed=np.array(embeds, np.float32),
-        thumbs=np.array(thumbs, np.uint8),
-        thumb_times=np.array(thumb_t, np.float32),
+        embed=np.array(data["embeds"], np.float32),
+        thumbs=np.array(data["thumbs"], np.uint8),
+        thumb_times=np.array(data["thumb_t"], np.float32),
         wave=wave,
     )
+
+
+def lane_plan(use_gpu: bool = True) -> tuple[Optional[str], int]:
+    """(hardware decode method or None, number of CPU decode lanes)."""
+    cores = os.cpu_count() or 4
+    return (hw_decoder() if use_gpu else None), max(1, min(4, cores // 4))
+
+
+def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
+                 cancel: Optional[threading.Event] = None,
+                 on_result: Optional[Callable[[Footage, Analysis], None]] = None,
+                 on_error: Optional[Callable[[Footage, str], None]] = None,
+                 use_gpu: bool = True) -> dict[str, Analysis]:
+    """Analyze several footage files in parallel and cache the results.
+
+    `on_result` / `on_error` are called from worker threads as each file finishes.
+    Returns {footage id: Analysis} for the files that succeeded; raises Cancelled if cancelled.
+    """
+    cancel = cancel or threading.Event()
+    if not footages:
+        return {}
+    hw, cpu_lanes = lane_plan(use_gpu)
+    lanes = cpu_lanes + (1 if hw else 0)
+    cores = os.cpu_count() or 4
+    jobs = [_Job.create(f, hw) for f in footages]
+    pending: list[_Unit] = [u for j in jobs for u in j.split(lanes)]
+    total = sum(j.expected for j in jobs)
+    lock = threading.Lock()
+    state = {"done": 0, "finished": 0, "cpu_busy": 0}
+    results: dict[str, Analysis] = {}
+    audio_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis-audio")
+    lanes_label = f"GPU + {cpu_lanes} CPU" if hw else f"{cpu_lanes} CPU"
+
+    def label() -> str:
+        if len(jobs) == 1:
+            return f"Analyzing {jobs[0].footage.name} ({lanes_label})"
+        return f"Analyzing {state['finished']}/{len(jobs)} clips ({lanes_label})"
+
+    def tick():
+        with lock:
+            state["done"] += 1
+            done = state["done"]
+        if progress and done % 8 == 0:
+            progress(min(0.99, done / total), label())
+
+    def take(gpu_lane: bool) -> Optional[tuple[_Unit, int]]:
+        with lock:
+            for k, u in enumerate(pending):
+                if gpu_lane and not u.job.gpu_ok():
+                    continue
+                pending.pop(k)
+                threads = 0
+                if not gpu_lane:
+                    state["cpu_busy"] += 1
+                    threads = max(2, cores // max(1, min(cpu_lanes, state["cpu_busy"] + len(pending))))
+                if u.job.audio is None and u.job.footage.has_audio:
+                    u.job.audio = audio_pool.submit(_read_audio, u.job.src, cancel)
+                return u, threads
+            return None
+
+    def fail(j: _Job, msg: str):
+        with lock:
+            if j.failed:
+                return
+            j.failed = True
+            pending[:] = [p for p in pending if p.job is not j]
+        if on_error:
+            on_error(j.footage, msg)
+
+    def lane(gpu_lane: bool):
+        while not cancel.is_set():
+            got = take(gpu_lane)
+            if got is None:
+                return
+            u, threads = got
+            j = u.job
+            try:
+                data = None
+                if gpu_lane and j.gpu_ok():
+                    data = _scan(u, hw, 0, cancel, tick)
+                    if data is None:   # unsupported by this GPU: decode on the CPU from now on
+                        _hw_failed.add((j.footage.codec, j.footage.pix_fmt))
+                        j.hw_format = None
+                if data is None:
+                    data = _scan(u, None, threads, cancel, tick)
+                if j.put(u.index, data) and not j.failed:
+                    a = _finish(j)
+                    path = analysis_path_for(j.footage)
+                    a.save(path)
+                    j.footage.analysis_path = path
+                    with lock:
+                        results[j.footage.id] = a
+                        state["finished"] += 1
+                    if on_result:
+                        on_result(j.footage, a)
+            except Cancelled:
+                return
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                fail(j, str(e))
+            finally:
+                if not gpu_lane:
+                    with lock:
+                        state["cpu_busy"] -= 1
+
+    threads = [threading.Thread(target=lane, args=(True,), daemon=True, name="analysis-gpu")] if hw else []
+    threads += [threading.Thread(target=lane, args=(False,), daemon=True, name=f"analysis-cpu{k}")
+                for k in range(cpu_lanes)]
     if progress:
-        progress(1.0, f"Analyzed {footage.name}")
-    return a
+        progress(0.0, label())
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    audio_pool.shutdown(wait=True, cancel_futures=True)
+    if cancel.is_set():
+        raise Cancelled()
+    if progress:
+        progress(1.0, f"Analyzed {len(results)} clip(s)")
+    return results
+
+
+def analyze(footage: Footage, progress: Optional[ProgressCb] = None,
+            cancel: Optional[threading.Event] = None, use_gpu: bool = True) -> Analysis:
+    errors: list[str] = []
+    res = analyze_many([footage], progress, cancel, on_error=lambda f, msg: errors.append(msg), use_gpu=use_gpu)
+    if footage.id not in res:
+        raise RuntimeError(errors[0] if errors else f"Could not analyze {footage.name}")
+    return res[footage.id]
 
 
 def load_or_analyze(footage: Footage, progress: Optional[ProgressCb] = None,
-                    cancel: Optional[threading.Event] = None) -> Analysis:
+                    cancel: Optional[threading.Event] = None, use_gpu: bool = True) -> Analysis:
     path = analysis_path_for(footage)
     if os.path.exists(path):
         a = Analysis.load(path)
         if a is not None:
             footage.analysis_path = path
             return a
-    a = analyze(footage, progress, cancel)
-    a.save(path)
-    footage.analysis_path = path
-    return a
+    return analyze(footage, progress, cancel, use_gpu)

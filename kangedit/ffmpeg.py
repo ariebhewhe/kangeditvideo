@@ -6,10 +6,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
+
+from .ffmpeg_setup import local_binary
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -23,11 +26,12 @@ class FFmpegError(RuntimeError):
 
 
 def ffmpeg_bin() -> Optional[str]:
-    return shutil.which("ffmpeg")
+    """The FFmpeg downloaded next to the app (see ffmpeg_setup), else the one on PATH."""
+    return local_binary("ffmpeg") or shutil.which("ffmpeg")
 
 
 def ffprobe_bin() -> Optional[str]:
-    return shutil.which("ffprobe")
+    return local_binary("ffprobe") or shutil.which("ffprobe")
 
 
 def popen(args: list[str], **kw) -> subprocess.Popen:
@@ -55,6 +59,8 @@ class ProbeInfo:
     rotation: int        # display-matrix rotation in degrees (counter-clockwise)
     audio_channels: int
     creation_time: str
+    # Container + stream metadata tags (lower-case keys), used to identify the camera.
+    tags: dict = field(default_factory=dict)
 
 
 def _parse_rate(rate: str) -> float:
@@ -101,6 +107,14 @@ def probe(path: str) -> ProbeInfo:
     if not bit_depth:
         bit_depth = 10 if ("10" in pix_fmt) else 12 if "12" in pix_fmt else 8
     tags = data.get("format", {}).get("tags", {}) or {}
+    all_tags: dict[str, str] = {}
+    for src in [data.get("format", {})] + streams:
+        for k, val in (src.get("tags") or {}).items():
+            k = k.lower()
+            if k in all_tags and str(val) not in all_tags[k]:
+                all_tags[k] += f" | {val}"
+            else:
+                all_tags.setdefault(k, str(val))
     return ProbeInfo(
         duration=duration,
         width=w,
@@ -117,6 +131,7 @@ def probe(path: str) -> ProbeInfo:
         rotation=rotation,
         audio_channels=int(a.get("channels", 0)) if a else 0,
         creation_time=tags.get("creation_time", ""),
+        tags=all_tags,
     )
 
 
@@ -182,6 +197,43 @@ def run_ffmpeg(
         raise FFmpegError(f"ffmpeg failed ({proc.returncode}):\n{tail}")
 
 
+# Hardware decoders worth trying per platform, best first. d3d11va covers NVIDIA, AMD and Intel on Windows.
+_HW_CANDIDATES = {
+    "win32": ["d3d11va"],
+    "darwin": ["videotoolbox"],
+    "linux": ["cuda", "vaapi"],
+}
+# -hwaccel name -> pixel format of frames kept on the GPU.
+HW_OUTPUT_FORMAT = {"d3d11va": "d3d11", "cuda": "cuda", "vaapi": "vaapi", "videotoolbox": "videotoolbox"}
+
+_hw_lock = threading.Lock()
+_hw_checked = False
+_hw_method: Optional[str] = None
+
+
+def hw_decoder() -> Optional[str]:
+    """First hardware decode method that ffmpeg can actually open on this machine (cached), or None."""
+    global _hw_checked, _hw_method
+    with _hw_lock:
+        if _hw_checked:
+            return _hw_method
+        _hw_checked = True
+        exe = ffmpeg_bin()
+        if not exe:
+            return None
+        plat = "linux" if sys.platform.startswith("linux") else sys.platform
+        listed = set(run([exe, "-hide_banner", "-hwaccels"]).stdout.decode("utf-8", "replace").split())
+        for method in _HW_CANDIDATES.get(plat, []):
+            if method not in listed:
+                continue
+            res = run([exe, "-v", "error", "-init_hw_device", method, "-f", "lavfi",
+                       "-i", "nullsrc=s=64x64:d=0.04", "-f", "null", "-"])
+            if res.returncode == 0:
+                _hw_method = method
+                break
+        return _hw_method
+
+
 def available_encoders() -> set[str]:
     exe = ffmpeg_bin()
     if not exe:
@@ -194,3 +246,56 @@ def available_encoders() -> set[str]:
         if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS":
             names.add(parts[1])
     return names
+
+
+# Hardware video encoders per platform and output codec, best first.
+_HW_ENCODERS = {
+    "win32": {"h264": ["h264_nvenc", "h264_amf", "h264_qsv"], "h265": ["hevc_nvenc", "hevc_amf", "hevc_qsv"]},
+    "darwin": {"h264": ["h264_videotoolbox"], "h265": ["hevc_videotoolbox"]},
+    "linux": {"h264": ["h264_nvenc", "h264_qsv"], "h265": ["hevc_nvenc", "hevc_qsv"]},
+}
+HW_ENCODER_NAMES = {"nvenc": "NVIDIA NVENC", "amf": "AMD AMF", "qsv": "Intel Quick Sync", "videotoolbox": "VideoToolbox"}
+
+_enc_lock = threading.Lock()
+_enc_found: dict[str, Optional[str]] = {}
+
+
+def hw_encoder_args(encoder: str, q: int) -> list[str]:
+    """Quality-targeted rate control for a hardware encoder; q is on the x264/x265 CRF scale."""
+    if encoder.endswith("_nvenc"):
+        return ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", str(q + 1), "-b:v", "0", "-spatial-aq", "1"]
+    if encoder.endswith("_amf"):
+        # At constant QP the preset mostly trades file size for speed; "quality" H.264 is slow on older cards.
+        preset = "balanced" if encoder.startswith("h264") else "quality"
+        return ["-quality", preset, "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q + 2)]
+    if encoder.endswith("_qsv"):
+        return ["-preset", "slower", "-global_quality", str(q)]
+    if encoder.endswith("_videotoolbox"):
+        return ["-q:v", str(int(max(30, min(85, 118 - q * 2.7))))]
+    return []
+
+
+def hw_encoder(codec: str) -> Optional[str]:
+    """First hardware encoder for `codec` ("h264" | "h265") that really encodes on this machine (cached)."""
+    with _enc_lock:
+        if codec in _enc_found:
+            return _enc_found[codec]
+        found = None
+        exe = ffmpeg_bin()
+        plat = "linux" if sys.platform.startswith("linux") else sys.platform
+        listed = available_encoders() if exe else set()
+        for enc in _HW_ENCODERS.get(plat, {}).get(codec, []):
+            if enc not in listed:
+                continue
+            # Listed only means ffmpeg was built with it; a short test encode proves the GPU and driver work.
+            res = run([exe, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=0.2",
+                       "-pix_fmt", "nv12", "-c:v", enc] + hw_encoder_args(enc, 20) + ["-f", "null", "-"])
+            if res.returncode == 0 and not res.stderr.strip():
+                found = enc
+                break
+        _enc_found[codec] = found
+        return found
+
+
+def hw_encoder_label(encoder: str) -> str:
+    return HW_ENCODER_NAMES.get(encoder.split("_", 1)[-1], encoder)

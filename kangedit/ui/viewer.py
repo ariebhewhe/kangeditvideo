@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal, QPointF
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QFontMetricsF
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal, QPointF
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QFontMetricsF, QTransform
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
-from .. import reframe
-from ..captions import Caption, wrap
-from ..color import Grade, LutCache, apply_grade, needs_color
+from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
+from ..color import Grade
 from ..config import frame_size
 from ..decoder import DecoderPool
+from ..edits import TRANSITIONS, edits
 from ..models import Project
+from ..preview import Look, PreviewEngine, Rendered, Shot
 from .theme import fmt_time
 
 
@@ -25,8 +27,10 @@ class Canvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image: Optional[QImage] = None
-        self.caption: Optional[str] = None
+        self.caption: Optional[Caption] = None
+        self.caption_t = 0.0
         self.caption_style = None
+        self.layout = None
         self.out_h = 1080
         self.message = "Import footage and press Auto Edit"
         self.show_guides = False
@@ -58,36 +62,64 @@ class Canvas(QWidget):
             self._draw_caption(p, r)
 
     def _draw_caption(self, p: QPainter, r: QRectF):
-        st = self.caption_style
-        lines = wrap(self.caption, st.max_chars, st.max_lines)
+        """Same layout and word animations as the burned-in export (captions.write_ass)."""
+        st, lay, cap, t = self.caption_style, self.layout, self.caption, self.caption_t
+        if lay is None:
+            return
+        anim = st.animation
+        words = [w for _, _, w in cap.words] or cap.text.split()
+        active = cap.active_word(t) if cap.words else -1
+        if anim in ("pop", "reveal", "word") and cap.words and active < 0:
+            return   # nothing spoken yet
+        px = max(8.0, r.height() * lay.size_pct / 100.0)
+        if anim == "word" and cap.words:
+            index_of = [active]
+            words = [words[active]]
+            px *= WORD_SCALE
+            lines = [[0]]
+        else:
+            index_of = list(range(len(words)))
+            lines = wrap_words(words, lay.max_chars, lay.max_lines)
         if not lines:
             return
-        px = max(8.0, r.height() * st.size_pct / 100.0)
         font = QFont(st.font)
         font.setPixelSize(int(px))
         font.setBold(True)
         fm = QFontMetricsF(font)
+        space = fm.horizontalAdvance(" ")
         line_h = fm.height()
         block_h = line_h * len(lines)
-        if st.position == "top":
-            y0 = r.top() + r.height() * 0.08
-        elif st.position == "middle":
-            y0 = r.center().y() - block_h / 2
-        else:
-            y0 = r.bottom() - r.height() * 0.08 - block_h
+        y = r.top() + r.height() * lay.y
+        y0 = {"bottom": y - block_h, "center": y - block_h / 2}.get(lay.anchor, y)
         p.setRenderHint(QPainter.Antialiasing)
-        for i, line in enumerate(lines):
-            tw = fm.horizontalAdvance(line)
+        boxed = st.box and anim != "box"
+        for li, line in enumerate(lines):
+            widths = [fm.horizontalAdvance(words[i]) for i in line]
+            tw = sum(widths) + space * (len(line) - 1)
             x = r.center().x() - tw / 2
-            base = y0 + i * line_h + fm.ascent()
-            if st.box:
+            base = y0 + li * line_h + fm.ascent()
+            if boxed:
                 pad = px * 0.2
-                p.fillRect(QRectF(x - pad, y0 + i * line_h - pad / 2, tw + 2 * pad, line_h + pad / 2), QColor(0, 0, 0, 140))
-            path = QPainterPath()
-            path.addText(QPointF(x, base), font, line)
-            if st.outline and not st.box:
-                p.strokePath(path, QPen(QColor(0, 0, 0, 230), max(2.0, px / 7), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.fillPath(path, QColor(st.color))
+                p.fillRect(QRectF(x - pad, y0 + li * line_h - pad / 2, tw + 2 * pad, line_h + pad / 2), QColor(0, 0, 0, 140))
+            for i, wdt in zip(line, widths):
+                k = index_of[i]
+                if not (anim in ("pop", "reveal") and k > active):
+                    path = QPainterPath()
+                    path.addText(QPointF(x, base), font, words[i])
+                    if anim in ("pop", "word") and k == active and cap.words:
+                        done = min(1.0, max(0.0, (t - cap.words[k][0]) * 1000.0 / POP_MS))
+                        sc = POP_SCALE + (1.0 - POP_SCALE) * done
+                        if sc != 1.0:
+                            c = path.boundingRect().center()
+                            path = QTransform().translate(c.x(), c.y()).scale(sc, sc).translate(-c.x(), -c.y()).map(path)
+                    if anim == "box" and k == active:
+                        p.strokePath(path, QPen(QColor(st.highlight), px * 0.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                        p.fillPath(path, QColor(st.highlight))
+                    elif st.outline and not boxed:
+                        p.strokePath(path, QPen(QColor(0, 0, 0, 230), max(2.0, px / 7), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                    color = st.highlight if anim == "highlight" and k == active else st.color
+                    p.fillPath(path, QColor(color))
+                x += wdt + space
 
 
 class Viewer(QWidget):
@@ -99,8 +131,12 @@ class Viewer(QWidget):
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self.project = project
-        self.decoders = DecoderPool()
-        self.luts = LutCache()
+        self.decoders = DecoderPool()      # UI-side sampling (auto color, log detection)
+        self._bridge = _Bridge(self)
+        self._bridge.still.connect(self._on_still)
+        self.engine = PreviewEngine(self._bridge.still.emit)
+        self._play_shots: list[Shot] = []
+        self._frame: Optional[np.ndarray] = None
         self.captions: list[Caption] = []
         self.t = 0.0
         self.playing = False
@@ -114,9 +150,6 @@ class Viewer(QWidget):
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._tick)
-        self._lut_timer = QTimer(self, singleShot=True, interval=250)
-        self._lut_timer.timeout.connect(self._build_pending_lut)
-        self._pending_lut = None
 
         self.audio_out = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -159,10 +192,20 @@ class Viewer(QWidget):
     def set_project(self, project: Project):
         self.stop()
         self.project = project
-        self.decoders.close()
+        self.drop_decoders()
         self.t = 0.0
         self.audio_valid = False
         self.refresh()
+
+    def drop_decoders(self):
+        """Release every open media file (before proxies or cache files are replaced or removed)."""
+        self.decoders.drop()
+        self.engine.drop_decoders()
+
+    def shutdown(self):
+        self.stop()
+        self.decoders.close()
+        self.engine.close()
 
     def set_captions(self, caps: list[Caption]):
         self.captions = caps
@@ -182,10 +225,7 @@ class Viewer(QWidget):
         dur = self.project.duration
         self.t = max(0.0, min(t, max(0.0, dur - 1e-3)))
         if self.playing:
-            self._play_t0 = self.t
-            self._play_clock = time.perf_counter()
-            if self.audio_valid:
-                self.player.setPosition(int(self.t * 1000))
+            self._restart_playback()
         self.refresh()
         self.time_changed.emit(self.t)
 
@@ -207,12 +247,8 @@ class Viewer(QWidget):
             self.t = 0.0
         self.playing = True
         self._override = None
-        self._play_t0 = self.t
-        self._play_clock = time.perf_counter()
-        if self.audio_valid:
-            self.player.setPosition(int(self.t * 1000))
-            self.player.play()
-        self.timer.start(max(5, int(1000 / max(1.0, self.project.settings.fps) / 2)))
+        self._restart_playback()
+        self.timer.start(max(4, int(1000 / max(1.0, self.project.settings.fps) / 4)))
         self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         self.play_state.emit(True)
 
@@ -221,9 +257,11 @@ class Viewer(QWidget):
             return
         self.playing = False
         self.timer.stop()
+        self.engine.stop_playback()
         self.player.pause()
         self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.play_state.emit(False)
+        self.refresh()   # exact frame at the stop position
 
     def step(self, frames: int):
         self.stop()
@@ -241,21 +279,40 @@ class Viewer(QWidget):
             self.seek(nxt[0])
 
     # ------------------------------------------------------------------ rendering
+    def _restart_playback(self):
+        """(Re)start reading ahead from self.t; the clock and audio start once frames are buffered."""
+        self._play_t0 = self.t
+        self._play_clock = None
+        self.player.pause()
+        self._play_shots = self._shots()
+        self.engine.start_playback(self._play_shots, self._look(), self._play_t0, None,
+                                   self.project.settings.fps)
+
     def _tick(self):
         if not self.playing:
             return
+        if self._play_clock is None:
+            if not self.engine.ready_to_start():
+                return
+            self._play_clock = time.perf_counter()
+            self.engine.set_clock(self._play_clock)
+            if self.audio_valid:
+                self.player.setPosition(int(self._play_t0 * 1000))
+                self.player.play()
         t = self._play_t0 + (time.perf_counter() - self._play_clock)
         if t >= self.project.duration:
             self.t = max(0.0, self.project.duration - 1e-3)
             self.stop()
-            self.refresh()
             self.time_changed.emit(self.t)
             return
-        frame_dur = 1.0 / max(1.0, self.project.settings.fps)
-        if abs(t - self.t) < frame_dur * 0.5:
+        fr = self.engine.take_frame(t)
+        if fr is not None:
+            self._present(fr)
+        fps = self.project.settings.fps
+        if abs(t - self.t) < 0.5 / max(1.0, fps):
             return
         self.t = t
-        self.refresh()
+        self.lbl_time.setText(f"{fmt_time(self.t, fps)} / {fmt_time(self.project.duration, fps)}")
         self.time_changed.emit(self.t)
 
     def preview_size(self) -> tuple[int, int]:
@@ -264,7 +321,35 @@ class Viewer(QWidget):
         k = self.PREVIEW_SHORT / min(tw, th)
         return max(2, int(tw * k) // 2 * 2), max(2, int(th * k) // 2 * 2)
 
+    def _look(self) -> Look:
+        s = self.project.settings
+        tw, th = self.preview_size()
+        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT)
+
+    def _shot(self, clip, start: float, index: Optional[int] = None) -> Optional[Shot]:
+        f = self.project.footage.get(clip.footage_id)
+        if f is None:
+            return None
+        g = clip.grade or Grade()
+        return Shot(self.project.index_of(clip.id) if index is None else index, start, clip.duration, clip.src_in,
+                    f.id, Grade.from_dict(g.to_dict()), f.log_profile, f.tonemap, clip.zoom, clip.offset_x,
+                    clip.offset_y, f)
+
+    def _shots(self) -> list[Shot]:
+        out, t = [], 0.0
+        es = edits(self.project) + [None]
+        for i, c in enumerate(self.project.clips):
+            sh = self._shot(c, t, i)
+            if sh is not None:
+                e_in, e_out = es[i], es[i + 1]
+                sh = replace(sh, trans_in=TRANSITIONS[e_in.trans][1] if e_in.half else "", half_in=e_in.half,
+                             half_out=e_out.half if e_out is not None else 0.0)
+                out.append(sh)
+            t += c.duration
+        return out
+
     def refresh(self):
+        """Re-render the current position (on the preview thread; the result arrives in _on_still)."""
         proj = self.project
         dur = proj.duration
         fps = proj.settings.fps
@@ -276,80 +361,52 @@ class Viewer(QWidget):
             self.lbl_info.setText("")
             self.canvas.update()
             return
+        if self.playing:
+            # Edited during playback: re-read the timeline from here if what plays changed.
+            if self._shots() != self._play_shots:
+                self._restart_playback()
+            return
         idx = proj.index_of(self._override[0]) if self._override else -1
         if idx >= 0:
-            clip = proj.clips[idx]
-            footage = proj.footage.get(clip.footage_id)
-            src_t = self._override[1]
-            grade, zoom, ox, oy = clip.grade, clip.zoom, clip.offset_x, clip.offset_y
-        else:
-            self._override = None
-            idx, off = proj.clip_at(self.t)
-            if idx is None:
-                return
-            clip = proj.clips[idx]
-            footage = proj.footage.get(clip.footage_id)
-            src_t = clip.src_in + off
-            grade, zoom, ox, oy = clip.grade, clip.zoom, clip.offset_x, clip.offset_y
-        if footage is None:
+            shot = self._shot(proj.clips[idx], proj.clip_starts()[idx], idx)
+            if shot is not None:
+                self.engine.request_still(shot, self._override[1], self.t, self._look())
             return
-        try:
-            dec = self.decoders.get(footage, proj.settings.use_proxies, self.PREVIEW_SHORT)
-            img = dec.frame_at(src_t)
-        except Exception as e:  # noqa: BLE001
+        self._override = None
+        idx, off = proj.clip_at(self.t)
+        if idx is None:
+            return
+        shots = self._shots()
+        shot = next((s for s in shots if s.index == idx), None)
+        if shot is not None:
+            self.engine.request_still(shot, shot.src_in + off, self.t, self._look(), shots)
+
+    def _on_still(self, r: Rendered):
+        if not self.playing:
+            self._present(r, still=True)
+
+    def _present(self, r: Rendered, still: bool = False):
+        if r.image is None:
             self.canvas.image = None
-            self.canvas.message = f"Cannot decode {footage.name}: {e}"
+            self.canvas.message = r.info
             self.canvas.update()
             return
-        if img is None:
-            return
-        using_proxy = proj.settings.use_proxies and footage.has_proxy()
-        self.lbl_info.setText(f"{footage.name}  {'PROXY' if using_proxy else 'ORIGINAL'}"
-                              f"{'  ' + footage.log_profile.upper() if footage.log_profile != 'none' else ''}")
-        grade = grade or Grade()
-        img = self._grade(img, grade, footage.log_profile, footage.tonemap)
-        tw, th = self.preview_size()
-        out = reframe.render(img, tw, th, proj.settings.fit_mode, zoom, ox, oy)
-        out = np.ascontiguousarray(out)
-        self._frame = out  # keep buffer alive for QImage
-        self.canvas.image = QImage(out.data, out.shape[1], out.shape[0], out.strides[0], QImage.Format_RGB888)
+        self.lbl_info.setText(r.info)
+        out = self._frame = r.image  # keep buffer alive for QImage
+        self.canvas.image = QImage(out.data, out.shape[1], out.shape[0], out.strides[0], QImage.Format_RGB32)
         self.canvas.caption = None
-        if self._override is None and proj.settings.captions.enabled:
+        t = self.t if still else r.t
+        st = self.project.settings.captions
+        if self._override is None and st.enabled:
             for c in self.captions:
-                if c.start <= self.t < c.end:
-                    self.canvas.caption = c.text
+                if c.start <= t < c.end:
+                    self.canvas.caption, self.canvas.caption_t = c, t
+                    tw, th = self.preview_size()
+                    self.canvas.layout = caption_layout(st, tw, th, self.project.settings.video_format)
                     break
         self.canvas.update()
 
-    def _grade(self, img: np.ndarray, grade, log_profile: str, tonemap: str) -> np.ndarray:
-        if not needs_color(grade, log_profile):
-            return img
-        lut = self.luts.peek(grade, log_profile, tonemap)
-        if lut is not None:
-            return lut.apply(img)
-        if self.playing:
-            return self.luts.get(grade, log_profile, tonemap).apply(img)
-        # While adjusting sliders: grade this frame directly, build the LUT once idle.
-        small = img
-        out = apply_grade(small.astype(np.float32) / 255.0, grade, log_profile, tonemap)
-        self._pending_lut = (grade, log_profile, tonemap)
-        self._lut_timer.start()
-        return (out * 255.0 + 0.5).astype(np.uint8)
 
-    def _build_pending_lut(self):
-        if self._pending_lut:
-            g, lp, tm = self._pending_lut
-            self.luts.get(Grade.from_dict(g.to_dict()), lp, tm)
-            self._pending_lut = None
-
-    def grab_frames(self, clip, n: int = 5) -> list[np.ndarray]:
-        """Ungraded sample frames from a clip (for auto color)."""
-        f = self.project.footage[clip.footage_id]
-        dec = self.decoders.get(f, self.project.settings.use_proxies, 360)
-        frames = []
-        for k in range(n):
-            t = clip.src_in + clip.duration * (k + 0.5) / n
-            img = dec.frame_at(t)
-            if img is not None:
-                frames.append(img.copy())
-        return frames
+class _Bridge(QObject):
+    """Carries rendered stills from the preview thread to the UI thread (queued signal)."""
+    still = Signal(object)

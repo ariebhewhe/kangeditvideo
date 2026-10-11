@@ -10,9 +10,10 @@ from PySide6.QtGui import QAction, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QMenu, QPushButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
+from .. import lut as lutlib
 from ..analysis import Analysis
-from ..color import LOG_CHOICES
-from ..config import VIDEO_EXTENSIONS
+from ..color import LOG_CHOICES, lut_profile, profile_label
+from ..config import VIDEO_EXTENSIONS, open_path
 from ..models import Project
 from .theme import fmt_time
 
@@ -28,7 +29,7 @@ class MediaBin(QWidget):
         self.project = project
         self.analyses: dict[str, Analysis] = {}
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Footage", "Duration", "Format", "Log", "Status"])
+        self.tree.setHeaderLabels(["Footage", "Duration", "Format", "Camera", "Log", "Status"])
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -39,7 +40,8 @@ class MediaBin(QWidget):
         self.tree.setColumnWidth(0, 210)
         self.tree.setColumnWidth(1, 60)
         self.tree.setColumnWidth(2, 120)
-        self.tree.setColumnWidth(3, 70)
+        self.tree.setColumnWidth(3, 90)
+        self.tree.setColumnWidth(4, 70)
 
         b_import = QPushButton("＋ Import footage")
         b_import.setObjectName("primary")
@@ -65,7 +67,6 @@ class MediaBin(QWidget):
     def refresh(self):
         sel = set(self.selected_ids())
         self.tree.clear()
-        log_labels = dict(LOG_CHOICES)
         for f in self.project.footage.values():
             status = []
             status.append("Proxy ✓" if f.has_proxy() else "No proxy")
@@ -75,12 +76,14 @@ class MediaBin(QWidget):
             used = sum(1 for c in self.project.clips if c.footage_id == f.id)
             if used:
                 status.append(f"Used ×{used}")
-            log = "—" if f.log_profile == "none" else log_labels.get(f.log_profile, f.log_profile).split(" /")[0]
+            log = "—" if f.log_profile == "none" else profile_label(f.log_profile).split(" /")[0]
             it = QTreeWidgetItem([f.name, fmt_time(f.duration, frames=False),
-                                  f"{f.width}×{f.height} {f.fps:.2f}p {f.bit_depth}bit", log, " · ".join(status)])
+                                  f"{f.width}×{f.height} {f.fps:.2f}p {f.bit_depth}bit", f.camera or "—", log,
+                                  " · ".join(status)])
             it.setData(0, Qt.UserRole, f.id)
             it.setToolTip(0, f"{f.path}\n{f.codec} {f.pix_fmt} · {f.color_space or 'untagged'} "
                              f"{f.color_transfer or ''}")
+            it.setToolTip(4, f"{profile_label(f.log_profile)}" + (f"\n{f.log_note}" if f.log_note else ""))
             a = self.analyses.get(f.id)
             if a is not None and len(a.thumbs):
                 arr = np.ascontiguousarray(a.thumbs[len(a.thumbs) // 2])
@@ -108,15 +111,32 @@ class MediaBin(QWidget):
             a.triggered.connect(lambda _=False, k=key: self.action.emit(k, ids))
             m.addAction(a)
         sub = m.addMenu("Log profile → Rec.709")
+        a = QAction("Detect from camera", sub)
+        a.setToolTip("Identify the camera and choose its log profile automatically")
+        a.triggered.connect(lambda: self.action.emit("detect_log", ids))
+        sub.addAction(a)
+        sub.addSeparator()
         current = {self.project.footage[i].log_profile for i in ids if i in self.project.footage}
-        for key, label in LOG_CHOICES:
+        choices = list(LOG_CHOICES)
+        luts = lutlib.library()
+        if luts:
+            choices.append((None, None))
+            choices += [(lut_profile(path), f"LUT: {name}") for name, path in luts]
+        for key, label in choices:
+            if key is None:
+                sub.addSeparator()
+                continue
             a = QAction(label, sub, checkable=True)
             a.setChecked(current == {key})
             a.triggered.connect(lambda _=False, k=key: self.log_profile.emit(ids, k))
             sub.addAction(a)
+        sub.addSeparator()
+        a = QAction("Import conversion LUT (.cube)…", sub)
+        a.triggered.connect(lambda: self.action.emit("import_lut_log", ids))
+        sub.addAction(a)
         m.addSeparator()
         a = QAction("Show in folder", m)
-        a.triggered.connect(lambda: os.startfile(os.path.dirname(self.project.footage[ids[0]].path)))
+        a.triggered.connect(lambda: open_path(os.path.dirname(self.project.footage[ids[0]].path)))
         m.addAction(a)
         a = QAction("Remove from project", m)
         a.triggered.connect(lambda: self.action.emit("remove", ids))

@@ -3,15 +3,22 @@
 Every color operation is a pure per-pixel function of RGB, so the whole grade is baked
 into a single 3D LUT. The viewer applies a 96^3 LUT to 8-bit frames and the exporter
 writes a 33^3 .cube file for ffmpeg's lut3d filter -- both come from `apply_grade`,
-which keeps preview and export identical.
+which keeps preview and export identical. Imported .cube LUTs (log conversion or creative look,
+see lut.py) are evaluated inside `apply_grade` too, so they get baked in the same way.
 """
 
 from __future__ import annotations
 
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from typing import Callable, Optional
 
 import numpy as np
+
+from . import lut as lutlib
+from .lut import LUT_PREFIX
 
 # ----------------------------------------------------------------------------- gamuts
 
@@ -178,6 +185,21 @@ LOG_PROFILES: dict[str, LogProfile] = {
 
 LOG_CHOICES = [("none", "None (Rec.709 / standard)")] + [(k, p.label) for k, p in LOG_PROFILES.items()]
 
+
+def is_lut_profile(log_profile: str) -> bool:
+    return log_profile.startswith(LUT_PREFIX)
+
+
+def lut_profile(path: str) -> str:
+    """Log-profile key that converts with an imported LUT instead of a built-in camera curve."""
+    return LUT_PREFIX + path
+
+
+def profile_label(log_profile: str) -> str:
+    if is_lut_profile(log_profile):
+        return "LUT: " + lutlib.lut_name(log_profile[len(LUT_PREFIX):])
+    return dict(LOG_CHOICES).get(log_profile, log_profile)
+
 TONEMAPS = [("filmic", "Filmic (soft highlight roll-off)"), ("standard", "Standard Rec.709 (hard clip)")]
 
 
@@ -194,6 +216,8 @@ class Grade:
     tint: float = 0.0          # -100 (green) .. 100 (magenta)
     saturation: float = 100.0  # 0..200 %
     vibrance: float = 0.0      # -100..100
+    look: str = ""             # creative .cube LUT applied after the grade ("" = none)
+    look_mix: float = 100.0    # look strength 0..100 %
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -203,14 +227,15 @@ class Grade:
         g = Grade()
         for k, v in (d or {}).items():
             if hasattr(g, k):
-                setattr(g, k, float(v))
+                cur = getattr(g, k)
+                setattr(g, k, str(v or "") if isinstance(cur, str) else float(v))
         return g
 
     def is_identity(self) -> bool:
         return self == Grade()
 
     def key(self) -> tuple:
-        return tuple(round(v, 4) for v in asdict(self).values())
+        return tuple(v if isinstance(v, str) else round(v, 4) for v in asdict(self).values())
 
 
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
@@ -236,6 +261,11 @@ def _to_linear(rgb: np.ndarray, log_profile: str) -> np.ndarray:
         lin = p.decode(sig.astype(np.float64)).astype(np.float32)
         m = gamut_to_709(p.gamut).astype(np.float32)
         return lin @ m.T
+    if is_lut_profile(log_profile):
+        # A conversion LUT outputs a Rec.709 display signal; grade on from there like standard footage.
+        conv = lutlib.try_load(log_profile[len(LUT_PREFIX):])
+        if conv is not None:
+            rgb = conv.apply(rgb)
     return np.power(np.clip(rgb, 0.0, 1.0), 2.4)
 
 
@@ -277,12 +307,17 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
             cur = np.max(d, axis=1, keepdims=True) - np.min(d, axis=1, keepdims=True)
             sat = sat * (1.0 + grade.vibrance / 100.0 * (1.0 - np.clip(cur * 1.5, 0.0, 1.0)))
         d = luma + (d - luma) * sat
+    if grade.look and grade.look_mix > 0:
+        look = lutlib.try_load(grade.look)
+        if look is not None:
+            d = np.clip(d, 0.0, 1.0)
+            d = d + (look.apply(d) - d) * np.float32(grade.look_mix / 100.0)
 
     return np.clip(d, 0.0, 1.0).reshape(shape)
 
 
 def needs_color(grade: Grade, log_profile: str) -> bool:
-    return log_profile in LOG_PROFILES or not grade.is_identity()
+    return log_profile in LOG_PROFILES or is_lut_profile(log_profile) or not grade.is_identity()
 
 
 # ----------------------------------------------------------------------------- LUTs
@@ -292,10 +327,13 @@ class PreviewLut:
     """96^3 uint8 LUT for fast per-frame grading of 8-bit RGB images."""
 
     N = 96
-    _idx = (np.round(np.arange(256) * (N - 1) / 255.0)).astype(np.int32)
+    _idx = (np.round(np.arange(256) * (N - 1) / 255.0)).astype(np.uint32)
     _ir = _idx * N * N
     _ig = _idx * N
     _grid: Optional[np.ndarray] = None
+    # numpy releases the GIL for these gathers, so row bands run truly in parallel.
+    _threads = max(1, min(8, (os.cpu_count() or 2) - 1))
+    _pool = ThreadPoolExecutor(_threads, thread_name_prefix="lut") if _threads > 1 else None
 
     @classmethod
     def grid(cls) -> np.ndarray:
@@ -307,17 +345,33 @@ class PreviewLut:
 
     def __init__(self, grade: Grade, log_profile: str, tonemap: str):
         out = apply_grade(self.grid(), grade, log_profile, tonemap)
-        self.table = (out * 255.0 + 0.5).astype(np.uint8)
+        packed = np.zeros((out.shape[0], 4), dtype=np.uint8)
+        packed[:, :3] = out * 255.0 + 0.5
+        self.table = packed.view(np.uint32).ravel()   # RGBX packed: one 4-byte gather per pixel
+
+    def _band(self, img: np.ndarray, out: np.ndarray) -> None:
+        idx = self._ir[img[..., 0]]
+        idx += self._ig[img[..., 1]]
+        idx += self._idx[img[..., 2]]
+        np.take(self.table, idx, out=out)
 
     def apply(self, img: np.ndarray) -> np.ndarray:
-        idx = self._ir[img[..., 0]] + self._ig[img[..., 1]] + self._idx[img[..., 2]]
-        return self.table[idx]
+        h, w = img.shape[:2]
+        rgbx = np.empty((h, w, 4), dtype=np.uint8)
+        out = rgbx.view(np.uint32).reshape(h, w)
+        if self._pool is None or h < 64:
+            self._band(img, out)
+        else:
+            step = -(-h // self._threads)
+            list(self._pool.map(lambda y: self._band(img[y:y + step], out[y:y + step]), range(0, h, step)))
+        return np.ascontiguousarray(rgbx[..., :3])
 
 
 class LutCache:
     def __init__(self, max_items: int = 24):
         self._items: dict[tuple, PreviewLut] = {}
         self._max = max_items
+        self._lock = threading.Lock()
 
     def peek(self, grade: Grade, log_profile: str, tonemap: str) -> Optional[PreviewLut]:
         return self._items.get((grade.key(), log_profile, tonemap))
@@ -328,10 +382,11 @@ class LutCache:
         key = (grade.key(), log_profile, tonemap)
         lut = self._items.get(key)
         if lut is None:
-            if len(self._items) >= self._max:
-                self._items.pop(next(iter(self._items)))
-            lut = PreviewLut(grade, log_profile, tonemap)
-            self._items[key] = lut
+            lut = PreviewLut(grade, log_profile, tonemap)   # built outside the lock (takes ~0.2 s)
+            with self._lock:
+                if key not in self._items and len(self._items) >= self._max:
+                    self._items.pop(next(iter(self._items)))
+                self._items[key] = lut
         return lut
 
 
