@@ -7,21 +7,22 @@ ACCENT = "#4f8cff"
 CLIP_COLORS = ["#3b6fb6", "#3f8f6b", "#8a5cb8", "#b5733a", "#3a8fa3", "#a34a6a", "#6f8a3a", "#5a62b8"]
 
 
-def _arrow_file() -> str:
-    """The combo box arrow as a small SVG file (style sheets can only load images from files)."""
-    path = os.path.join(tempfile.gettempdir(), "kangedit_arrow_down.svg")
+def _arrow_file(name: str, path_d: str) -> str:
+    """A small arrow as an SVG file (style sheets can only load images from files)."""
+    path = os.path.join(tempfile.gettempdir(), f"kangedit_arrow_{name}.svg")
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
-           '<path d="M1 3 L5 7 L9 3" fill="none" stroke="#c4c7ce" stroke-width="1.6"/></svg>')
+           f'<path d="{path_d}" fill="none" stroke="#c4c7ce" stroke-width="1.6"/></svg>')
     try:
         if not os.path.exists(path):
             with open(path, "w", encoding="ascii") as fh:
                 fh.write(svg)
     except OSError:
         return ""
-    return path.replace("\\", "/")
+    return path.replace(os.sep, "/")
 
 
-_ARROW = _arrow_file()
+_ARROW = _arrow_file("down", "M1 3 L5 7 L9 3")
+_ARROW_UP = _arrow_file("up", "M1 7 L5 3 L9 7")
 
 STYLE = f"""
 QWidget {{ background: #1c1d21; color: #d8dae0; font-size: 12px; }}
@@ -42,6 +43,16 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit {{
     background: #141518; border: 1px solid #34373e; border-radius: 3px; padding: 3px 5px; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox::down-arrow {{ image: url("{_ARROW}"); width: 10px; height: 10px; }}
+QSpinBox, QDoubleSpinBox {{ padding-right: 16px; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right;
+    width: 15px; border: none; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 15px; border: none; }}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{ background: #2e3138; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("{_ARROW_UP}"); width: 8px; height: 8px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("{_ARROW}"); width: 8px; height: 8px; }}
+QToolButton#reset {{ padding: 0px; }}
 QComboBox QAbstractItemView {{ background: #202227; selection-background-color: {ACCENT}; }}
 QTreeWidget, QTableWidget, QListWidget {{ background: #17181b; alternate-background-color: #1b1c20;
     border: 1px solid #2a2c31; gridline-color: #2a2c31; }}

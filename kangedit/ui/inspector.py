@@ -30,11 +30,12 @@ class ParamSlider(QWidget):
         self.spin.setDecimals(decimals)
         self.spin.setSingleStep(step)
         self.spin.setSuffix(suffix)
-        self.spin.setFixedWidth(74)
+        self.spin.setFixedWidth(82)
         self.btn_reset = QToolButton()
         self.btn_reset.setText("↺")
         self.btn_reset.setToolTip(f"Reset to {default:g}{suffix}")
         self.btn_reset.setAutoRaise(True)
+        self.btn_reset.setObjectName("reset")    # no padding: the arrow fits the narrow button
         self.btn_reset.setFixedWidth(22)
         self.btn_reset.clicked.connect(self.reset)
         self.slider.valueChanged.connect(self._from_slider)

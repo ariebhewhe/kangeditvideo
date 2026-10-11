@@ -2026,12 +2026,19 @@ class MainWindow(QMainWindow):
                      lambda: self.d_bin),
             TourStep("2. Let Auto Edit build the edit",
                      "<b>✨ Auto Edit</b> picks the best moments and puts them on the timeline.<br>"
-                     "<b>− / +</b> rebuild it shorter or longer. Above the timeline, <b>🎣 Hook</b> swaps the "
-                     "first clip for another strong moment, <b>🎯 Auto slip</b> finds the best moment close to a "
-                     "clip and <b>🔀 Other moment</b> picks another one anywhere in its footage.",
+                     "<b>− / +</b> rebuild it shorter or longer. Running it again on the same footage picks "
+                     "<b>new moments</b>, and moments with dead silence are left out.",
                      lambda: self.grp_auto),
+            TourStep("Swap moments",
+                     "<b>🎣 Hook</b> gives the edit a new opening hook (a quick 2-3 clip teaser in long-form).<br>"
+                     "<b>🎯 Auto slip</b> (J) slides the selected clip to the best moment close by, keeping its "
+                     "length.<br><b>🔀 Other moment</b> (R) swaps it for another moment anywhere in its footage. "
+                     "Press again for the next one; <b>Undo</b> brings the previous back.",
+                     lambda: self._moment_buttons()),
             TourStep("Preview",
                      "<b>Space</b> plays and pauses. Titles can be <b>dragged here</b> to place them.<br>"
+                     "<b>Double-click</b> the picture (or press <b>F11</b>) for full screen, <b>Esc</b> to leave.<br>"
+                     "<b>View → App overlay</b> shows where Reels / TikTok buttons cover a vertical video.<br>"
                      "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.",
                      lambda: self.viewer.canvas),
             TourStep("The timeline",
@@ -2047,7 +2054,9 @@ class MainWindow(QMainWindow):
             TourStep("3. Refine",
                      "Fine-tune here: <b>🎨 Clip</b> colour & reframe, <b>💬 Captions</b>, <b>🔤 Text</b> for "
                      "animated titles, and <b>🔊 Sounds</b>. The <b>3. Refine</b> buttons in the toolbar jump "
-                     "to each tab.",
+                     "to each tab.<br>Select <b>several clips</b> (Ctrl / Shift+click) and every change here "
+                     "applies to all of them. <b>🙂 Zoom to face</b> under Reframe punches in on a reaction; "
+                     "<b>Sharpness</b> and <b>Halation</b> sit below Vibrance.",
                      lambda: self.d_right),
             TourStep("Frame",
                      "The shape of the finished video (9:16 for Reels / TikTok, 16:9 for YouTube…), its "
@@ -2058,7 +2067,9 @@ class MainWindow(QMainWindow):
                      lambda: self.btn_export),
             TourStep("That's it!",
                      "Start with <b>1. Import</b>. If you get stuck, the hint at the bottom right says what to do "
-                     "next, and the <b>?</b> button brings this tour back.",
+                     "next, and the <b>?</b> button brings this tour back.<br><br>Your project is "
+                     "<b>auto-saved</b> every minute with rolling backups: <b>File → Restore a backup…</b> "
+                     "brings back an earlier version.",
                      lambda: self.btn_help),
         ]
         self._tour = TourOverlay(self, steps)
@@ -2069,6 +2080,12 @@ class MainWindow(QMainWindow):
 
         self._tour.finished.connect(done)
         self._tour.start(start)
+
+    def _moment_buttons(self):
+        """The tour's target: the Hook / Auto slip / Other moment buttons above the timeline."""
+        tp = self.timeline
+        r = tp.btn_hook.geometry().united(tp.btn_auto_slip.geometry()).united(tp.btn_alt.geometry())
+        return tp, r.adjusted(-4, -2, 4, 2)
 
     def _delete_selected(self):
         if self.tl.selected_text:
@@ -2421,6 +2438,8 @@ class MainWindow(QMainWindow):
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
             "Ctrl+A — select all clips\nR — replace clip with another best moment\n"
+            "J — auto slip the clip to the best moment nearby\nH — new hook\n"
+            "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline\n"
             "Ctrl+Shift+B — color adjustments in the viewer on / off\n"
