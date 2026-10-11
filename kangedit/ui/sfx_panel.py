@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QGridLayout, QGroupBox, Q
 
 from .. import music, sfx
 from ..config import open_path, sfx_dir
+from .inspector import ParamSlider
 
 
 class _Bridge(QObject):
@@ -35,6 +36,7 @@ class _LibraryList(QListWidget):
 class SoundPanel(QWidget):
     add_sound = Signal(str, str)          # library path, name -> add at the playhead
     add_music = Signal(str, str, str)     # library path, title, video page -> background music for the edit
+    volume_changed = Signal(float)        # new volume (1.0 = 100%) for the sound selected on the timeline
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -51,6 +53,7 @@ class SoundPanel(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
+        lay.addWidget(self._volume_box())
         lay.addWidget(self._music_box(), 2)
         lay.addSpacing(6)
         lay.addWidget(QLabel("<b>Find sound effects</b> (MyInstants)", wordWrap=True))
@@ -103,6 +106,32 @@ class SoundPanel(QWidget):
         lay.addWidget(note)
         self.refresh_library()
 
+    # ------------------------------------------------------------------ selected sound
+    def _volume_box(self) -> QGroupBox:
+        box = QGroupBox("Selected sound")
+        v = QVBoxLayout(box)
+        self.lbl_selected = QLabel("")
+        self.lbl_selected.setWordWrap(True)
+        self.lbl_selected.setStyleSheet("color: #8b909a;")
+        v.addWidget(self.lbl_selected)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Volume"))
+        self.vol = ParamSlider(0, 200, 100, 1, 0, "%")
+        self.vol.setToolTip("Volume of the sound effect or music selected on the timeline")
+        self.vol.changed.connect(lambda val: self.volume_changed.emit(val / 100.0))
+        row.addWidget(self.vol, 1)
+        v.addLayout(row)
+        self.set_selected_sound(None)
+        return box
+
+    def set_selected_sound(self, x) -> None:
+        """Show the volume of a timeline SoundClip (None: nothing selected, slider disabled)."""
+        self.vol.setEnabled(x is not None)
+        self.lbl_selected.setText(x.name or os.path.basename(x.path) if x is not None
+                                  else "Click a sound effect or music on the timeline to change its volume.")
+        if x is not None:
+            self.vol.set_value(x.volume * 100.0)
+
     # ------------------------------------------------------------------ music
     def _music_box(self) -> QGroupBox:
         box = QGroupBox("Background music (NCS)")
@@ -128,7 +157,7 @@ class SoundPanel(QWidget):
         self.b_music = QPushButton("♪ Add to timeline")
         self.b_music.setObjectName("primary")
         self.b_music.setToolTip("Download the track, extract its sound and lay it under the whole edit "
-                                "(at 50% volume: right-click it on the timeline to change)")
+                                "(at 50% volume: select it on the timeline to change)")
         self.b_music.clicked.connect(self._get_music)
         b_yt = QPushButton("Open on YouTube")
         b_yt.setToolTip("Listen to the track first")

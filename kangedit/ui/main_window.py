@@ -434,6 +434,9 @@ class MainWindow(QMainWindow):
         self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
         self.sfx_panel.add_music.connect(self.add_music)
+        self.sfx_panel.volume_changed.connect(self._selected_sound_volume)
+        for sig in (self.tl.sound_selected, self.tl.text_selected, self.tl.selection_changed):
+            sig.connect(lambda *_: self._sync_sound_panel())
         self.tl.context_action.connect(self._timeline_action)
         self.tl.text_selected.connect(self._on_text_selected)
         self.tl.texts_changed.connect(lambda: self._texts_changed(panel_fields=True))
@@ -1855,7 +1858,16 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"Added music “{title}” under the edit ({fmt_time(end, frames=False)}). "
                                 "The NCS credit is on the clipboard: paste it into the video's description.")
 
+    def _sync_sound_panel(self):
+        sid = self.tl.selected_sound
+        self.sfx_panel.set_selected_sound(next((s for s in self.project.sounds if s.id == sid), None) if sid else None)
+
+    def _selected_sound_volume(self, volume: float):
+        if self.tl.selected_sound:
+            self._sound_action(f"sound_volume:{volume}", self.tl.selected_sound)
+
     def _sounds_changed(self):
+        self._sync_sound_panel()
         self.project.dirty = True
         self._schedule_audio()
         self._update_title()
@@ -1867,7 +1879,8 @@ class MainWindow(QMainWindow):
         if action == "sound_preview":
             self.sfx_panel.preview_file(x.path)
             return
-        self.project_checkpoint()
+        # one undo step per volume drag, not per slider tick
+        self.project_checkpoint(f"sound:{sound_id}:volume" if action.startswith("sound_volume:") else "")
         if action == "sound_delete":
             self.project.sounds.remove(x)
             self.tl.selected_sound = ""

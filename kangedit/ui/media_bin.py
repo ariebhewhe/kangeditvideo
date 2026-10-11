@@ -22,7 +22,7 @@ from ..config import VIDEO_EXTENSIONS, open_path, settings
 from ..models import Project
 from .theme import fmt_time
 
-THUMB_SIZES = (96, 128, 160, 200, 256)   # thumbnail widths in the grid (Ctrl+wheel steps through them)
+GRID_COLUMNS = 2                          # thumbnails per row; they grow with the bin's width
 
 
 def _pixmap(arr: np.ndarray) -> QPixmap:
@@ -32,8 +32,8 @@ def _pixmap(arr: np.ndarray) -> QPixmap:
 
 
 class _Grid(QListWidget):
-    """Thumbnail grid: Ctrl+wheel resizes, hovering scrubs through a clip's thumbnails."""
-    zoom = Signal(int)                   # +1 / -1
+    """Thumbnail grid: fixed number of columns, hovering scrubs through a clip's thumbnails."""
+    resized = Signal()
     hover = Signal(object, float)        # item (or None), horizontal position over its icon 0..1
 
     def __init__(self):
@@ -42,17 +42,13 @@ class _Grid(QListWidget):
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Static)
         self.setUniformItemSizes(True)
-        self.setWordWrap(True)
         self.setSpacing(6)
         self.setMouseTracking(True)
         self.viewport().installEventFilter(self)
 
-    def wheelEvent(self, e):
-        if e.modifiers() & Qt.ControlModifier:
-            self.zoom.emit(1 if e.angleDelta().y() > 0 else -1)
-            e.accept()
-            return
-        super().wheelEvent(e)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.resized.emit()
 
     def eventFilter(self, obj, e):
         if e.type() == QEvent.MouseMove:
@@ -79,9 +75,6 @@ class MediaBin(QWidget):
         self.project = project
         self.analyses: dict[str, Analysis] = {}
         self._qs = settings()
-        self._thumb_w = self._qs.value("bin_thumb_size", 160, type=int)
-        if self._thumb_w not in THUMB_SIZES:
-            self._thumb_w = 160
         self._scrubbing = None            # grid item whose icon shows a scrubbed frame
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Footage", "Duration", "Format", "Camera", "Log", "Status"])
@@ -103,7 +96,7 @@ class MediaBin(QWidget):
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._menu)
         self.grid.itemDoubleClicked.connect(lambda *_: self.action.emit("append_best", self.selected_ids()))
-        self.grid.zoom.connect(self._zoom)
+        self.grid.resized.connect(self._apply_thumb_size)
         self.grid.hover.connect(self._scrub)
         self._apply_thumb_size()
 
@@ -119,7 +112,7 @@ class MediaBin(QWidget):
         self.btn_details = QToolButton(text="☰", checkable=True, autoExclusive=True)
         self.btn_details.setToolTip("Detail view: duration, format, camera, log profile and status")
         self.btn_thumbs = QToolButton(text="▦", checkable=True, autoExclusive=True)
-        self.btn_thumbs.setToolTip("Thumbnail view (hover to scrub, Ctrl+wheel to resize)")
+        self.btn_thumbs.setToolTip("Thumbnail view (hover to scrub)")
         self.btn_details.clicked.connect(lambda: self.set_view_mode("details"))
         self.btn_thumbs.clicked.connect(lambda: self.set_view_mode("thumbnails"))
         top = QHBoxLayout()
@@ -148,17 +141,16 @@ class MediaBin(QWidget):
         return "thumbnails" if self.stack.currentWidget() is self.grid else "details"
 
     def _apply_thumb_size(self):
-        w = self._thumb_w
+        """Size the thumbnails so GRID_COLUMNS of them fill the width (room kept for the scrollbar,
+        so it appearing doesn't change the layout)."""
+        g = self.grid
+        avail = g.width() - 2 * g.frameWidth() - g.verticalScrollBar().sizeHint().width()
+        cell = max(48, avail // GRID_COLUMNS - 1)
+        w = max(32, cell - 2 * g.spacing() - 4)
         h = w * 9 // 16
-        self.grid.setIconSize(QSize(w, h))
-        self.grid.setGridSize(QSize(w + 16, h + 44))
-
-    def _zoom(self, step: int):
-        i = THUMB_SIZES.index(self._thumb_w) + step
-        if 0 <= i < len(THUMB_SIZES):
-            self._thumb_w = THUMB_SIZES[i]
-            self._qs.setValue("bin_thumb_size", self._thumb_w)
-            self._apply_thumb_size()
+        if g.iconSize() != QSize(w, h):
+            g.setIconSize(QSize(w, h))
+            g.setGridSize(QSize(cell, h + 2 * g.spacing() + 4))
 
     def _scrub(self, item, x: float):
         """Show the clip's frame under the mouse on its grid thumbnail."""
@@ -238,12 +230,11 @@ class MediaBin(QWidget):
 
             badges = [b for b, on in (("P", f.has_proxy()), ("CC", f.transcript is not None),
                                       (f"×{used}", used)) if on]
-            gi = QListWidgetItem(f"{f.name}\n{fmt_time(f.duration, frames=False)}"
-                                 + (f"  ·  {log}" if log != "—" else "") + (f"  ·  {' '.join(badges)}" if badges else ""))
+            gi = QListWidgetItem()
             gi.setData(Qt.UserRole, f.id)
-            gi.setToolTip(f"{f.path}\n{f.width}×{f.height} {f.fps:.2f}p {f.bit_depth}bit · {f.camera or 'unknown camera'}"
+            gi.setToolTip(f"{f.name} · {fmt_time(f.duration, frames=False)}"
+                          + (f" · {' '.join(badges)}" if badges else "") + f"\n{f.path}\n{f.width}×{f.height} {f.fps:.2f}p {f.bit_depth}bit · {f.camera or 'unknown camera'}"
                           f"\n{profile_label(f.log_profile)}\n{' · '.join(status)}")
-            gi.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
             self.grid.addItem(gi)
             self._set_grid_icon(gi, None)
         self._select(sel)

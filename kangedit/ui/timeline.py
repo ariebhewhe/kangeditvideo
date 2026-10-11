@@ -6,7 +6,7 @@ import os
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSlider, QToolButton,
                                QVBoxLayout, QWidget)
@@ -75,6 +75,10 @@ class TimelineView(QWidget):
         self.selected_sound = ""
         self.selected_text = ""
         self._sound_max: dict[str, float] = {}   # file length per sound file (trim limit)
+        self._scrub_x = 0.0                      # last mouse x while scrubbing (for edge auto-scroll)
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(30)
+        self._edge_timer.timeout.connect(self._edge_scroll)
 
     # ------------------------------------------------------------------ selection
     @property
@@ -158,6 +162,29 @@ class TimelineView(QWidget):
         self.pps = max(2.0, min(400.0, pps))
         self.scroll_x = max(0.0, t * self.pps - anchor_x)
         self.refresh()
+
+    def _edge_speed(self, x: float) -> float:
+        """Pixels to scroll per tick when scrubbing near / past the left or right edge."""
+        margin = 30.0
+        if x < margin:
+            return -min(60.0, 4.0 + (margin - x) * 0.6)
+        if x > self.width() - margin:
+            return min(60.0, 4.0 + (x - self.width() + margin) * 0.6)
+        return 0.0
+
+    def _edge_scroll(self):
+        d = self._drag
+        speed = self._edge_speed(self._scrub_x)
+        if d is None or d.get("kind") != "scrub" or speed == 0.0:
+            self._edge_timer.stop()
+            return
+        max_scroll = max(0.0, self.content_width() - self.width())
+        new = max(0.0, min(self.scroll_x + speed, max_scroll))
+        if new != self.scroll_x:
+            self.scroll_x = new
+            self.update()
+            self.view_changed.emit()
+        self.seek.emit(self.x_to_t(min(max(0.0, self._scrub_x), self.width())))
 
     def ensure_visible(self, t: float):
         x = self.t_to_x(t)
@@ -742,11 +769,25 @@ class TimelineView(QWidget):
             a = QAction(label, m)
             a.triggered.connect(lambda _=False, k=key: self.context_action.emit(k, sound_id))
             m.addAction(a)
-        sub = m.addMenu("Volume")
-        for v in (25, 50, 75, 100, 150, 200):
-            a = QAction(f"{v}%", sub)
-            a.triggered.connect(lambda _=False, v=v: self.context_action.emit(f"sound_volume:{v / 100}", sound_id))
-            sub.addAction(a)
+        x = next((s for s in self.project.sounds if s.id == sound_id), None)
+        if x is not None:
+            m.addSeparator()
+            box = QWidget()
+            row = QHBoxLayout(box)
+            row.setContentsMargins(12, 4, 12, 4)
+            lbl = QLabel(f"Volume {x.volume * 100:.0f}%")
+            lbl.setMinimumWidth(80)
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(0, 200)
+            sl.setValue(round(x.volume * 100))
+            sl.setMinimumWidth(140)
+            sl.valueChanged.connect(lambda v: (lbl.setText(f"Volume {v}%"),
+                                               self.context_action.emit(f"sound_volume:{v / 100}", sound_id)))
+            row.addWidget(lbl)
+            row.addWidget(sl, 1)
+            act = QWidgetAction(m)
+            act.setDefaultWidget(box)
+            m.addAction(act)
         m.addSeparator()
         a = QAction("Delete sound\tDel", m)
         a.triggered.connect(lambda: self.context_action.emit("sound_delete", sound_id))
@@ -873,7 +914,10 @@ class TimelineView(QWidget):
                 self.setCursor(Qt.ArrowCursor)
             return
         if d["kind"] == "scrub":
-            self.seek.emit(self.x_to_t(pos.x()))
+            self._scrub_x = pos.x()
+            self.seek.emit(self.x_to_t(min(max(0.0, pos.x()), self.width())))
+            if self._edge_speed(pos.x()) and not self._edge_timer.isActive():
+                self._edge_timer.start()
             return
         if "sound" in d:
             self._sound_move(pos, d)
@@ -924,6 +968,7 @@ class TimelineView(QWidget):
     def mouseReleaseEvent(self, e):
         d = self._drag
         self._drag = None
+        self._edge_timer.stop()
         if d is None:
             return
         if "sound" in d:
