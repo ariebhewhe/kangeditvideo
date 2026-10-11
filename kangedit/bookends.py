@@ -24,7 +24,8 @@ OPENING_PHRASES = [
     "assalamualaikum", "assalamu alaikum", "assalamu'alaikum", "halo semuanya", "halo guys", "hai semuanya",
     "hai guys", "selamat datang", "selamat pagi", "selamat siang", "selamat sore", "selamat malam",
     "kembali lagi", "di video kali ini", "pada video kali ini", "hari ini kita", "kita mulai", "bismillah",
-    "pembukaan", "halo",
+    "pembukaan", "halo", "hai", "hi", "hey", "salam", "assalamualaikum warahmatullahi", "asalamualaikum",
+    "assalamu", "salam sejahtera", "apa kabar", "how are you", "what's up", "whats up", "yo guys",
 ]
 CLOSING_PHRASES = [
     "thanks for watching", "thank you for watching", "see you next time", "see you in the next", "see you",

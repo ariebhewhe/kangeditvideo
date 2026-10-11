@@ -50,6 +50,10 @@ REPEAT_WINDOW = 10.0    # s (at least; 2 x min_gap when larger): look-alike segm
                         # footage count as repeats
 FAR_REPEAT_PENALTY = 0.08   # look-alike but further apart: a small penalty only
 OVER_SHARE_PENALTY = 0.12   # per use beyond the footage's share
+AVOID_PENALTY = 0.35        # per earlier edit that used a moment: a new edit prefers moments not seen yet
+SILENCE_DB = (-52.0, -38.0)  # dBFS: dead silent at the first, normal room sound from the second
+SILENCE_PENALTY = 0.45      # score taken off dead-silent moments (less for quiet ones)
+VARIETY = 0.06              # random spread between moments of about the same score (new edits differ)
 
 ORDERS = {
     "hook": "Hook first (best clip, then chronological)",
@@ -206,6 +210,9 @@ def score_samples(analyses: dict[str, Analysis], footage: dict[str, Footage], st
         sc[t > dur - 0.6] -= 0.5           # and at record stop
         for c in analyses[i].cuts:
             sc[np.abs(t - c) < 0.3] -= 1.0
+        if footage[i].has_audio:           # dead / silent sound makes a weak moment
+            lo, hi = SILENCE_DB
+            sc -= SILENCE_PENALTY * np.clip((hi - analyses[i].audio) / (hi - lo), 0.0, 1.0)
         out[i] = sc
     return out
 
@@ -258,8 +265,11 @@ def _candidates(fid: str, a: Analysis, sc: np.ndarray, dur: float, s: AutoEditSe
 
 def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
            s: AutoEditSettings, order_ids: Optional[list[str]] = None,
-           existing: Optional[list[TimelineClip]] = None) -> list[TimelineClip]:
-    """Pick clips. `existing` clips are treated as already used (no overlap / repeats)."""
+           existing: Optional[list[TimelineClip]] = None, avoid: Optional[list[TimelineClip]] = None,
+           seed: Optional[int] = None) -> list[TimelineClip]:
+    """Pick clips. `existing` clips are treated as already used (no overlap / repeats). `avoid` clips
+    (moments earlier edits used) are only discouraged, so a new edit of the same footage shows other
+    moments while there are good ones left. A `seed` varies the pick between moments of similar score."""
     ids = [i for i in (order_ids or list(project_footage)) if i in analyses]
     if not ids:
         return []
@@ -270,6 +280,15 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     picked_mid: dict[str, list[float]] = {i: [] for i in ids}
     uses = {i: 0 for i in ids}
     total = 0.0
+    bias = {i: np.zeros(len(cands[i].score), dtype=np.float32) for i in ids}
+    for ex in avoid or []:
+        if ex.footage_id in bias:
+            t = analyses[ex.footage_id].times
+            bias[ex.footage_id][(t < ex.src_out) & (t + cands[ex.footage_id].length > ex.src_in)] += AVOID_PENALTY
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        for i in ids:
+            bias[i] += rng.uniform(0.0, VARIETY, len(bias[i])).astype(np.float32)
     # Clips each footage should give, in proportion to its length.
     durs = {i: project_footage[i].duration for i in ids}
     n_clips = s.target_duration / max(0.1, (s.clip_min + s.clip_max) / 2)
@@ -284,7 +303,7 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
 
     def effective(fid: str) -> np.ndarray:
         c = cands[fid]
-        sc = np.where(c.valid, c.score, -np.inf)
+        sc = np.where(c.valid, c.score - bias[fid], -np.inf)
         if picked_embed[fid]:
             sims = c.embed @ np.stack(picked_embed[fid]).T                      # (n, picked)
             mid = analyses[fid].times + c.length / 2
@@ -345,6 +364,14 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
             break
 
     # Ordering
+    n_hook, hook_len = hook_plan(s)
+    if s.order == "hook" and n_hook > 1:
+        # Long-form: a quick teaser of a few short moments, then the edit in story order.
+        hs = copy.copy(s)
+        hs.order = "chronological"
+        hs.target_duration = max(s.clip_min, s.target_duration - n_hook * hook_len)
+        body = select(project_footage, analyses, hs, order_ids, existing, avoid, seed)
+        return find_hook_montage(project_footage, analyses, s, (existing or []) + body) + body
     pos = {fid: k for k, fid in enumerate(ids)}
     chrono = sorted(picked, key=lambda p: (pos[p[0]], p[1]))
     if s.order == "best_first":
@@ -357,6 +384,32 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     clips = [TimelineClip(footage_id=f, src_in=a, src_out=b, score=sc) for f, a, b, sc in ordered]
     if s.order == "hook" and clips:
         clips[0].label = "hook"
+    return clips
+
+
+def hook_plan(s: AutoEditSettings) -> tuple[int, float]:
+    """(clips, seconds each) of the opening hook: one quick clip in short-form; in long-form, where shots
+    are long, a teaser of 3 short moments."""
+    if s.video_format == "long" or s.clip_max > 4.0:
+        return 3, 2.0
+    return 1, s.clip_max
+
+
+def find_hook_montage(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
+                      avoid: list[TimelineClip]) -> list[TimelineClip]:
+    """The long-form hook: hook_plan(s) short strong moments (none of them overlapping `avoid`), each
+    labelled "hook", strongest first."""
+    n, length = hook_plan(s)
+    hs = copy.copy(s)
+    hs.style = "hook"
+    hs.target_duration = n * length
+    hs.clip_min = hs.clip_max = length
+    hs.use_every_footage = False
+    hs.max_uses = 0
+    hs.order = "best_first"
+    clips = select(project_footage, analyses, hs, existing=avoid)[:n]
+    for c in clips:
+        c.label = "hook"
     return clips
 
 

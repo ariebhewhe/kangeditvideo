@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import os
 import shutil
 import threading
@@ -17,16 +18,17 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, 
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
                                QSizePolicy, QSplitter, QTabWidget, QToolButton, QWidget)
 
-from .. import APP_NAME, camera, version_string
+from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
-from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, select
-from .. import sfx
+from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan, select
+from .. import reframe, sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
+                      frame_size,
                       clear_cache, default_cache_root, fmt_bytes, folder_size, legacy_cache_root, lut_dir,
                       open_path, set_cache_root, settings, sfx_dir)
 from ..export import export, render_audio
@@ -42,9 +44,10 @@ from .inspector import Inspector
 from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
 from .text_panel import TextPanel
-from .theme import fmt_time
+from .theme import compact_combos, fmt_time
 from .timeline import TimelinePanel
 from .tour import TourOverlay, TourStep
+from .platform_overlay import PLATFORM_OVERLAYS
 from .viewer import ADJUST_MODES, Viewer
 
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
@@ -66,6 +69,8 @@ class MainWindow(QMainWindow):
         self.last_auto = self._load_auto_settings()
         self._auto_ids: list[str] = []     # footage the last auto edit used (for regenerate)
         self._tried_hooks: list[TimelineClip] = []   # hooks "New hook" already showed (not offered again)
+        self._tried_alts: dict[str, list[TimelineClip]] = {}   # clip id: moments Replace / Auto slip showed
+        self._auto_history: list[list[TimelineClip]] = []      # recent auto edits (new ones pick other moments)
         self._progress_text = ""
         self._last_ckpt: tuple = ("", 0.0)
         self._audio_version = 0
@@ -110,12 +115,18 @@ class MainWindow(QMainWindow):
         tabs.setTabToolTip(2, "Animated titles and text")
         tabs.setTabToolTip(3, "Sound effects")
         self.right_tabs = tabs
+        for panel in (self.inspector, self.caps_panel, self.text_panel, self.sfx_panel):
+            compact_combos(panel)
         d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")
         d_right.setWidget(tabs)
         d_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
-        self.resizeDocks([d_bin, d_right], [430, 370], Qt.Horizontal)
+        # Wide enough for the widest tab (plus its scroll bar): nothing on the right gets cut off.
+        need = max(p.minimumSizeHint().width() for p in (self.inspector.widget(), self.text_panel.widget(),
+                                                          self.caps_panel, self.sfx_panel)) + 24
+        d_right.setMinimumWidth(need)
+        self.resizeDocks([d_bin, d_right], [430, max(370, need)], Qt.Horizontal)
         self.d_bin, self.d_right = d_bin, d_right
 
         self._build_actions()
@@ -127,6 +138,10 @@ class MainWindow(QMainWindow):
         self._audio_timer = QTimer(self, singleShot=True, interval=700)
         self._audio_timer.timeout.connect(self._render_audio)
         QTimer.singleShot(800, self._offer_legacy_cache)
+        self._autosave_timer = QTimer(self, interval=autosave.AUTOSAVE_SECONDS * 1000)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start()
+        QTimer.singleShot(600, self._offer_recovery)
         QTimer.singleShot(900, self._first_run_tour)
 
     # ================================================================== construction
@@ -150,6 +165,14 @@ class MainWindow(QMainWindow):
         self.recent_menu.setEnabled(bool(self._recent_projects()))
         m.addAction(self._act("Save project", self.save_project, "Ctrl+S"))
         m.addAction(self._act("Save project as…", lambda: self.save_project(True), "Ctrl+Shift+S"))
+        self.a_autosave = QAction("Auto-save every minute", self, checkable=True)
+        self.a_autosave.setToolTip("Save the project by itself while you work, keeping rolling backups of "
+                                   "earlier versions (untitled projects get a recovery copy)")
+        self.a_autosave.setChecked(self.qs.value("autosave", True, type=bool))
+        self.a_autosave.toggled.connect(lambda v: self.qs.setValue("autosave", v))
+        m.addAction(self.a_autosave)
+        m.addAction(self._act("Restore a backup…", self.restore_backup, None,
+                              "Open an earlier version of this project from its automatic backups"))
         m.addSeparator()
         self.a_import = self._act("Import footage…", self.import_dialog, "Ctrl+I")
         m.addAction(self.a_import)
@@ -168,6 +191,9 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
         m.addAction(self._act("Replace with another best moment",
                               lambda: self.clip_action("alt_moment", self.tl.selected), "R"))
+        m.addAction(self._act("Auto slip to the best moment nearby",
+                              lambda: self.clip_action("auto_slip", self.tl.selected), "J",
+                              "Slide which moment the clip shows to the best one close by (keeps its length)"))
         m.addSeparator()
         m.addAction(self._act("Add title at playhead", lambda: self.add_text("title"), "T",
                               "Add an animated title where the playhead is (more templates in the Text tab)"))
@@ -224,6 +250,8 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&View")
         m.addAction(self._act("Fit timeline", self.tl.fit, "Shift+Z"))
+        m.addAction(self._act("Full screen preview", self.viewer.toggle_fullscreen, "F11",
+                              "Play the timeline on the whole screen (Esc to leave)"))
         sub = m.addMenu("Color in viewer")
         sub.setToolTipsVisible(True)
         group = QActionGroup(self)
@@ -245,6 +273,18 @@ class MainWindow(QMainWindow):
         a.toggled.connect(lambda v: (setattr(self.viewer.canvas, "show_guides", v), self.viewer.canvas.update()))
         m.addAction(a)
         self.a_guides = a
+        sub = m.addMenu("App overlay (Reels / TikTok)")
+        sub.setToolTipsVisible(True)
+        group = QActionGroup(self)
+        self.a_platform: dict[str, QAction] = {}
+        for key, label in PLATFORM_OVERLAYS.items():
+            a = QAction(label, self, checkable=True)
+            a.setToolTip("Show where the app's buttons and text cover a vertical video (guide only, not exported)")
+            a.triggered.connect(lambda _=False, k=key: self._set_platform_overlay(k))
+            group.addAction(a)
+            sub.addAction(a)
+            self.a_platform[key] = a
+        self._set_platform_overlay(self.qs.value("platform_overlay", "", type=str))
 
         m = mb.addMenu("&Help")
         self.a_tour = self._act("Guided tour", lambda: self.show_tour(), "Shift+F1",
@@ -300,11 +340,7 @@ class MainWindow(QMainWindow):
             b.setFixedWidth(30)
             b.setToolTip(tip + " (same settings and footage)")
             b.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
-        hb = QPushButton("🎣 New hook")
-        hb.setToolTip("Replace the first clip (the hook) with another strong moment not used in the edit (H). "
-                      "Click again for the next one; Undo brings the previous back.")
-        hb.clicked.connect(self.new_hook)
-        self.grp_auto = group(self.btn_auto, b_short, b_long, hb)
+        self.grp_auto = group(self.btn_auto, b_short, b_long)
         tb.addWidget(self.grp_auto)
         tb.addWidget(arrow())
 
@@ -418,12 +454,17 @@ class MainWindow(QMainWindow):
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
         self.timeline.fades_changed.connect(self._fades_changed)
         self.timeline.btn_delete.clicked.connect(lambda: self.clip_action("delete", self.tl.selected))
+        self.timeline.btn_hook.clicked.connect(self.new_hook)
+        self.timeline.btn_auto_slip.clicked.connect(lambda: self.clip_action("auto_slip", self.tl.selected))
+        self.timeline.btn_alt.clicked.connect(lambda: self.clip_action("alt_moment", self.tl.selected))
 
         self.bin.import_requested.connect(self.import_dialog)
         self.bin.files_dropped.connect(self.import_files)
         self.bin.action.connect(self.bin_action)
         self.bin.log_profile.connect(self.set_log_profile)
 
+        self.inspector.selection = self.tl.selected_ids
+        self.text_panel.playhead = lambda: self.viewer.t
         self.inspector.before_change.connect(self._inspector_before)
         self.inspector.changed.connect(self._inspector_changed)
         self.inspector.request.connect(self.inspector_request)
@@ -472,6 +513,16 @@ class MainWindow(QMainWindow):
         self.project.dirty = True
         self.viewer.refresh()
         self._update_title()
+
+    def _set_platform_overlay(self, key: str):
+        if key not in PLATFORM_OVERLAYS:
+            key = ""
+        self.a_platform[key].setChecked(True)
+        self.viewer.canvas.platform_overlay = key
+        self.viewer.canvas.update()
+        self.qs.setValue("platform_overlay", key)
+        if key and not self.project.settings.aspect.startswith("9:16"):
+            self.lbl_status.setText(f"The {PLATFORM_OVERLAYS[key]} overlay is made for vertical 9:16 video.")
 
     def _toggle_adjustments(self):
         self.viewer.set_adjust_mode("off" if self.viewer.adjust_mode == "on" else "on")
@@ -543,8 +594,11 @@ class MainWindow(QMainWindow):
 
     def set_project(self, project: Project):
         self.tasks.cancel_all()
+        autosave.clear_recovery()      # the previous project was saved or discarded
         self.project = project
         self.analyses = {}
+        self._tried_alts = {}
+        self._auto_history = []
         for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel):
             w.set_project(project)
         self._exported = False
@@ -654,14 +708,78 @@ class MainWindow(QMainWindow):
             if not path.endswith(Project.FILE_EXT):
                 path += Project.FILE_EXT
         try:
+            self._backup(path, min_interval=60.0)
             self.project.save(path)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Could not save project:\n{e}")
             return False
+        autosave.clear_recovery()
         self._update_title()
         self._add_recent(path)
         self.lbl_status.setText(f"Saved {path}")
         return True
+
+    def _backup(self, path: str, min_interval: float = autosave.BACKUP_EVERY):
+        """Keep the version on disk before it is overwritten (a failed backup never stops a save)."""
+        try:
+            autosave.make_backup(path, min_interval)
+        except OSError:
+            pass
+
+    def _autosave(self):
+        """Save a changed project by itself: in place when it has a file, else as a recovery copy."""
+        if not self.a_autosave.isChecked() or not self.project.dirty:
+            return
+        try:
+            if self.project.path:
+                self._backup(self.project.path)
+                self.project.save(self.project.path)
+                self._update_title()
+                self.lbl_status.setText(f"Auto-saved {os.path.basename(self.project.path)} "
+                                        f"at {time.strftime('%H:%M')}")
+            elif self.project.footage:
+                autosave.write_recovery(self.project)
+        except Exception as e:  # noqa: BLE001
+            self.lbl_status.setText(f"Auto-save failed: {e}")
+
+    def _offer_recovery(self):
+        """After a crash: offer the untitled project the last session was working on."""
+        found = autosave.stale_recoveries()
+        if not found:
+            return
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(found[0].stat().st_mtime))
+        r = QMessageBox.question(self, APP_NAME, f"{APP_NAME} closed before an untitled project was saved.\n"
+                                                 f"Restore it (auto-saved {when})?")
+        p = None
+        if r == QMessageBox.Yes and not self.project.dirty:
+            try:
+                p = Project.load(str(found[0]))
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, APP_NAME, f"Could not restore the project:\n{e}")
+        for f in found:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        if p is not None:
+            p.path, p.dirty = None, True
+            self.set_project(p)
+            self.lbl_status.setText("Restored the untitled project: save it to keep it")
+
+    def restore_backup(self):
+        start = str(autosave.backup_dir(self.project.path)) if self.project.path else str(autosave.backup_root())
+        path, _ = QFileDialog.getOpenFileName(self, "Restore a backup", start, PROJECT_FILTER)
+        if not path or not self._confirm_discard():
+            return
+        try:
+            p = Project.load(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, APP_NAME, f"Could not open the backup:\n{e}")
+            return
+        # Saving puts the restored version back in the original file (after backing up the current one).
+        p.path, p.dirty = autosave.backup_source(path), True
+        self.set_project(p)
+        self.lbl_status.setText(f"Restored the backup {os.path.basename(path)}: save to keep it")
 
     def import_dialog(self):
         exts = " ".join(f"*{e}" for e in VIDEO_EXTENSIONS)
@@ -846,7 +964,7 @@ class MainWindow(QMainWindow):
         self.last_auto = s
         for k, v in s.to_dict().items():
             self.qs.setValue(f"auto/{k}", v)
-        self._run_auto_edit(s, ids, dlg.aspect())
+        self._run_auto_edit(s, ids, dlg.aspect(), fresh=True)
 
     def regenerate_auto_edit(self, factor: Optional[float]):
         """Rebuild the automatic edit with the last settings and footage, shorter / longer than the timeline
@@ -876,11 +994,19 @@ class MainWindow(QMainWindow):
         self.qs.setValue("auto/target_duration", target)
         self._run_auto_edit(s, ids, None, f"Regenerating the edit at {target:.0f} s")
 
-    def _run_auto_edit(self, s: AutoEditSettings, ids: list[str], aspect: Optional[str], name: str = "Auto edit"):
+    def _run_auto_edit(self, s: AutoEditSettings, ids: list[str], aspect: Optional[str], name: str = "Auto edit",
+                       fresh: bool = False):
+        """`fresh`: a new edit, which prefers moments the timeline and recent auto edits did not show."""
         self._auto_ids = list(ids)
         self.queue_analysis(ids)
         footage = {fid: self.project.footage[fid] for fid in ids}
         existing = [] if s.replace_timeline else list(self.project.clips)
+        avoid: list[TimelineClip] = []
+        if fresh:
+            avoid = [c for edit in self._auto_history for c in edit]
+            if s.replace_timeline:
+                avoid += self.project.clips
+        seed = int(time.time() * 1000) & 0x7FFFFFFF if fresh else None
         use_gpu = self.a_gpu_analysis.isChecked()
         lang = self.project.settings.whisper_language
 
@@ -904,8 +1030,12 @@ class MainWindow(QMainWindow):
                 sel = copy.copy(s)
                 sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
             progress(0.8, "Choosing the best moments…")
-            body = select(footage, analyses, sel, order, existing=existing + [c for c in (intro, outro) if c])
-            clips = ([intro] if intro else []) + body + ([outro] if outro else [])
+            body = select(footage, analyses, sel, order, existing=existing + [c for c in (intro, outro) if c],
+                          avoid=avoid, seed=seed)
+            hooks = list(itertools.takewhile(lambda c: c.label == "hook", body))
+            body = body[len(hooks):]
+            # The hook grabs attention first, then the opening greets.
+            clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
             apply_edit_style(clips, footage, analyses, s)
             return analyses, clips, notes
 
@@ -918,6 +1048,8 @@ class MainWindow(QMainWindow):
                 return
             self.project_checkpoint()
             self._tried_hooks = []
+            self._tried_alts = {}
+            self._auto_history = (self._auto_history + [[TimelineClip.from_dict(c.to_dict()) for c in clips]])[-3:]
             if s.replace_timeline:
                 self.project.clips = clips
             else:
@@ -940,58 +1072,165 @@ class MainWindow(QMainWindow):
         self.tasks.submit(name, job, done, self._task_error("Auto edit"))
 
     def new_hook(self):
-        """Replace the first clip (the hook) with a different strong moment; on an empty timeline add one."""
+        """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
+        with different strong moments: one clip in short-form, a 2-3 clip teaser in long-form. On a timeline
+        without a hook (or that starts with the opening) the hook is put in front."""
         clips = self.project.clips
         ids = [fid for fid in (self._auto_ids or list(self.project.footage))
                if fid in self.project.footage and fid in self.analyses]
         if not ids:
             QMessageBox.information(self, APP_NAME, "Analyze some footage first (or run ✨ Auto Edit).")
             return
-        old = clips[0] if clips else None
-        s = self.last_auto
-        length = old.duration if old else (s.clip_max if s.video_format != "long" else min(s.clip_max, 6.0))
+        s = copy.copy(self.last_auto)
+        s.video_format = self.project.settings.video_format or s.video_format
+        n, length = hook_plan(s)
+        old = list(itertools.takewhile(lambda c: c.label == "hook", clips))
+        if not old and clips and clips[0].label != "opening" and n == 1:
+            old = [clips[0]]
+        if n == 1 and old:
+            length = old[0].duration
         footage = {fid: self.project.footage[fid] for fid in ids}
         analyses = {fid: self.analyses[fid] for fid in ids}
-        if old is not None and not any(_same_moment(old, t) for t in self._tried_hooks):
-            self._tried_hooks.append(TimelineClip.from_dict(old.to_dict()))
-        hook = find_hook(footage, analyses, s, length, list(clips) + self._tried_hooks)
-        if hook is None and self._tried_hooks:
+        for o in old:
+            if not any(_same_moment(o, t) for t in self._tried_hooks):
+                self._tried_hooks.append(TimelineClip.from_dict(o.to_dict()))
+        rest = [c for c in clips if c not in old]
+
+        def find(avoid):
+            if n > 1:
+                return find_hook_montage(footage, analyses, s, avoid)
+            hook = find_hook(footage, analyses, s, length, avoid)
+            return [hook] if hook else []
+
+        hooks = find(rest + self._tried_hooks)
+        if len(hooks) < n and self._tried_hooks:
             # Every strong moment has been shown once: start the round again (still avoiding the timeline).
-            self._tried_hooks = [TimelineClip.from_dict(old.to_dict())] if old else []
-            hook = find_hook(footage, analyses, s, length, list(clips) + self._tried_hooks)
-        if hook is None:
+            self._tried_hooks = [TimelineClip.from_dict(o.to_dict()) for o in old]
+            hooks = find(rest + self._tried_hooks)
+        if not hooks:
             self.lbl_status.setText("No other hook moment found (every strong moment is already in the edit).")
             return
-        self._tried_hooks.append(TimelineClip.from_dict(hook.to_dict()))
+        self._tried_hooks += [TimelineClip.from_dict(h.to_dict()) for h in hooks]
         self.project_checkpoint()
-        if old is not None:
-            # Keep the clip's look and audio settings; only the moment changes.
-            old.footage_id, old.src_in, old.src_out, old.score = hook.footage_id, hook.src_in, hook.src_out, hook.score
-            old.label = "hook"
-        else:
-            clips.append(hook)
+        for k, h in enumerate(hooks):
+            h.label = "hook"
+            if k < len(old):
+                # Keep the clip's look and audio settings; only the moment changes.
+                o = old[k]
+                o.footage_id, o.src_in, o.src_out, o.score, o.label = h.footage_id, h.src_in, h.src_out, h.score, "hook"
+                hooks[k] = o
+        self.project.clips = hooks + rest
         self._after_structure_change()
-        self.tl.selected = (old or hook).id
+        self.tl.selected = hooks[0].id
         self.tl.update()
         self.inspector.set_clip(self.selected_clip())
         self.viewer.seek(0)
-        f = self.project.footage[hook.footage_id]
-        self.lbl_status.setText(f"New hook: {f.name} at {hook.src_in:.1f} s (score {hook.score * 100:.0f})")
+        f = self.project.footage[hooks[0].footage_id]
+        if len(hooks) > 1:
+            what = f"{len(hooks)} clips, {sum(h.duration for h in hooks):.1f} s"
+        else:
+            what = f"{f.name} at {hooks[0].src_in:.1f} s (score {hooks[0].score * 100:.0f})"
+        self.lbl_status.setText(f"New hook: {what}")
 
-    def _best_for(self, fid: str, duration: Optional[float] = None, existing=None) -> Optional[TimelineClip]:
+    def _best_for(self, fid: str, duration: Optional[float] = None, existing=None,
+                  relaxed: bool = False) -> Optional[TimelineClip]:
+        """The best moment of a footage that avoids `existing` clips. `relaxed` only rules out overlaps
+        (no gap or look-alike rule), for footage the edit already uses closely."""
         a = self.analyses.get(fid)
         if a is None:
             return None
         s = copy.copy(self.last_auto)
         d = duration or s.clip_max
         s.target_duration = d
-        s.clip_min = min(s.clip_min, d)
-        s.clip_max = max(d, s.clip_min)
+        s.clip_min = s.clip_max = d         # same length: the rest of the timeline stays where it is
         s.use_every_footage = True
         s.max_uses = 0
+        if relaxed:
+            s.min_gap = 0.0
+            s.similarity = 1.01
         clips = select({fid: self.project.footage[fid]}, {fid: a}, s, [fid],
                        existing=self.project.clips if existing is None else existing)
         return clips[0] if clips else None
+
+    @staticmethod
+    def _slip_window(x: TimelineClip) -> float:
+        return max(6.0, 2.0 * x.duration)
+
+    def _outside_window(self, x: TimelineClip) -> list[TimelineClip]:
+        """Stand-in clips covering the footage outside the auto-slip window around clip x."""
+        w = self._slip_window(x)
+        dur = self.project.footage[x.footage_id].duration
+        lo, hi = max(0.0, x.src_in - w), min(dur, x.src_out + w)
+        out = []
+        if lo > 0.0:
+            out.append(TimelineClip(x.footage_id, 0.0, lo))
+        if hi < dur:
+            out.append(TimelineClip(x.footage_id, hi, dur))
+        return out
+
+    def _slip_moment(self, x: TimelineClip, others: list[TimelineClip],
+                     tried: list[TimelineClip]) -> Optional[TimelineClip]:
+        """Auto slip: the best moment of x's length near where the clip first was (tried[0]). The first
+        press may just nudge it; later presses step to the next best nearby moments."""
+        home = tried[0]
+        others = [c for c in others if not _same_moment(c, x)] + self._outside_window(home)
+        best = self._best_for(x.footage_id, x.duration, existing=others, relaxed=True)
+        if best is not None and abs(best.src_in - x.src_in) >= 0.2 and not any(
+                abs(best.src_in - t.src_in) < 0.2 for t in tried):
+            return best
+        alt = self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True)
+        if alt is None and len(tried) > 1:
+            del tried[1:]       # every nearby moment was shown: start the round again
+            alt = self._best_for(x.footage_id, x.duration, existing=others + [x], relaxed=True)
+        return alt
+
+    def _replace_moments(self, targets: list[TimelineClip], nearby: bool = False):
+        """Swap each clip for a different moment of its footage. Pressing again keeps offering new moments;
+        once every moment was shown the round starts again. `nearby`: an automatic slip, the best moment
+        within a few seconds of the current one."""
+        if not targets:
+            self.lbl_status.setText("Select a clip on the timeline to replace it with another moment.")
+            return
+        missing = list(dict.fromkeys(x.footage_id for x in targets if x.footage_id not in self.analyses))
+        if missing:
+            self.queue_analysis(missing)
+            self.lbl_status.setText("Analyzing the footage first: try again when the analysis is done.")
+            return
+        changes = []
+        for x in targets:
+            tried = self._tried_alts.setdefault(("slip:" if nearby else "") + x.id, [])
+            seen = (lambda t: abs(t.src_in - x.src_in) < 0.05) if nearby else (lambda t: _same_moment(x, t))
+            if not any(seen(t) for t in tried):
+                tried.append(TimelineClip.from_dict(x.to_dict()))
+            others = [c for c in self.project.clips if c.id != x.id and c.id not in {t.id for t, _ in changes}]
+            others += [alt for _, alt in changes]
+            if nearby:
+                alt = self._slip_moment(x, others, tried)
+            else:
+                alt = (self._best_for(x.footage_id, x.duration, existing=others + tried)
+                       or self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True))
+                if alt is None and len(tried) > 1:
+                    # Every moment has been shown: start the round again (still never the current one).
+                    tried[:] = [TimelineClip.from_dict(x.to_dict())]
+                    alt = self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True)
+            if alt is not None:
+                changes.append((x, alt))
+        if not changes:
+            self.lbl_status.setText("No better moment close by." if nearby
+                                    else "No other moment of this length left in this footage.")
+            return
+        self.project_checkpoint()
+        for x, alt in changes:
+            x.src_in, x.src_out, x.score = alt.src_in, alt.src_out, alt.score
+        self._after_structure_change()
+        if len(changes) == 1:
+            x = changes[0][0]
+            self.viewer.seek(self.project.clip_starts()[self.project.index_of(x.id)] + 0.01)
+            verb, key = ("Slipped to", "J") if nearby else ("Replaced with", "R")
+            self.lbl_status.setText(f"{verb} the moment at {fmt_time(x.src_in, frames=False)} "
+                                    f"of {self.project.footage[x.footage_id].name} ({key} again for another)")
+        else:
+            self.lbl_status.setText(f"{'Slipped' if nearby else 'Replaced'} {len(changes)} clips")
 
     # ================================================================== bin actions
     def bin_action(self, action: str, ids: list[str]):
@@ -1497,6 +1736,8 @@ class MainWindow(QMainWindow):
             return
         i = self.project.index_of(clip_id) if clip_id else -1
         if i < 0:
+            if action in ("alt_moment", "auto_slip"):
+                self._replace_moments([])
             return
         c = self.project.clips[i]
         # Act on the whole selection when the clip is part of it.
@@ -1521,19 +1762,11 @@ class MainWindow(QMainWindow):
                 self.viewer.seek(starts[i] + c.duration / 2)
             self.split_at_playhead()
         elif action == "alt_moment":
-            replaced = 0
-            self.project_checkpoint()
-            for x in targets:
-                if x.footage_id not in self.analyses:
-                    continue
-                alt = self._best_for(x.footage_id, x.duration, existing=list(self.project.clips))
-                if alt is not None:
-                    x.src_in, x.src_out, x.score = alt.src_in, alt.src_out, alt.score
-                    replaced += 1
-            if not replaced:
-                self.lbl_status.setText("No other moment available in this footage (gap / repeat rules).")
-                return
-            self._after_structure_change()
+            self._replace_moments(targets)
+        elif action == "auto_slip":
+            self._replace_moments(targets, nearby=True)
+        elif action == "face_zoom":
+            self._face_zoom(targets)
         elif action == "auto_color":
             self._auto_color(targets)
         elif action == "reset_color":
@@ -1793,8 +2026,9 @@ class MainWindow(QMainWindow):
                      lambda: self.d_bin),
             TourStep("2. Let Auto Edit build the edit",
                      "<b>✨ Auto Edit</b> picks the best moments and puts them on the timeline.<br>"
-                     "<b>− / +</b> rebuild it shorter or longer; <b>🎣 New hook</b> swaps the first clip for "
-                     "another strong moment.",
+                     "<b>− / +</b> rebuild it shorter or longer. Above the timeline, <b>🎣 Hook</b> swaps the "
+                     "first clip for another strong moment, <b>🎯 Auto slip</b> finds the best moment close to a "
+                     "clip and <b>🔀 Other moment</b> picks another one anywhere in its footage.",
                      lambda: self.grp_auto),
             TourStep("Preview",
                      "<b>Space</b> plays and pauses. Titles can be <b>dragged here</b> to place them.<br>"
@@ -1882,7 +2116,7 @@ class MainWindow(QMainWindow):
             return
         if req == "detect_log":
             if clip is not None:
-                self.detect_log([clip.footage_id])
+                self.detect_log(list(dict.fromkeys(c.footage_id for c in self.inspector.targets or [clip])))
             return
         if req == "detect_log_all":
             self.detect_log(list(self.project.footage))
@@ -1893,11 +2127,19 @@ class MainWindow(QMainWindow):
         elif clip is None:
             return
         elif req == "auto_color":
-            self._auto_color([clip])
+            self._auto_color(self.inspector.targets or [clip])
             return
+        elif req.startswith("face_zoom:"):
+            self._face_zoom(self.inspector.targets or [clip], req.split(":", 1)[1])
+            return
+        elif req == "reset_framing":
+            self.project_checkpoint()
+            for c in self.inspector.targets or [clip]:
+                c.zoom, c.offset_x, c.offset_y = 1.0, 0.0, 0.0
         elif req == "reset_color":
             self.project_checkpoint()
-            clip.grade = Grade()
+            for c in self.inspector.targets or [clip]:
+                c.grade = Grade()
         elif req == "copy_grade_all":
             self.project_checkpoint()
             for c in self.project.clips:
@@ -1905,6 +2147,53 @@ class MainWindow(QMainWindow):
         self.inspector.set_clip(self.selected_clip())
         self.viewer.refresh()
         self._update_title()
+
+    def _face_zoom(self, clips: list[TimelineClip], size: str = "close"):
+        """Zoom each clip in on its main face (in the background); applied in one undo step."""
+        st = self.project.settings
+        tw, th = frame_size(st.aspect, st.resolution)
+        jobs = [(TimelineClip(c.footage_id, c.src_in, c.src_out, id=c.id), self.project.footage[c.footage_id])
+                for c in clips if c.footage_id in self.project.footage]
+        if not jobs:
+            return
+        use_proxies, mode = st.use_proxies, st.fit_mode
+        frac = reframe.FACE_SIZES.get(size, reframe.FACE_SIZES["close"])
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=4)
+            try:
+                out = {}
+                for k, (c, f) in enumerate(jobs):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    progress(k / len(jobs), f"Finding faces: {k + 1}/{len(jobs)}")
+                    dec = pool.get(f, use_proxies, 480)
+                    frames = [img.copy() for i in range(5)
+                              if (img := dec.frame_at(c.src_in + c.duration * (i + 0.5) / 5)) is not None]
+                    face = reframe.find_face(frames)
+                    if face is not None:
+                        h, w = frames[0].shape[:2]
+                        out[c.id] = reframe.face_framing(face, w, h, tw, th, mode, frac)
+                return out
+            finally:
+                pool.close()
+
+        def done(framing: dict):
+            targets = [c for c in self.project.clips if c.id in framing]
+            missed = len(jobs) - len(targets)
+            if targets:
+                self.project_checkpoint()
+                for c in targets:
+                    c.zoom, c.offset_x, c.offset_y = framing[c.id]
+                self.project.dirty = True
+                self.inspector.set_clip(self.selected_clip())
+                self.viewer.refresh()
+                self._update_title()
+            self.lbl_status.setText(f"Zoomed in on the face in {len(targets)} clip{'s' * (len(targets) != 1)}"
+                                    + (f" · no face found in {missed}" if missed else "") if targets
+                                    else "No face found in the selected clip" + ("s" if len(jobs) > 1 else ""))
+
+        self.tasks.submit("Zoom to face", job, done, self._task_error("Zoom to face"))
 
     def _auto_color(self, clips: list[TimelineClip]):
         """Auto-grade clips in the background (progress + Cancel in the status bar); applied in one undo step."""
@@ -2145,6 +2434,9 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             e.ignore()
             return
+        if self.viewer.is_fullscreen():
+            self.viewer.toggle_fullscreen()
+        autosave.clear_recovery()
         self.viewer.stop()
         self.tasks.shutdown()
         self._audio_cancel.set()

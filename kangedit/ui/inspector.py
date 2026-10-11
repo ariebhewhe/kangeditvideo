@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
+                               QLabel, QMenu, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
@@ -96,7 +96,14 @@ GRADE_PARAMS = [
     ("tint", "Tint", -100, 100, 0, 1, 0, ""),
     ("saturation", "Saturation", 0, 200, 100, 1, 0, " %"),
     ("vibrance", "Vibrance", -100, 100, 0, 1, 0, ""),
+    # Sharpness and halation depend on neighbouring pixels: applied after the look, not part of the LUT.
+    ("sharpness", "Sharpness", -100, 100, 0, 1, 0, ""),
+    ("halation", "Halation", 0, 100, 0, 1, 0, ""),
 ]
+PARAM_TIPS = {
+    "sharpness": "Sharpen fine detail (negative values soften)",
+    "halation": "Film's warm red glow around bright highlights",
+}
 
 
 IMPORT_LUT = "__import_lut__"
@@ -139,11 +146,14 @@ class Inspector(QScrollArea):
         super().__init__(parent)
         self.project = project
         self.clip: Optional[TimelineClip] = None
+        self.others: list[TimelineClip] = []          # the rest of the selection: edits apply to them too
+        self.selection: Callable[[], list[str]] = list  # ids of the selected clips (set by the main window)
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # fit the panel's width, never cut off
         body = QWidget()
         self.setWidget(body)
         lay = QVBoxLayout(body)
-        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setContentsMargins(6, 6, 14, 6)    # room for the scroll bar on the right
 
         self.lbl_title = QLabel("Select a clip on the timeline")
         self.lbl_title.setStyleSheet("font-weight: 600; font-size: 13px;")
@@ -181,9 +191,9 @@ class Inspector(QScrollArea):
         self.sp_split.setToolTip("Move the audio cut:\n  negative = J-cut (this clip's sound starts early, "
                                  "under the previous picture)\n  positive = L-cut (the previous clip's sound "
                                  "runs on under this picture)")
-        self.cb_trans.currentIndexChanged.connect(self._set_edit)
-        self.sp_tdur.valueChanged.connect(self._set_edit)
-        self.sp_split.valueChanged.connect(self._set_edit)
+        self.cb_trans.currentIndexChanged.connect(lambda _: self._set_edit("transition"))
+        self.sp_tdur.valueChanged.connect(lambda _: self._set_edit("transition_dur"))
+        self.sp_split.valueChanged.connect(lambda _: self._set_edit("audio_split"))
         f.addRow("Transition", self.cb_trans)
         f.addRow("Length", self.sp_tdur)
         f.addRow("Audio J / L", self.sp_split)
@@ -202,17 +212,20 @@ class Inspector(QScrollArea):
         b_detect_all = QPushButton("Detect all")
         b_detect_all.setToolTip("Identify the camera of every imported file and choose each one's log profile")
         b_detect_all.clicked.connect(lambda: self.request.emit("detect_log_all"))
-        cam_row = QHBoxLayout()
-        cam_row.addWidget(self.lbl_camera, 1)
-        cam_row.addWidget(b_detect)
-        cam_row.addWidget(b_detect_all)
+        cam_row = QVBoxLayout()     # the camera name above its buttons: fits a narrow panel
+        cam_row.addWidget(self.lbl_camera)
+        cam_btns = QHBoxLayout()
+        cam_btns.addWidget(b_detect)
+        cam_btns.addWidget(b_detect_all)
+        cam_btns.addStretch(1)
+        cam_row.addLayout(cam_btns)
         self.cb_log = QComboBox()
         self.cb_log.setToolTip("Built-in camera conversion, or an imported .cube LUT that converts log to Rec.709")
         self.cb_tone = QComboBox()
         for key, label in TONEMAPS:
             self.cb_tone.addItem(label, key)
-        self.cb_log.currentIndexChanged.connect(self._footage_color)
-        self.cb_tone.currentIndexChanged.connect(self._footage_color)
+        self.cb_log.currentIndexChanged.connect(lambda _: self._footage_color("log"))
+        self.cb_tone.currentIndexChanged.connect(lambda _: self._footage_color("tone"))
         f.addRow("Camera", cam_row)
         f.addRow("Camera profile", self.cb_log)
         f.addRow("Conversion", self.cb_tone)
@@ -241,7 +254,7 @@ class Inspector(QScrollArea):
         self.params: dict[str, ParamSlider] = {}
         for key, label, lo, hi, dflt, step, dec, suf in GRADE_PARAMS:
             ps = ParamSlider(lo, hi, dflt, step, dec, suf)
-            ps.setToolTip("Double-click to reset")
+            ps.setToolTip((PARAM_TIPS[key] + ". " if key in PARAM_TIPS else "") + "Double-click to reset")
             ps.changed.connect(lambda val, k=key: self._set_grade(k, val))
             self.params[key] = ps
             form.addRow(label, ps)
@@ -264,6 +277,16 @@ class Inspector(QScrollArea):
         self.rf_y = ParamSlider(-1.0, 1.0, 0.0, 0.01, 2)
         for ps, key in ((self.rf_zoom, "zoom"), (self.rf_x, "offset_x"), (self.rf_y, "offset_y")):
             ps.changed.connect(lambda val, k=key: self._set_attr(k, val, "reframe"))
+        b_face = QPushButton("🙂 Zoom to face")
+        b_face.setToolTip("Find the face in the clip and zoom in on it, to show off an expression or reaction.\n"
+                          "Applies to every selected clip.")
+        m = QMenu(b_face)
+        for key, label in (("medium", "Medium shot"), ("close", "Close-up"), ("extreme", "Extreme close-up")):
+            m.addAction(label, lambda k=key: self.request.emit("face_zoom:" + k))
+        m.addSeparator()
+        m.addAction("Reset framing", lambda: self.request.emit("reset_framing"))
+        b_face.setMenu(m)
+        f.addRow(b_face)
         f.addRow("Zoom", self.rf_zoom)
         f.addRow("Pan X", self.rf_x)
         f.addRow("Pan Y", self.rf_y)
@@ -289,22 +312,30 @@ class Inspector(QScrollArea):
         self.project = project
         self.set_clip(None)
 
+    @property
+    def targets(self) -> list[TimelineClip]:
+        """The clips an edit applies to: the shown clip and the rest of the selection."""
+        return ([self.clip] if self.clip is not None else []) + self.others
+
     def set_clip(self, clip: Optional[TimelineClip]):
         self.clip = clip
+        sel = set(self.selection()) if clip is not None else set()
+        self.others = [c for c in self.project.clips if c.id in sel and c is not clip] if clip and clip.id in sel else []
         self.widget().setEnabled(clip is not None)
         if clip is None:
             self.lbl_title.setText("Select a clip on the timeline")
             return
         f = self.project.footage[clip.footage_id]
         score = f"  ·  score {clip.score * 100:.0f}" if clip.score is not None else ""
-        self.lbl_title.setText(f"{f.name}{score}")
+        many = f"\n{len(self.others) + 1} clips selected: changes apply to all of them" if self.others else ""
+        self.lbl_title.setText(f"{f.name}{score}{many}")
         for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
                   self.sp_split):
             w.blockSignals(True)
         self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
         self.sp_tdur.setValue(clip.transition_dur)
         self.sp_split.setValue(clip.audio_split)
-        self.grp_edit.setEnabled(self.project.index_of(clip.id) > 0)
+        self.grp_edit.setEnabled(any(self.project.index_of(c.id) > 0 for c in self.targets))
         self.sp_in.setMaximum(f.duration)
         self.sp_out.setMaximum(f.duration)
         self.sp_in.setValue(clip.src_in)
@@ -340,30 +371,34 @@ class Inspector(QScrollArea):
         self.lbl_dur.setText(f"{c.duration:.2f} s")
         self.changed.emit("trim")
 
-    def _set_edit(self):
-        c = self.clip
-        if c is None:
+    def _set_edit(self, key: str):
+        if self.clip is None:
             return
-        self.before_change.emit("trim:edit")
-        c.transition = self.cb_trans.currentData() or ""
-        c.transition_dur = self.sp_tdur.value()
-        c.audio_split = self.sp_split.value()
+        val = {"transition": lambda: self.cb_trans.currentData() or "",
+               "transition_dur": self.sp_tdur.value, "audio_split": self.sp_split.value}[key]()
+        self.before_change.emit("trim:" + key)
+        for c in self.targets:
+            if self.project.index_of(c.id) > 0:     # the first clip has no edit into it
+                setattr(c, key, val)
         self.changed.emit("trim")
 
-    def _footage_color(self):
+    def _footage_color(self, which: str):
         c = self.clip
         if c is None:
             return
-        f = self.project.footage[c.footage_id]
         if self.cb_log.currentData() == IMPORT_LUT:
             self.set_clip(c)   # put the previous choice back; the import selects the new LUT
             self.request.emit("import_lut_log")
             return
         self.before_change.emit("footage_color")
-        if f.log_profile != self.cb_log.currentData():
-            f.log_profile = self.cb_log.currentData()
-            f.log_note, f.log_pending = "Chosen manually", False
-        f.tonemap = self.cb_tone.currentData()
+        for fid in dict.fromkeys(x.footage_id for x in self.targets):
+            f = self.project.footage[fid]
+            if which == "log" and f.log_profile != self.cb_log.currentData():
+                f.log_profile = self.cb_log.currentData()
+                f.log_note, f.log_pending = "Chosen manually", False
+            elif which == "tone":
+                f.tonemap = self.cb_tone.currentData()
+        f = self.project.footage[c.footage_id]
         self.cb_tone.setEnabled(effective_profile(f.log_profile) in LOG_PROFILES)
         self._show_camera(f)
         self.changed.emit("footage_color")
@@ -380,7 +415,8 @@ class Inspector(QScrollArea):
             self.request.emit("import_lut_look")
             return
         self.before_change.emit("grade:look")
-        c.grade.look = self.cb_look.currentData() or ""
+        for x in self.targets:
+            x.grade.look = self.cb_look.currentData() or ""
         self.look_mix.setEnabled(bool(c.grade.look))
         self.changed.emit("grade")
 
@@ -388,12 +424,14 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit("grade:" + key)
-        setattr(self.clip.grade, key, float(val))
+        for c in self.targets:
+            setattr(c.grade, key, float(val))
         self.changed.emit("grade")
 
     def _set_attr(self, key: str, val: float, kind: str):
         if self.clip is None:
             return
         self.before_change.emit(kind + ":" + key)
-        setattr(self.clip, key, float(val))
+        for c in self.targets:
+            setattr(c, key, float(val))
         self.changed.emit(kind)

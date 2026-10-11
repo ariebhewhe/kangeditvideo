@@ -11,7 +11,7 @@ from typing import Optional
 
 from . import reframe
 from .captions import build_captions, caption_layout, write_ass, write_srt
-from .color import needs_color, write_cube
+from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
 from .config import cache_dir, frame_size
 from .edits import ClipPlan, plan
 from .fonts import copy_family
@@ -162,13 +162,21 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         chain.append(reframe.ffmpeg_filter(f.width, f.height, tw, th, s.fit_mode, clip.zoom,
                                            clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
         post = f"[v{i}b]"
-        if needs_color(clip.grade, f.log_profile):
+        color = needs_color(clip.grade, f.log_profile)
+        halation = ffmpeg_halation(clip.grade, th, f"v{i}g", f"v{i}h")
+        if color or halation:
+            matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
+            post += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb48le,"
+        if color:
             lut = f"lut_{i}.cube"
             write_cube(os.path.join(workdir, lut), clip.grade, f.log_profile, f.tonemap)
-            matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
-            post += (f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb48le,"
-                     f"lut3d=file={lut}:interp=tetrahedral,")
-        post += (f"scale=out_color_matrix=bt709:out_range=tv,format={final_fmt},"
+            post += f"lut3d=file={lut}:interp=tetrahedral,"
+        if halation:
+            chain.append(post + f"null[v{i}g]")
+            chain += halation
+            post = f"[v{i}h]"
+        sharpen = ffmpeg_sharpen(clip.grade, th)
+        post += (f"scale=out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
                  f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
         chain.append(post)
         graph += chain

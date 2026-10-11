@@ -350,24 +350,27 @@ class ExportDialog(QDialog):
 
 
 def font_combo(current: str) -> QComboBox:
-    """Editable list of the installed font families (type to search), each shown in its own font."""
+    """Drop-down list of the installed font families (type a name to jump to it), each shown in its own font."""
     cb = QComboBox()
-    cb.setEditable(True)
-    cb.setInsertPolicy(QComboBox.NoInsert)
     cb.setMaxVisibleItems(20)
     families = list(system_fonts()) or QFontDatabase.families()
     for fam in families:
         cb.addItem(fam)
         cb.setItemData(cb.count() - 1, QFont(fam, 11), Qt.FontRole)
-    comp = cb.completer()
-    comp.setFilterMode(Qt.MatchContains)
-    comp.setCaseSensitivity(Qt.CaseInsensitive)
-    idx = cb.findText(current, Qt.MatchFixedString)
-    if idx >= 0:
-        cb.setCurrentIndex(idx)
-    else:
-        cb.setEditText(current)
+    select_font(cb, current)
     return cb
+
+
+def select_font(cb: QComboBox, family: str) -> None:
+    """Show `family` in a font_combo; a font that is not installed is added to the list so it stays chosen."""
+    if not family:
+        return
+    idx = cb.findText(family, Qt.MatchFixedString)
+    if idx < 0:
+        cb.addItem(family)
+        idx = cb.count() - 1
+        cb.setItemData(idx, "Not installed: the export uses a fallback font", Qt.ToolTipRole)
+    cb.setCurrentIndex(idx)
 
 
 class CaptionStyleDialog(QDialog):

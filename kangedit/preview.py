@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from . import reframe
-from .color import Grade, LutCache, apply_grade, needs_color, profile_short
+from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, needs_color, profile_short
 from .decoder import DecoderPool
 from .edits import blend
 from .models import Footage
@@ -375,6 +375,8 @@ class PreviewEngine:
     def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
         fn = self._grader(shot, playing) if look.color else None
         out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
+        if look.color and has_spatial(shot.grade):
+            out = apply_spatial(out, shot.grade)
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGRA)   # Qt's native 32-bit layout: cheapest to paint
 
     def _grader(self, shot: Shot, playing: bool):

@@ -7,7 +7,7 @@ import threading
 
 from PySide6.QtCore import QMimeData, QObject, Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from .. import sfx
@@ -44,7 +44,7 @@ class SoundPanel(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
-        lay.addWidget(QLabel("<b>Find sound effects</b> (MyInstants)"))
+        lay.addWidget(QLabel("<b>Find sound effects</b> (MyInstants)", wordWrap=True))
         row = QHBoxLayout()
         self.ed_search = QLineEdit(placeholderText="e.g. vine boom, whoosh, applause, ding…")
         self.ed_search.returnPressed.connect(self.search)
@@ -74,18 +74,18 @@ class SoundPanel(QWidget):
         lay.addWidget(self.lbl_status)
 
         lay.addSpacing(6)
-        lay.addWidget(QLabel("<b>Library</b> — drag onto the timeline, or add at the playhead"))
+        lay.addWidget(QLabel("<b>Library</b> — drag onto the timeline, or add at the playhead", wordWrap=True))
         self.library = _LibraryList()
         self.library.setDragEnabled(True)
         self.library.itemDoubleClicked.connect(self._preview_local)
         lay.addWidget(self.library, 2)
-        row = QHBoxLayout()
-        for text, slot in (("▶ Play", lambda: self._preview_local(self.library.currentItem())),
-                           ("＋ Add", self._add_local), ("Import…", self._import),
-                           ("Delete", self._delete), ("Folder", lambda: open_path(sfx_dir()))):
+        row = QGridLayout()         # two rows of buttons: fits a narrow panel
+        for k, (text, slot) in enumerate((("▶ Play", lambda: self._preview_local(self.library.currentItem())),
+                                          ("＋ Add", self._add_local), ("Import…", self._import),
+                                          ("Delete", self._delete), ("Folder", lambda: open_path(sfx_dir())))):
             b = QPushButton(text)
             b.clicked.connect(slot)
-            row.addWidget(b)
+            row.addWidget(b, k // 3, k % 3)
         lay.addLayout(row)
         note = QLabel("MyInstants sounds are uploaded by its users: make sure you may use a sound before "
                       "publishing a video with it.")

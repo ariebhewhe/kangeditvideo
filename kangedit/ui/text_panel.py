@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBo
 
 from ..models import Project, TextClip
 from ..titles import ALIGNS, ANIM_IN, ANIM_OUT, TEXT_PRESETS
-from .dialogs import font_combo
+from .dialogs import font_combo, select_font
 from .theme import fmt_time
 
 # 3 x 3 position grid: (x, y, align)
@@ -32,11 +32,13 @@ class TextPanel(QScrollArea):
         super().__init__(parent)
         self.project = project
         self.text: Optional[TextClip] = None
+        self.playhead: Callable[[], float] = lambda: 0.0   # timeline time (set by the main window)
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # fit the panel's width, never cut off
         body = QWidget()
         self.setWidget(body)
         lay = QVBoxLayout(body)
-        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setContentsMargins(6, 6, 14, 6)    # room for the scroll bar on the right
 
         g = QGroupBox("Add a title (at the playhead)")
         grid = QGridLayout(g)
@@ -111,7 +113,8 @@ class TextPanel(QScrollArea):
                 b.setToolTip(f"{['Top', 'Middle', 'Bottom'][r]} {['left', 'centre', 'right'][c]}")
                 b.clicked.connect(lambda _=False, x=x, y=y, a=align: self._set_pos(x, y, a))
                 pos.addWidget(b, r, c)
-        pos_row = QHBoxLayout()
+        pos_row = QVBoxLayout()     # the grid above X / Y: fits a narrow panel
+        pos.setColumnStretch(3, 1)
         pos_row.addLayout(pos)
         xy = QFormLayout()
         self.sp_x = QDoubleSpinBox(decimals=0, suffix=" %")
@@ -128,7 +131,7 @@ class TextPanel(QScrollArea):
         xy.addRow("Align", self.cb_align)
         pos_row.addLayout(xy)
         f.addRow("Position", pos_row)
-        hint = QLabel("Tip: drag the text in the viewer to place it.")
+        hint = QLabel("Tip: drag the text in the viewer to place it.", wordWrap=True)
         hint.setStyleSheet("color: #8b909a;")
         f.addRow("", hint)
 
@@ -144,18 +147,14 @@ class TextPanel(QScrollArea):
         f.addRow("Animate out", self.cb_out)
         f.addRow("Animation length", self.sp_anim)
 
-        row = QHBoxLayout()
         self.sp_start = QDoubleSpinBox(decimals=2, singleStep=0.1, suffix=" s")
         self.sp_start.setRange(0, 1e5)
         self.sp_start.valueChanged.connect(lambda v: self._set("start", v))
         self.sp_dur = QDoubleSpinBox(decimals=2, singleStep=0.1, suffix=" s")
         self.sp_dur.setRange(0.25, 3600)
         self.sp_dur.valueChanged.connect(lambda v: self._set("duration", v))
-        row.addWidget(QLabel("Starts"))
-        row.addWidget(self.sp_start)
-        row.addWidget(QLabel("lasts"))
-        row.addWidget(self.sp_dur)
-        f.addRow("Timing", row)
+        f.addRow("Starts at", self.sp_start)
+        f.addRow("Lasts", self.sp_dur)
         b_del = QPushButton("🗑 Delete title")
         b_del.clicked.connect(lambda: self.text and self.delete_requested.emit(self.text.id))
         f.addRow(b_del)
@@ -191,6 +190,17 @@ class TextPanel(QScrollArea):
         self.list.setVisible(bool(self.project.texts))
         self._load()
 
+    def showEvent(self, e):
+        """Opening the tab with no title selected selects the one at the playhead (else the nearest), so
+        its font, size and style can be changed straight away."""
+        super().showEvent(e)
+        if self.text is None and self.project.texts:
+            t = self.playhead()
+            here = [x for x in self.project.texts if x.start <= t < x.start + x.duration]
+            tc = here[0] if here else min(self.project.texts, key=lambda x: abs(x.start - t))
+            self.refresh(select=tc.id)
+            self.selected.emit(tc.id)
+
     def focus_text(self):
         self.ed_text.setFocus()
         self.ed_text.selectAll()
@@ -205,18 +215,16 @@ class TextPanel(QScrollArea):
     def _load(self):
         tc = self.text
         self.editor.setEnabled(tc is not None)
-        self.editor.setTitle("Selected title" if tc else "Selected title (select one on the timeline or above)")
+        self.editor.setTitle("Selected title" if tc else
+                             "Selected title (select one on the timeline or above)" if self.project.texts else
+                             "Add a title above, then change its font, size and style here")
         if tc is None:
             return
         for w in self._fields:
             w.blockSignals(True)
         if self.ed_text.toPlainText() != tc.text:
             self.ed_text.setPlainText(tc.text)
-        idx = self.cb_font.findText(tc.font, Qt.MatchFixedString)
-        if idx >= 0:
-            self.cb_font.setCurrentIndex(idx)
-        else:
-            self.cb_font.setEditText(tc.font)
+        select_font(self.cb_font, tc.font)
         self.sp_size.setValue(tc.size_pct)
         self.chk_bold.setChecked(tc.bold)
         self.chk_italic.setChecked(tc.italic)

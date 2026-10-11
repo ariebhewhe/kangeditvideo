@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QScrollBar, QSlider, QToolButton,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSlider, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import sfx
@@ -998,6 +998,8 @@ class TimelineView(QWidget):
                   ("reset_color", f"Reset color{many}"),
                   ("copy_grade", "Copy this clip's grade to the selected clips" if n > 1 else "Copy grade to all clips"),
                   ("alt_moment", f"Replace{many} with another best moment"),
+                  ("auto_slip", f"Auto slip{many} to the best moment nearby"),
+                  ("face_zoom", f"Zoom{many} to face"),
                   (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
             if key is None:
@@ -1054,6 +1056,14 @@ class TimelinePanel(QWidget):
                                  "and out at its end")
         self.btn_fade.setPopupMode(QToolButton.InstantPopup)
         self.btn_fade.setMenu(self._fade_menu())
+        self.btn_hook = QToolButton(text="🎣 Hook")
+        self.btn_hook.setToolTip("Replace the first clip (the hook) with another strong moment not used in the "
+                                 "edit (H). Click again for the next one; Undo brings the previous back.")
+        self.btn_auto_slip = QToolButton(text="🎯 Auto slip")
+        self.btn_auto_slip.setToolTip("Slip the selected clip to the best moment close by in its footage, keeping "
+                                      "its length and place (J). Click again for the next best nearby.")
+        self.btn_alt = QToolButton(text="🔀 Other moment")
+        self.btn_alt.setToolTip("Replace the selected clip with another best moment anywhere in its footage (R)")
         self.btn_fit = QToolButton(text="Fit")
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(2, 400)
@@ -1068,6 +1078,11 @@ class TimelinePanel(QWidget):
         top.setContentsMargins(4, 2, 4, 2)
         for w in (self.btn_move, self.btn_slip, self.btn_split, self.btn_delete, self.btn_fade):
             top.addWidget(w)
+        sep = QLabel("|")
+        sep.setStyleSheet("color: #45484f;")
+        top.addWidget(sep)
+        for w in (self.btn_hook, self.btn_auto_slip, self.btn_alt):
+            top.addWidget(w)
         top.addSpacing(12)
         top.addWidget(self.lbl, 1)
         top.addWidget(QLabel("Zoom"))
@@ -1080,22 +1095,36 @@ class TimelinePanel(QWidget):
         lay.addWidget(self.view, 1)
         lay.addWidget(self.scroll)
 
+    FADE_LENGTHS = (0.5, 1.0, 2.0, 3.0)
+
     def _fade_menu(self) -> QMenu:
         m = QMenu(self)
         box = QWidget()
         f = QFormLayout(box)
         f.setContentsMargins(10, 8, 10, 8)
-        self.sp_fade_in, self.sp_fade_out = (QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" s",
-                                                            specialValueText="Off") for _ in range(2))
-        for sp in (self.sp_fade_in, self.sp_fade_out):
-            sp.setRange(0.0, 10.0)
-            sp.valueChanged.connect(self._fades_edited)
+        self.btn_fade_in, self.btn_fade_out = QPushButton("Fade in at start"), QPushButton("Fade out at end")
+        toggles = QHBoxLayout()
+        for b in (self.btn_fade_in, self.btn_fade_out):
+            b.setCheckable(True)
+            b.setObjectName("toggle")
+            b.toggled.connect(self._fades_edited)
+            toggles.addWidget(b)
+        self._fade_len = 1.0
+        self.fade_len_group = QButtonGroup(box)
+        self.fade_len_group.setExclusive(True)
+        lengths = QHBoxLayout()
+        for k, v in enumerate(self.FADE_LENGTHS):
+            b = QPushButton(f"{v:g} s", checkable=True)
+            b.setObjectName("toggle")
+            self.fade_len_group.addButton(b, k)
+            lengths.addWidget(b)
+        self.fade_len_group.idClicked.connect(self._fade_length_picked)
         self.chk_fade_picture = QCheckBox("Picture (from / to black)")
         self.chk_fade_sound = QCheckBox("Sound (from / to silence)")
         for chk in (self.chk_fade_picture, self.chk_fade_sound):
             chk.toggled.connect(self._fades_edited)
-        f.addRow("Fade in at start", self.sp_fade_in)
-        f.addRow("Fade out at end", self.sp_fade_out)
+        f.addRow(toggles)
+        f.addRow("Length", lengths)
         f.addRow(self.chk_fade_picture)
         f.addRow(self.chk_fade_sound)
         act = QWidgetAction(m)
@@ -1106,20 +1135,31 @@ class TimelinePanel(QWidget):
     def sync_fades(self):
         """Show the project's fade settings."""
         s = self.view.project.settings
-        ws = (self.sp_fade_in, self.sp_fade_out, self.chk_fade_picture, self.chk_fade_sound)
+        ws = (self.btn_fade_in, self.btn_fade_out, self.chk_fade_picture, self.chk_fade_sound)
         for w in ws:
             w.blockSignals(True)
-        self.sp_fade_in.setValue(s.fade_in)
-        self.sp_fade_out.setValue(s.fade_out)
+        self._fade_len = s.fade_in if s.fade_in > 0 else (s.fade_out if s.fade_out > 0 else self._fade_len)
+        self.btn_fade_in.setChecked(s.fade_in > 0)
+        self.btn_fade_out.setChecked(s.fade_out > 0)
         self.chk_fade_picture.setChecked(s.fade_picture)
         self.chk_fade_sound.setChecked(s.fade_sound)
         for w in ws:
             w.blockSignals(False)
+        self._show_fade_length()
         self._fade_label()
+
+    def _show_fade_length(self):
+        k = min(range(len(self.FADE_LENGTHS)), key=lambda i: abs(self.FADE_LENGTHS[i] - self._fade_len))
+        self.fade_len_group.button(k).setChecked(True)
+
+    def _fade_length_picked(self, k: int):
+        self._fade_len = self.FADE_LENGTHS[k]
+        self._fades_edited()
 
     def _fades_edited(self):
         s = self.view.project.settings
-        s.fade_in, s.fade_out = self.sp_fade_in.value(), self.sp_fade_out.value()
+        s.fade_in = self._fade_len if self.btn_fade_in.isChecked() else 0.0
+        s.fade_out = self._fade_len if self.btn_fade_out.isChecked() else 0.0
         s.fade_picture, s.fade_sound = self.chk_fade_picture.isChecked(), self.chk_fade_sound.isChecked()
         self._fade_label()
         self.view.update()
@@ -1128,7 +1168,8 @@ class TimelinePanel(QWidget):
     def _fade_label(self):
         s = self.view.project.settings
         on = (s.fade_in > 0 or s.fade_out > 0) and (s.fade_picture or s.fade_sound)
-        self.btn_fade.setText("◐ Fade" + (f" {s.fade_in:g}/{s.fade_out:g} s" if on else ""))
+        ends = "/".join(n for n, v in (("in", s.fade_in), ("out", s.fade_out)) if v > 0)
+        self.btn_fade.setText("◐ Fade" + (f" {ends} {max(s.fade_in, s.fade_out):g} s" if on else ""))
 
     def _on_scroll(self, v):
         if abs(v - self.view.scroll_x) >= 1:

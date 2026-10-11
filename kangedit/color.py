@@ -264,6 +264,8 @@ class Grade:
     vibrance: float = 0.0      # -100..100
     look: str = ""             # creative .cube LUT applied after the grade ("" = none)
     look_mix: float = 100.0    # look strength 0..100 %
+    sharpness: float = 0.0     # -100 (soften) .. 100 (sharpen); spatial, not part of the LUT
+    halation: float = 0.0      # 0..100: film's warm glow around highlights; spatial, not part of the LUT
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -281,7 +283,12 @@ class Grade:
         return self == Grade()
 
     def key(self) -> tuple:
-        return tuple(v if isinstance(v, str) else round(v, 4) for v in asdict(self).values())
+        """The color part of the grade (what a LUT holds): sharpness and halation are left out."""
+        return tuple(v if isinstance(v, str) else round(v, 4) for k, v in asdict(self).items()
+                     if k not in SPATIAL_PARAMS)
+
+
+SPATIAL_PARAMS = ("sharpness", "halation")
 
 
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
@@ -365,7 +372,82 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
 
 def needs_color(grade: Grade, log_profile: str) -> bool:
     return (log_profile in LOG_PROFILES or log_profile in lutlib.LUT_ONLY or is_lut_profile(log_profile)
-            or not grade.is_identity())
+            or grade.key() != Grade().key())
+
+
+# ----------------------------------------------------------------------------- sharpness / halation
+# Both depend on neighbouring pixels, so they run on the picture after the LUT: in the viewer with OpenCV
+# (apply_spatial) and in the export with matching ffmpeg filters (ffmpeg_halation / ffmpeg_sharpen).
+# Sizes scale with the frame height so the viewer and every export resolution look alike.
+
+HALATION_THRESHOLD = 0.7                     # highlights brighter than this (luma) glow
+HALATION_TINT = (1.0, 0.28, 0.06)            # red-orange, as the red layer of film catches the bounce
+HALATION_GAIN = 1.4                          # glow strength at 100
+
+
+def has_spatial(grade: Grade) -> bool:
+    return abs(grade.sharpness) >= 0.5 or grade.halation >= 0.5
+
+
+def sharpen_size(height: int) -> int:
+    """Odd blur size of the unsharp mask (5 px at 1080 p)."""
+    n = int(round(5 * height / 1080.0))
+    return max(3, min(23, n | 1))
+
+
+def sharpen_amount(sharpness: float) -> float:
+    """Unsharp mask amount: up to 1.5 when sharpening, down to -1 (the blurred picture) when softening."""
+    return sharpness / 100.0 * (1.5 if sharpness > 0 else 1.0)
+
+
+def halation_sigma(height: int) -> float:
+    return 0.012 * height
+
+
+def apply_spatial(img: np.ndarray, grade: Grade) -> np.ndarray:
+    """Halation, then sharpness, on an RGB uint8 picture (the viewer's version of the export filters)."""
+    import cv2
+    h = img.shape[0]
+    out = img
+    if grade.halation >= 0.5:
+        x = out.astype(np.float32) * np.float32(1.0 / 255.0)
+        lum = np.clip((x @ _LUMA - HALATION_THRESHOLD) / (1.0 - HALATION_THRESHOLD), 0.0, 1.0)
+        # Blur at quarter size: the glow is soft anyway, and this keeps playback fast.
+        small = cv2.resize(lum, (max(1, lum.shape[1] // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(small, (0, 0), max(0.5, halation_sigma(h) / 4))
+        lum = cv2.resize(small, (lum.shape[1], h), interpolation=cv2.INTER_LINEAR)
+        k = np.float32(grade.halation / 100.0)
+        glow = np.clip(lum[..., None] * (np.asarray(HALATION_TINT, np.float32) * (HALATION_GAIN * k)), 0.0, 1.0)
+        x = 1.0 - (1.0 - x) * (1.0 - glow)
+        out = (x * 255.0 + 0.5).astype(np.uint8)
+    if abs(grade.sharpness) >= 0.5:
+        n = sharpen_size(h)
+        amt = sharpen_amount(grade.sharpness)
+        out = cv2.addWeighted(out, 1.0 + amt, cv2.GaussianBlur(out, (n, n), 0), -amt, 0.0)
+    return out
+
+
+def ffmpeg_halation(grade: Grade, height: int, inp: str, out: str) -> list[str]:
+    """Filter graph lines adding halation to RGB stream [inp] as [out] (nothing when off)."""
+    if grade.halation < 0.5:
+        return []
+    t = HALATION_THRESHOLD
+    luma = ":".join(f"{c}{d}={_LUMA[j]:.4f}" for c in "rgb" for j, d in enumerate("rgb"))
+    tint = ":".join(f"{c}{c}={v * HALATION_GAIN * grade.halation / 100.0:.5f}" for c, v in zip("rgb", HALATION_TINT))
+    return [f"[{inp}]split[{inp}h0][{inp}h1]",
+            f"[{inp}h1]colorchannelmixer={luma},colorlevels=rimin={t}:gimin={t}:bimin={t},"
+            f"colorchannelmixer={tint},format=gbrp16le,"
+            f"gblur=sigma={halation_sigma(height):.2f}[{inp}hg]",
+            f"[{inp}h0]format=gbrp16le[{inp}h2]",
+            f"[{inp}h2][{inp}hg]blend=all_mode=screen[{out}]"]
+
+
+def ffmpeg_sharpen(grade: Grade, height: int) -> str:
+    """unsharp filter (luma) for a YUV stream, "" when off."""
+    if abs(grade.sharpness) < 0.5:
+        return ""
+    n = sharpen_size(height)
+    return f"unsharp={n}:{n}:{sharpen_amount(grade.sharpness):.3f}:{n}:{n}:0"
 
 
 # ----------------------------------------------------------------------------- LUTs

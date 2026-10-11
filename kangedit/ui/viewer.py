@@ -22,6 +22,7 @@ from ..fonts import ensure_qt_font
 from ..models import Project, TextClip
 from ..titles import text_state
 from ..preview import Look, PreviewEngine, Rendered, Shot
+from .platform_overlay import draw_platform_overlay
 from .text_render import draw_text, text_rect
 from .theme import fmt_time
 
@@ -34,6 +35,7 @@ class Canvas(QWidget):
     text_released = Signal(str, bool)          # title id, whether it was moved
     text_activated = Signal(str)               # double-click: edit the title
     context_menu = Signal(object, str)         # global position, title id under the mouse ("" = none)
+    background_activated = Signal()            # double-click outside the titles
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +56,7 @@ class Canvas(QWidget):
         self.out_h = 1080
         self.message = "Import footage and press Auto Edit"
         self.show_guides = False
+        self.platform_overlay = ""             # PLATFORM_OVERLAYS key: app interface drawn over the picture
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(320, 180)
 
@@ -84,6 +87,8 @@ class Canvas(QWidget):
             p.setOpacity(self.overlay_gain)
             self._draw_caption(p, r)
             p.setOpacity(1.0)
+        if self.platform_overlay:
+            draw_platform_overlay(p, r, self.platform_overlay)
 
     def _draw_texts(self, p: QPainter, r: QRectF):
         self._text_rects = []
@@ -153,6 +158,8 @@ class Canvas(QWidget):
         tid = self._text_at(e.position())
         if tid:
             self.text_activated.emit(tid)
+        else:
+            self.background_activated.emit()
 
     def _draw_caption(self, p: QPainter, r: QRectF):
         """Same layout and word animations as the burned-in export (captions.write_ass)."""
@@ -281,6 +288,12 @@ class Viewer(QWidget):
         self.cb_adjust.setToolTip("Color profile, LUTs and grading in the viewer.\n"
                                   "Turn them off for lighter playback: export always includes them.")
         self.cb_adjust.currentIndexChanged.connect(lambda _: self.set_adjust_mode(self.cb_adjust.currentData()))
+        self.btn_full = QPushButton("⛶")
+        self.btn_full.setFixedWidth(36)
+        self.btn_full.setToolTip("Full screen preview (F11, or double-click the picture). Esc to leave.")
+        self.btn_full.clicked.connect(self.toggle_fullscreen)
+        self.canvas.background_activated.connect(self.toggle_fullscreen)
+        self._home: Optional[tuple[QWidget, int]] = None   # where the viewer sits while full screen
 
         bar = QHBoxLayout()
         bar.addWidget(self.lbl_time)
@@ -290,10 +303,69 @@ class Viewer(QWidget):
         bar.addStretch(1)
         bar.addWidget(self.lbl_info)
         bar.addWidget(self.cb_adjust)
+        bar.addWidget(self.btn_full)
+        # Keys go to the viewer (full screen playback keys), never to a focused button.
+        for w in (self.btn_start, self.btn_prev, self.btn_play, self.btn_next, self.btn_end, self.cb_adjust,
+                  self.btn_full):
+            w.setFocusPolicy(Qt.NoFocus)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(self.canvas, 1)
         lay.addLayout(bar)
+
+    # ------------------------------------------------------------------ full screen
+    def is_fullscreen(self) -> bool:
+        return self._home is not None
+
+    def toggle_fullscreen(self):
+        """Show the viewer alone on the whole screen (the timeline keeps playing in it), or put it back."""
+        if self._home is None:
+            parent = self.parentWidget()
+            if parent is None:
+                return
+            idx = parent.indexOf(self) if hasattr(parent, "indexOf") else 0
+            self._home = (parent, idx)
+            screen = self.window().screen()
+            self.setParent(None)
+            self.setWindowFlags(Qt.Window)
+            self.setWindowTitle("Preview")
+            if screen is not None:
+                self.setGeometry(screen.geometry())
+            self.showFullScreen()
+            self.setFocus()
+        else:
+            parent, idx = self._home
+            self._home = None
+            self.setWindowFlags(Qt.Widget)
+            if hasattr(parent, "insertWidget"):
+                parent.insertWidget(idx, self)
+            else:
+                self.setParent(parent)
+            self.show()
+            parent.window().activateWindow()
+        self.btn_full.setText("✕" if self._home else "⛶")
+
+    def keyPressEvent(self, e):
+        """Playback keys while full screen (the main window's shortcuts do not reach this window)."""
+        if self._home is None:
+            return super().keyPressEvent(e)
+        k, shift = e.key(), bool(e.modifiers() & Qt.ShiftModifier)
+        if k in (Qt.Key_Escape, Qt.Key_F11, Qt.Key_F):
+            self.toggle_fullscreen()
+        elif k == Qt.Key_Space:
+            self.toggle_play()
+        elif k in (Qt.Key_Left, Qt.Key_Right):
+            self.step((10 if shift else 1) * (-1 if k == Qt.Key_Left else 1))
+        elif k == Qt.Key_Up:
+            self.prev_clip()
+        elif k == Qt.Key_Down:
+            self.next_clip()
+        elif k == Qt.Key_Home:
+            self.seek(0)
+        elif k == Qt.Key_End:
+            self.seek(max(0.0, self.project.duration - 1e-3))
+        else:
+            super().keyPressEvent(e)
 
     # ------------------------------------------------------------------ public api
     def set_project(self, project: Project):

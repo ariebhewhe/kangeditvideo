@@ -1,0 +1,232 @@
+"""Fade toggles, font list, replace / auto slip, new auto edits, silence, sharpness / halation, full screen."""
+
+import numpy as np
+import pytest
+
+from kangedit.autoedit import AutoEditSettings, score_samples, select
+from kangedit.color import Grade, apply_spatial, ffmpeg_halation, ffmpeg_sharpen, has_spatial, needs_color
+from kangedit.models import Footage, TimelineClip
+
+from .test_edit_features import fake_analysis, two_files
+
+
+@pytest.fixture
+def window(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    w._set_recent([])
+    yield w
+    w.project.dirty = False
+    w.close()
+
+
+def _project_with_clip(w, start=8.0, dur=2.0):
+    footage, analyses = two_files()
+    fid = next(iter(footage))
+    w.project.footage = footage
+    w.analyses.update(analyses)
+    clip = TimelineClip(fid, start, start + dur)
+    w.project.clips = [clip]
+    w.tl.selected = clip.id
+    return clip
+
+
+def test_fade_toggles_set_the_length(window):
+    tp = window.timeline
+    tp.btn_fade_in.setChecked(True)
+    s = window.project.settings
+    assert s.fade_in == 1.0 and s.fade_out == 0.0
+    tp.fade_len_group.button(2).click()          # 2 s
+    assert s.fade_in == 2.0
+    tp.btn_fade_out.setChecked(True)
+    tp.btn_fade_in.setChecked(False)
+    assert (s.fade_in, s.fade_out) == (0.0, 2.0)
+    tp.sync_fades()
+    assert not tp.btn_fade_in.isChecked() and tp.btn_fade_out.isChecked()
+
+
+def test_font_list_is_a_dropdown_that_keeps_a_missing_font(qapp):
+    from kangedit.ui.dialogs import font_combo
+    cb = font_combo("No Such Font 123")
+    assert not cb.isEditable()
+    assert cb.currentText() == "No Such Font 123"
+
+
+def test_replace_gives_a_new_moment_each_time(window):
+    clip = _project_with_clip(window)
+    seen = {round(clip.src_in, 2)}
+    for _ in range(3):
+        window.clip_action("alt_moment", clip.id)
+        assert round(clip.src_in, 2) not in seen
+        seen.add(round(clip.src_in, 2))
+        assert abs(clip.duration - 2.0) < 1e-6
+
+
+def test_replace_without_selection_explains(window):
+    window.tl.selected = ""
+    window.clip_action("alt_moment", "")
+    assert "Select a clip" in window.lbl_status.text()
+
+
+def test_auto_slip_stays_near_the_clip(window):
+    clip = _project_with_clip(window, start=12.0)
+    for _ in range(3):
+        window.clip_action("auto_slip", clip.id)
+        assert abs(clip.duration - 2.0) < 1e-6
+        assert 12.0 - window._slip_window(clip) - 1e-6 <= clip.src_in <= 14.0 + window._slip_window(clip)
+
+
+def test_new_auto_edit_prefers_other_moments():
+    footage, analyses = two_files()
+    s = AutoEditSettings(target_duration=6.0, clip_min=2.0, clip_max=2.0)
+    first = select(footage, analyses, s)
+    again = select(footage, analyses, s, avoid=first, seed=1)
+    overlap = sum(1 for a in again for b in first
+                  if a.footage_id == b.footage_id and a.src_in < b.src_out and b.src_in < a.src_out)
+    assert overlap < len(first)
+
+
+def test_silent_moments_score_lower():
+    f = Footage("a.mp4", 30.0, 1920, 1080, 30.0, True)
+    a = fake_analysis(30.0, 25.0, 1)
+    a.audio[:] = -30.0
+    a.audio[40:60] = -70.0
+    sc = score_samples({f.id: a}, {f.id: f}, "balanced")[f.id]
+    assert sc[50] < sc[80] - 0.3
+
+
+def test_sharpness_and_halation_stay_out_of_the_lut():
+    g = Grade(sharpness=40, halation=60)
+    assert g.key() == Grade().key() and not needs_color(g, "none") and has_spatial(g)
+    img = np.zeros((90, 160, 3), np.uint8)
+    img[40:50, 70:90] = 255
+    out = apply_spatial(img, Grade(halation=100))
+    assert out[35, 80, 0] > out[35, 80, 2] > 0          # a warm glow just outside the highlight
+    assert ffmpeg_halation(Grade(), 1080, "a", "b") == [] and ffmpeg_sharpen(Grade(), 1080) == ""
+    assert "unsharp=5:5:-1.000" in ffmpeg_sharpen(Grade(sharpness=-100), 1080)
+
+
+def test_full_screen_and_back(window):
+    v = window.viewer
+    parent = v.parentWidget()
+    v.toggle_fullscreen()
+    assert v.is_fullscreen() and v.isWindow()
+    v.toggle_fullscreen()
+    assert not v.is_fullscreen() and v.parentWidget() is parent and parent.indexOf(v) == 0
+
+
+def test_platform_overlay_is_remembered(window):
+    window._set_platform_overlay("tiktok")
+    assert window.viewer.canvas.platform_overlay == "tiktok" and window.a_platform["tiktok"].isChecked()
+    window._set_platform_overlay("")
+    assert window.viewer.canvas.platform_overlay == ""
+
+
+def test_inspector_edits_every_selected_clip(window):
+    footage, analyses = two_files()
+    window.project.footage = footage
+    fa, fb = footage
+    clips = [TimelineClip(fa, 1.0, 3.0), TimelineClip(fb, 4.0, 6.0), TimelineClip(fa, 10.0, 12.0)]
+    window.project.clips = clips
+    window.tl.select_all()
+    insp = window.inspector
+    assert len(insp.targets) == 3
+    insp.params["exposure"].changed.emit(1.5)
+    insp.rf_zoom.changed.emit(2.0)
+    assert all(c.grade.exposure == 1.5 and c.zoom == 2.0 for c in clips)
+    insp.sp_tdur.setValue(1.2)
+    assert clips[0].transition_dur != 1.2 and clips[1].transition_dur == clips[2].transition_dur == 1.2
+    insp.cb_tone.setCurrentIndex((insp.cb_tone.currentIndex() + 1) % insp.cb_tone.count())
+    assert footage[fa].tonemap == footage[fb].tonemap == insp.cb_tone.currentData()
+
+
+def test_face_framing_centres_the_face():
+    from kangedit.reframe import face_framing, place
+    zoom, ox, oy = face_framing((0.7, 0.3, 0.1), 1920, 1080, 1080, 1920, "fill", 0.34)
+    assert 1.0 < zoom <= 4.0
+    p = place(1920, 1080, 1080, 1920, "fill", zoom, ox, oy)
+    assert abs((0.7 * p.scaled_w - p.crop_x) / p.crop_w - 0.5) < 0.02     # face in the middle
+    assert abs(0.1 * p.scaled_h / p.crop_h - 0.34) < 0.02                  # at the asked size
+
+
+def test_long_form_hook_is_a_short_teaser():
+    from kangedit.autoedit import hook_plan
+    footage, analyses = two_files()
+    s = AutoEditSettings(video_format="long", target_duration=20.0, clip_min=4.0, clip_max=6.0, order="hook",
+                         min_gap=1.0)
+    clips = select(footage, analyses, s)
+    n, length = hook_plan(s)
+    hooks = [c for c in clips if c.label == "hook"]
+    assert 2 <= len(hooks) <= n and clips[:len(hooks)] == hooks
+    assert all(abs(c.duration - length) < 0.05 for c in hooks)
+    rest = clips[len(hooks):]
+    assert rest == sorted(rest, key=lambda c: (list(footage).index(c.footage_id), c.src_in))   # story order
+
+
+def test_new_hook_goes_before_the_opening(window):
+    footage, analyses = two_files()
+    window.project.footage = footage
+    window.analyses.update(analyses)
+    window.project.settings.video_format = "long"
+    window.last_auto = AutoEditSettings(video_format="long", clip_min=4.0, clip_max=6.0, min_gap=1.0)
+    fa = next(iter(footage))
+    opening = TimelineClip(fa, 0.5, 4.5, label="opening")
+    window.project.clips = [opening, TimelineClip(fa, 10.0, 15.0)]
+    window.new_hook()
+    clips = window.project.clips
+    hooks = [c for c in clips if c.label == "hook"]
+    assert len(hooks) >= 2 and clips[len(hooks)] is opening
+    first = [(c.src_in, c.footage_id) for c in hooks]
+    window.new_hook()                                   # replaces the teaser, keeps the opening
+    assert [c.label for c in window.project.clips].count("hook") == len(hooks)
+    assert [(c.src_in, c.footage_id) for c in window.project.clips[:len(hooks)]] != first
+
+
+def test_text_tab_selects_a_title_to_edit(window):
+    from kangedit.titles import make_text
+    window.project.clips = []
+    tc = make_text("title", 0.0)
+    window.project.texts = [tc]
+    tp = window.text_panel
+    tp.text = None
+    tp.refresh()
+    assert not tp.editor.isEnabled()
+    window.show()
+    window.right_tabs.setCurrentWidget(tp)
+    assert tp.text is tc and tp.editor.isEnabled()
+    tp.chk_bold.setChecked(not tc.bold)
+    assert tc.bold == tp.chk_bold.isChecked()
+
+
+def test_rolling_backups(tmp_path):
+    from kangedit import autosave
+    from kangedit.models import Project
+    path = str(tmp_path / ("p" + Project.FILE_EXT))
+    p = Project()
+    assert autosave.make_backup(path) is None                    # nothing saved yet
+    p.save(path)
+    first = autosave.make_backup(path, now=1000.0)
+    assert first is not None and autosave.backup_source(str(first)) == path
+    assert autosave.make_backup(path, now=1100.0) is None        # too soon after the last one
+    for k in range(5):
+        autosave.make_backup(path, keep=3, now=2000.0 + k * 400)
+    assert len(autosave.backups(path)) == 3
+
+
+def test_autosave_saves_in_place_and_keeps_untitled_work(window, tmp_path):
+    from kangedit import autosave
+    from kangedit.models import Project
+    _project_with_clip(window)
+    window.a_autosave.setChecked(True)
+    window.project.dirty = True
+    window._autosave()                                           # untitled: a recovery copy only
+    assert autosave.recovery_path().exists() and window.project.dirty and window.project.path is None
+    path = str(tmp_path / ("a" + Project.FILE_EXT))
+    window.project.save(path)
+    window.project.clips[0].volume = 0.5
+    window.project.dirty = True
+    window._autosave()
+    assert not window.project.dirty and Project.load(path).clips[0].volume == 0.5
+    assert len(autosave.backups(path)) == 1                      # the version before the change
+    window.set_project(Project())
+    assert not autosave.recovery_path().exists()

@@ -89,3 +89,44 @@ def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox
             f"[{tag}bg][{tag}fg]overlay={p.pad_x}:{p.pad_y},setsar=1[{out}]"
         )
     return f"[{inp}]{fg},pad={tw}:{th}:{p.pad_x}:{p.pad_y}:black,setsar=1[{out}]"
+
+
+# ----------------------------------------------------------------------------- zoom to a face
+FACE_SIZES = {"medium": 0.22, "close": 0.34, "extreme": 0.5}   # face height as a part of the frame height
+
+
+def find_face(frames: list[np.ndarray]) -> Optional[tuple[float, float, float]]:
+    """The main face over a few RGB frames of a clip: (centre x, centre y, height), as parts of the frame.
+    Uses the biggest face of each frame and the median over frames (steadier than one frame)."""
+    from .analysis import _faces
+    cascade = _faces()
+    if cascade is False:
+        return None
+    found = []
+    for img in frames:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        h, w = gray.shape
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(max(16, h // 30),) * 2)
+        if len(faces):
+            x, y, fw, fh = max(faces, key=lambda r: r[2] * r[3])
+            found.append(((x + fw / 2) / w, (y + fh / 2) / h, fh / h))
+    if not found:
+        return None
+    return tuple(float(v) for v in np.median(np.asarray(found), axis=0))
+
+
+def face_framing(face: tuple[float, float, float], sw: int, sh: int, tw: int, th: int, mode: str,
+                 size: float) -> tuple[float, float, float]:
+    """(zoom, offset x, offset y) that make the face `size` of the frame height, eyes a bit above centre."""
+    fx, fy, fh = face
+    base = max(tw / sw, th / sh) if mode == "fill" else min(tw / sw, th / sh)
+    zoom = float(np.clip(size * th / max(1e-6, fh * sh * base), 1.0, 4.0))
+    p = place(sw, sh, tw, th, mode, zoom)
+
+    def offset(centre: float, full: int, win: int, at: float) -> float:
+        if full <= win:
+            return 0.0
+        start = centre * full - at * win             # crop start that puts the face at `at` of the window
+        return float(np.clip(2.0 * start / (full - win) - 1.0, -1.0, 1.0))
+
+    return (zoom, offset(fx, p.scaled_w, p.crop_w, 0.5), offset(fy, p.scaled_h, p.crop_h, 0.42))

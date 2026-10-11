@@ -125,11 +125,14 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
     """Quick transcript of part of a file (source times), e.g. to spot an opening or closing phrase.
 
     Whisper runs in a helper thread so cancel takes effect at once even while it is inside native code
-    (model load or a long decode); after LISTEN_TIMEOUT it gives up and returns no words."""
+    (model load or a long decode). It gives up and returns no words LISTEN_TIMEOUT after the model is ready:
+    the first call loads (or downloads) the model, which must not use up the time for listening."""
     out: dict = {}
 
     def work():
         try:
+            _get_model(model_name)
+            out["ready"] = True
             audio = _load_audio_16k(footage.path, start, duration)
             out["words"] = transcribe_audio(audio, model_name, language, None, cancel, offset=start,
                                             quick=True)[0] if audio.size else []
@@ -141,7 +144,8 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
     waited = 0.0
     while t.is_alive():
         t.join(0.1)
-        waited += 0.1
+        if out.get("ready"):
+            waited += 0.1
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         if waited > LISTEN_TIMEOUT:

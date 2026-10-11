@@ -1,7 +1,27 @@
 """Dark editing-suite theme."""
 
+import os
+import tempfile
+
 ACCENT = "#4f8cff"
 CLIP_COLORS = ["#3b6fb6", "#3f8f6b", "#8a5cb8", "#b5733a", "#3a8fa3", "#a34a6a", "#6f8a3a", "#5a62b8"]
+
+
+def _arrow_file() -> str:
+    """The combo box arrow as a small SVG file (style sheets can only load images from files)."""
+    path = os.path.join(tempfile.gettempdir(), "kangedit_arrow_down.svg")
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+           '<path d="M1 3 L5 7 L9 3" fill="none" stroke="#c4c7ce" stroke-width="1.6"/></svg>')
+    try:
+        if not os.path.exists(path):
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write(svg)
+    except OSError:
+        return ""
+    return path.replace("\\", "/")
+
+
+_ARROW = _arrow_file()
 
 STYLE = f"""
 QWidget {{ background: #1c1d21; color: #d8dae0; font-size: 12px; }}
@@ -15,11 +35,13 @@ QPushButton {{ background: #2e3138; border: 1px solid #3a3d45; padding: 5px 12px
 QPushButton:hover {{ background: #383c44; }}
 QPushButton:pressed {{ background: #24262b; }}
 QPushButton:disabled {{ color: #6b6e76; }}
+QPushButton#toggle:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: white; }}
 QPushButton#primary {{ background: {ACCENT}; border-color: {ACCENT}; color: white; font-weight: 600; }}
 QPushButton#primary:hover {{ background: #6a9dff; }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit {{
     background: #141518; border: 1px solid #34373e; border-radius: 3px; padding: 3px 5px; }}
-QComboBox::drop-down {{ border: none; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox::down-arrow {{ image: url("{_ARROW}"); width: 10px; height: 10px; }}
 QComboBox QAbstractItemView {{ background: #202227; selection-background-color: {ACCENT}; }}
 QTreeWidget, QTableWidget, QListWidget {{ background: #17181b; alternate-background-color: #1b1c20;
     border: 1px solid #2a2c31; gridline-color: #2a2c31; }}
@@ -57,3 +79,21 @@ def fmt_time(t: float, fps: float = 30.0, frames: bool = True) -> str:
     if frames:
         return f"{base}:{int((t - int(t)) * fps):02d}"
     return base
+
+
+def compact_combos(root, chars: int = 10) -> None:
+    """Let the drop-downs under `root` shrink to a narrow panel (long names are elided); their open lists
+    still grow to show every name in full."""
+    from PySide6.QtWidgets import QComboBox
+
+    def fit_popup(cb):
+        view = cb.view()
+        view.setMinimumWidth(min(600, view.sizeHintForColumn(0) + 30))
+
+    for cb in root.findChildren(QComboBox):
+        cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        cb.setMinimumContentsLength(chars)
+        m = cb.model()
+        for sig in (m.rowsInserted, m.rowsRemoved, m.modelReset):
+            sig.connect(lambda *_, c=cb: fit_popup(c))
+        fit_popup(cb)
