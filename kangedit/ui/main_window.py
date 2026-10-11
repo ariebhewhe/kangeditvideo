@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 import os
 import shutil
 import threading
@@ -48,6 +49,8 @@ from .text_panel import TextPanel
 from .theme import compact_combos, fmt_time
 from .timeline import TimelinePanel
 from .tour import TourOverlay, TourStep
+
+log = logging.getLogger(__name__)
 from .tray import Tray
 from .platform_overlay import PLATFORM_OVERLAYS
 from .viewer import ADJUST_MODES, Viewer
@@ -656,15 +659,20 @@ class MainWindow(QMainWindow):
         self.load_project_file(path)
 
     def load_project_file(self, path: str):
+        log.info("Opening project %s", path)
         try:
             p = Project.load(path)
         except Exception as e:  # noqa: BLE001
+            log.exception("Could not open project %s", path)
             QMessageBox.critical(self, APP_NAME, f"Could not open project:\n{e}")
             return
+        log.info("Parsed project: %d footage, %d clips", len(p.footage), len(p.clips))
         missing = [f.name for f in p.footage.values() if not os.path.exists(f.path)]
         if missing:
+            log.warning("Missing footage: %s", missing)
             QMessageBox.warning(self, APP_NAME, "Some footage files are missing:\n" + "\n".join(missing[:15]))
         self.set_project(p)
+        log.info("Project loaded into the window")
         self._add_recent(path)
 
     # ------------------------------------------------------------------ recent projects

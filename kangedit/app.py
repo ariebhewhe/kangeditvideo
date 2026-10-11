@@ -114,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if "--self-test" in argv[1:]:
         return self_test()
+    from . import crashlog
+    crashlog.install()
     _set_app_id()
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
@@ -130,9 +132,12 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.main_window import MainWindow
     win = MainWindow()
     win.show()
+    crashlog.log.info("Main window shown")
     args = [a for a in argv[1:] if not a.startswith("-")]
     if args and args[0].endswith(".kgproj"):
         win.load_project_file(args[0])
     elif args:
         win.import_files(args)
-    return app.exec()
+    code = app.exec()
+    crashlog.log.info("Exiting with code %s", code)
+    return code

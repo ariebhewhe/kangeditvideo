@@ -523,7 +523,7 @@ class TimelineView(QWidget):
                     p.setPen(Qt.NoPen)
                     p.setBrush(QColor(255, 220, 180, 110))
                     p.drawPolygon(poly)
-            self._paint_fades(p, x, r)
+            self._paint_sound_fades(p, x, r)
             if r.width() > 24:
                 p.setPen(QColor("#fff4ea"))
                 label = x.name or os.path.splitext(os.path.basename(x.path))[0]
@@ -532,7 +532,7 @@ class TimelineView(QWidget):
                 p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 7)))
 
-    def _paint_fades(self, p: QPainter, x: SoundClip, r: QRectF):
+    def _paint_sound_fades(self, p: QPainter, x: SoundClip, r: QRectF):
         """Fade in / out as shaded corners with a ramp line."""
         fi, fo = x.fades()
         p.setPen(QPen(QColor(255, 244, 234, 200), 1))
