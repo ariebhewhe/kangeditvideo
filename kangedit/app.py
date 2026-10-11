@@ -7,27 +7,20 @@ import threading
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
 from . import APP_NAME, version_string
 from .ffmpeg import ffmpeg_bin, ffprobe_bin
 
 
-def _icon() -> QIcon:
-    pm = QPixmap(64, 64)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor("#4f8cff"))
-    p.setPen(Qt.NoPen)
-    p.drawRoundedRect(4, 4, 56, 56, 12, 12)
-    p.setPen(QColor("white"))
-    f = QFont("Segoe UI", 26, QFont.Bold)
-    p.setFont(f)
-    p.drawText(pm.rect(), Qt.AlignCenter, "K")
-    p.end()
-    return QIcon(pm)
+def _set_app_id() -> None:
+    """Windows: group the taskbar button under KangEdit's own icon, not python.exe's, when run from source."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{APP_NAME}.{APP_NAME}")
+        except (AttributeError, OSError):
+            pass
 
 
 def _download_ffmpeg() -> bool:
@@ -121,13 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if "--self-test" in argv[1:]:
         return self_test()
+    _set_app_id()
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setStyle("Fusion")
     from .ui.theme import STYLE
     app.setStyleSheet(STYLE)
-    app.setWindowIcon(_icon())
+    from .ui.icons import app_icon
+    app.setWindowIcon(app_icon())
 
     if (not ffmpeg_bin() or not ffprobe_bin()) and not _download_ffmpeg():
         return 1

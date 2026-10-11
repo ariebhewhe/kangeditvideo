@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5d9bff"/>
+      <stop offset="1" stop-color="#3a5fe0"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#shine)"/>
+  <!-- K: a stem, an upper arm, and a play triangle as the lower leg -->
+  <rect x="58" y="52" width="40" height="152" rx="13" fill="#ffffff"/>
+  <path d="M104 124 L176 60" stroke="#ffffff" stroke-width="38" stroke-linecap="round" fill="none"/>
+  <path d="M112 146 Q112 132 124 138 L198 172 Q210 178 198 184 L124 218 Q112 224 112 210 Z" fill="#ffffff"/>
+</svg>

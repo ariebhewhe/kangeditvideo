@@ -11,7 +11,9 @@ ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 with open(os.path.join(ROOT, "kangedit", "__init__.py"), encoding="utf-8") as fh:
     VERSION = re.search(r'__version__ = "([^"]+)"', fh.read()).group(1)
 
-datas = collect_data_files("faster_whisper")           # Silero VAD model used by transcription
+ASSETS = os.path.join(ROOT, "kangedit", "assets")
+datas = [(os.path.join(ASSETS, f), "kangedit/assets") for f in os.listdir(ASSETS) if f.endswith(".png")]   # app + tray icons
+datas += collect_data_files("faster_whisper")           # Silero VAD model used by transcription
 datas += collect_data_files("yt_dlp_ejs")               # YouTube challenge solver scripts (music download)
 binaries = collect_dynamic_libs("ctranslate2")          # Whisper inference runtime
 hiddenimports = collect_submodules("kangedit")          # UI modules are imported lazily
@@ -40,6 +42,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     upx=False,
+    icon=os.path.join(ASSETS, "kangedit.ico"),
 )
 
 coll = COLLECT(exe, a.binaries, a.datas, name="KangEdit", upx=False)
@@ -48,6 +51,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="KangEdit.app",
+        icon=os.path.join(ASSETS, "kangedit.icns"),
         bundle_identifier="app.kangedit.KangEdit",
         version=VERSION,
         info_plist={

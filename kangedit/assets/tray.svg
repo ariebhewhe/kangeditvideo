@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Monochrome K mark for the macOS menu bar (used as a template image) -->
+  <rect x="7" y="5" width="12" height="50" rx="4" fill="#000000"/>
+  <path d="M21 29 L44 9" stroke="#000000" stroke-width="12" stroke-linecap="round" fill="none"/>
+  <path d="M24 37 Q24 33 28 35 L55 47 Q59 49 55 51 L28 63 Q24 65 24 61 Z" transform="translate(0 -4)" fill="#000000"/>
+</svg>

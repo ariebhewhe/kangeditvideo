@@ -48,6 +48,7 @@ from .text_panel import TextPanel
 from .theme import compact_combos, fmt_time
 from .timeline import TimelinePanel
 from .tour import TourOverlay, TourStep
+from .tray import Tray
 from .platform_overlay import PLATFORM_OVERLAYS
 from .viewer import ADJUST_MODES, Viewer
 
@@ -135,6 +136,10 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._connect()
         self._sync_project_controls()
+        self.tray: Optional[Tray] = None
+        if Tray.available():
+            self.tray = Tray(self, self.tasks)
+            self.tray.show()
 
         self._audio_timer = QTimer(self, singleShot=True, interval=700)
         self._audio_timer.timeout.connect(self._render_audio)
@@ -856,6 +861,9 @@ class MainWindow(QMainWindow):
     def _task_error(self, name: str):
         def handler(msg: str):
             if msg:
+                if self.tray:
+                    self.tray.notify(f"{name} failed", msg.strip().splitlines()[-1][:200],
+                                     icon=self.tray.Warning)
                 QMessageBox.warning(self, APP_NAME, f"{name} failed:\n\n{msg[-1500:]}")
             else:
                 self.lbl_status.setText(f"{name}: cancelled")
@@ -2420,6 +2428,8 @@ class MainWindow(QMainWindow):
         def done(path):
             self._exported = True
             self._update_flow()
+            if self.tray:
+                self.tray.notify("Export finished", os.path.basename(path), lambda: open_path(path))
             r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
                                         QMessageBox.Open | QMessageBox.Ok)
             if r == QMessageBox.Open:
@@ -2507,6 +2517,8 @@ class MainWindow(QMainWindow):
         self.tasks.shutdown()
         self._audio_cancel.set()
         self.viewer.shutdown()
+        if self.tray:
+            self.tray.hide()
         e.accept()
 
 
