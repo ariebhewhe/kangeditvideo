@@ -28,7 +28,13 @@ Progress = Callable[[float, str], None]
 
 
 def bin_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "ffmpeg" / "bin"
+    """<app folder>/ffmpeg/bin; for an installed build whose folder is read-only (Program Files,
+    /Applications) the per-user data folder instead."""
+    from .config import APP_DIR, _writable, app_data_dir   # standard library only
+    here = APP_DIR / "ffmpeg" / "bin"
+    if getattr(sys, "frozen", False) and not here.is_dir() and not _writable(APP_DIR / "ffmpeg"):
+        return app_data_dir() / "ffmpeg" / "bin"
+    return here
 
 
 def exe(name: str) -> str:

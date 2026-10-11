@@ -11,7 +11,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal, QPointF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QFontMetricsF, QTransform
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
 from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
 from ..color import Grade
@@ -21,6 +21,8 @@ from ..edits import TRANSITIONS, edits
 from ..models import Project
 from ..preview import Look, PreviewEngine, Rendered, Shot
 from .theme import fmt_time
+
+ADJUST_MODES = [("on", "Color: on"), ("playback", "Color: off while playing"), ("off", "Color: off")]
 
 
 class Canvas(QWidget):
@@ -125,6 +127,7 @@ class Canvas(QWidget):
 class Viewer(QWidget):
     time_changed = Signal(float)
     play_state = Signal(bool)
+    adjust_mode_changed = Signal(str)
 
     PREVIEW_SHORT = 540
 
@@ -145,6 +148,9 @@ class Viewer(QWidget):
         self._override: Optional[tuple[str, float]] = None   # (clip_id, source time) during slip
         self._audio_path: Optional[str] = None
         self.audio_valid = False
+        # Log conversion, LUTs and grading in the viewer (never affects export). "playback": off only while
+        # playing, so playback is lighter and a paused frame still shows the finished color.
+        self.adjust_mode = "on"            # "on" | "playback" | "off"
 
         self.canvas = Canvas()
         self.timer = QTimer(self)
@@ -175,6 +181,12 @@ class Viewer(QWidget):
         self.lbl_time.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet("color: #8b909a;")
+        self.cb_adjust = QComboBox()
+        for key, label in ADJUST_MODES:
+            self.cb_adjust.addItem(label, key)
+        self.cb_adjust.setToolTip("Color profile, LUTs and grading in the viewer.\n"
+                                  "Turn them off for lighter playback: export always includes them.")
+        self.cb_adjust.currentIndexChanged.connect(lambda _: self.set_adjust_mode(self.cb_adjust.currentData()))
 
         bar = QHBoxLayout()
         bar.addWidget(self.lbl_time)
@@ -183,6 +195,7 @@ class Viewer(QWidget):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.lbl_info)
+        bar.addWidget(self.cb_adjust)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(self.canvas, 1)
@@ -206,6 +219,22 @@ class Viewer(QWidget):
         self.stop()
         self.decoders.close()
         self.engine.close()
+
+    def set_adjust_mode(self, mode: str):
+        """"on" | "playback" (off while playing) | "off": color adjustments shown in the viewer."""
+        if mode not in dict(ADJUST_MODES):
+            mode = "on"
+        if self.cb_adjust.currentData() != mode:
+            self.cb_adjust.blockSignals(True)
+            self.cb_adjust.setCurrentIndex(self.cb_adjust.findData(mode))
+            self.cb_adjust.blockSignals(False)
+        if mode == self.adjust_mode:
+            return
+        self.adjust_mode = mode
+        self.adjust_mode_changed.emit(mode)
+        if self.playing:
+            self._restart_playback()
+        self.refresh()
 
     def set_captions(self, caps: list[Caption]):
         self.captions = caps
@@ -324,7 +353,8 @@ class Viewer(QWidget):
     def _look(self) -> Look:
         s = self.project.settings
         tw, th = self.preview_size()
-        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT)
+        color = self.adjust_mode == "on" or (self.adjust_mode == "playback" and not self.playing)
+        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT, color)
 
     def _shot(self, clip, start: float, index: Optional[int] = None) -> Optional[Shot]:
         f = self.project.footage.get(clip.footage_id)

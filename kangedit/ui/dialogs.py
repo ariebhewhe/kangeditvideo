@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGridLayout, QGroupBox,
-                               QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-                               QRadioButton, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGridLayout,
+                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout)
 
 from .. import lut as lutlib
 from ..autoedit import (FORMAT_PRESETS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
@@ -19,7 +19,7 @@ from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
                       fmt_bytes, folder_size, frame_size, open_path)
 from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
-from ..models import CaptionStyle, Project
+from ..models import Project
 
 FIT_MODES = {"fill": "Fill (crop to frame)", "fit": "Fit (black bars)", "blur": "Fit with blurred background"}
 
@@ -487,7 +487,7 @@ class CaptionStyleDialog(QDialog):
 
 
 class ProxyDialog(QDialog):
-    def __init__(self, project: Project, parent=None):
+    def __init__(self, project: Project, use_gpu: bool = True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Proxies")
         lay = QVBoxLayout(self)
@@ -500,8 +500,14 @@ class ProxyDialog(QDialog):
         self.cb_res.setCurrentIndex(max(0, self.cb_res.findData(project.settings.proxy_height)))
         self.chk_all = QCheckBox("Generate for all footage without a proxy now")
         self.chk_all.setChecked(True)
+        self.chk_gpu = QCheckBox("Use the graphics card (decode and encode)")
+        self.chk_gpu.setToolTip("Decode the originals and encode the proxies on the GPU (NVIDIA, AMD, Intel or Apple),\n"
+                                "falling back to the CPU for footage the GPU can't decode. Older graphics cards may\n"
+                                "not be faster than a many-core CPU.")
+        self.chk_gpu.setChecked(use_gpu)
         f.addRow("Proxy resolution", self.cb_res)
         f.addRow(self.chk_all)
+        f.addRow(self.chk_gpu)
         lay.addLayout(f)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
@@ -609,7 +615,8 @@ class OfficialLutDialog(QDialog):
         lay = QVBoxLayout(self)
         intro = QLabel("Camera makers publish their own log → Rec.709 conversion LUTs. Download them from the "
                        "official pages below, then import the .cube or .zip files: they are recognised by name and "
-                       "used instead of KangEdit's built-in conversion for that log profile.")
+                       "used instead of KangEdit's built-in conversion for that log profile. DJI's LUTs (every "
+                       "camera on dji.com/lut) download straight from DJI with <b>Download</b>.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         grid = QGridLayout()
@@ -622,8 +629,12 @@ class OfficialLutDialog(QDialog):
             cb = QComboBox()
             cb.setToolTip(e.hint)
             self.combos[e.profile] = cb
-            btn = QPushButton("Download page…" if e.url else "Where?")
-            if e.url:
+            dji = [d for d in lutlib.DJI_LUTS if d.profile == e.profile]
+            btn = QPushButton("Download…" if dji else "Download page…" if e.url else "Where?")
+            if dji:
+                btn.setToolTip(f"Download {e.maker}'s {e.label} LUT for your camera from dji.com")
+                btn.setMenu(self._dji_menu(btn, e, dji))
+            elif e.url:
                 btn.setToolTip(e.url)
                 btn.clicked.connect(lambda _=False, u=e.url: QDesktopServices.openUrl(QUrl(u)))
             else:
@@ -657,6 +668,54 @@ class OfficialLutDialog(QDialog):
         lay.addWidget(bb)
         self._fill(mapping)
 
+    def _dji_menu(self, parent, entry, items) -> QMenu:
+        m = QMenu(parent)
+        m.setToolTipsVisible(True)
+        for d in items:
+            a = m.addAction(d.product if d.file else f"{d.product}  (download page)")
+            a.setToolTip(d.file or d.page_url)
+            a.triggered.connect(lambda _=False, d=d: self._download_dji(entry, d))
+        m.addSeparator()
+        a = m.addAction("All DJI LUTs on dji.com/lut…")
+        a.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(entry.url)))
+        return m
+
+    def _download_dji(self, entry, item):
+        """Download one DJI camera's LUT into the library and select it for its log profile."""
+        if not item.file:
+            QDesktopServices.openUrl(QUrl(item.page_url))
+            return
+        result: dict = {}
+
+        def work():
+            try:
+                result["paths"] = lutlib.download_official(item.file)
+            except Exception as e:  # noqa: BLE001
+                result["error"] = e
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            while t.is_alive():
+                QApplication.processEvents()
+                t.join(0.03)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if "error" in result:
+            r = QMessageBox.warning(self, "Official LUT", f"Could not download the {item.product} LUT from DJI:\n"
+                                    f"{result['error']}\n\nOpen its download page instead?",
+                                    QMessageBox.Yes | QMessageBox.No)
+            if r == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(item.page_url))
+            return
+        paths = result.get("paths") or []
+        mapping = self.mapping()
+        best = lutlib.official_matches(entry, [(lutlib.lut_name(p), p) for p in paths])
+        if best or paths:
+            mapping[entry.profile] = (best or paths)[0]
+        self._fill(mapping)
+
     def _fill(self, mapping: dict):
         luts = lutlib.library()
         for e in lutlib.OFFICIAL_LUTS:
@@ -664,7 +723,7 @@ class OfficialLutDialog(QDialog):
             current = mapping.get(e.profile, cb.currentData() or "")
             cb.blockSignals(True)
             cb.clear()
-            cb.addItem("Built-in conversion", "")
+            cb.addItem("Best match in the LUT library" if e.base else "Built-in conversion", "")
             matches = lutlib.official_matches(e, luts)
             for path in matches:
                 cb.addItem(f"★ {lutlib.lut_name(path)}", path)

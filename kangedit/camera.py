@@ -125,6 +125,10 @@ _MODEL_PATTERNS = [
 ]
 
 _FLOG2_MODELS = re.compile(r"X-H2|X-T5|X-T50|X-S20|X-M5|X-E5|X100VI|GFX ?100 ?S? ?II|GFX ETERNA", re.I)
+# DJI cameras whose log mode is D-Log M (dji.com/lut); others (Mavic 3/4 Pro Hasselblad, Pocket 4, Zenmuse,
+# Phantom, Inspire) record D-Log.
+_DLOGM_MODELS = re.compile(rb"Mini ?[45] ?Pro|Air ?3S?\b|Avata ?(2|360)|\bFlip\b|Pocket ?3|Action ?[4-6]|"
+                           rb"Osmo ?360|Osmo ?Nano|Lito ?X1|O4 ?Air", re.I)
 
 _MAKE_TAGS = ("com.apple.quicktime.make", "make", "com.android.manufacturer", "manufacturer")
 _MODEL_TAGS = ("com.apple.quicktime.model", "model", "com.android.model")
@@ -212,6 +216,8 @@ def detect(path: str, info: ProbeInfo) -> CameraInfo:
             guess = "flog2"
         elif brand == "arri" and ("35" in (cam.model or "") or b"ALEXA 35" in blob):
             guess = "logc4"
+        elif brand == "dji" and (_DLOGM_MODELS.search((cam.model or "").encode()) or _DLOGM_MODELS.search(blob)):
+            guess = "dlogm"
         cam.guess = guess
         cam.source = f"{_BRANDS[brand][0]} camera"
     return cam

@@ -14,6 +14,8 @@ import re
 import shutil
 import tempfile
 import threading
+import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from typing import Optional
@@ -179,26 +181,54 @@ def import_lut(src: str) -> str:
 
 
 # ----------------------------------------------------------------------------- official camera LUTs
-# Manufacturers publish their own log -> Rec.709 conversion LUTs. They sit behind download pages and
+# Manufacturers publish their own log -> Rec.709 conversion LUTs. Most sit behind download pages and
 # license terms, so the app doesn't fetch them: the LUT dialog links each page, and once the files are
 # imported (.cube or the .zip as downloaded) they are recognised by name and used instead of the
-# built-in conversion curve for that log profile.
+# built-in conversion curve for that log profile. DJI serves its LUTs as plain files (dji.com/lut), so
+# those can also be downloaded from DJI's servers straight into the library (DJI_LUTS).
+#
+# Some log profiles have no published curve at all (DJI D-Log M and D-Log2): they are "LUT-only"
+# profiles that convert with their official LUT, and fall back to the closest built-in curve (`base`)
+# until it is imported.
 
 @dataclass(frozen=True)
 class OfficialLut:
-    profile: str                  # built-in log profile the LUT replaces
+    profile: str                  # log profile the LUT converts (built-in curve or LUT-only profile)
     maker: str
     label: str
     url: str                      # official download page ("" = see `hint`)
     patterns: tuple[str, ...]     # regexes on the lower-case file name, best match first
     hint: str = ""
+    exclude: str = ""             # regex: names a pattern matches that belong to another entry
+    base: str = ""                # LUT-only profile: the built-in curve used until its LUT is imported
 
+    @property
+    def menu_label(self) -> str:
+        return f"{self.maker} {self.label}" + (" (official LUT)" if self.base else "")
+
+
+_S = r"[ _.+\-]*"   # separators file names put between words: "D-Log M", "DLog_M", "D-Log+M"...
+# "D-Log M", not "DLog_Mavic3" / "DLog_Mini4"
+_DLOGM = rf"d{_S}log{_S}m(?!avic|ini)"
+# "D-Log2", not "DLOG2Rec709" / "DLOG2sRGB" (older files use "2" for "to")
+_DLOG2 = rf"d{_S}log{_S}2(?!{_S}(rec|srgb|709|\d))"
+# plain "D-Log" / "Dlog" (neither of the above)
+_DLOG = rf"d{_S}log(?!{_S}m(?!avic|ini)|{_S}2(?!{_S}(rec|srgb|709|\d)))"
+_DJI_HINT = ("D-Log M: Mini 4/5 Pro, Air 3/3S, Avata 2/360, Flip, Osmo Pocket 3, Action 4-6, Osmo 360, Nano. "
+             "D-Log: Mavic 3/4 Pro, Osmo Pocket 4/4P, Zenmuse, Phantom 3/4, Inspire 1. D-Log2: Osmo Pocket 4P.")
 
 OFFICIAL_LUTS = [
-    OfficialLut("dlog", "DJI", "D-Log M / D-Log → Rec.709", "https://www.dji.com/lut",
-                (r"d-?log[ _-]?m.*709", r"d-?log.*709", r"dlog.*srgb"),
-                "D-Log M: Mini 4/5 Pro, Air 3/3S, Avata 2, Osmo Pocket 3, Action 4-6, Mavic 3. "
-                "D-Log: Mavic 3/4 Pro, Inspire, Zenmuse."),
+    OfficialLut("dlog", "DJI", "D-Log → Rec.709", "https://www.dji.com/lut",
+                (rf"{_DLOG}.*709", rf"{_DLOG}.*srgb"), _DJI_HINT, r"vivid|hlg|2020"),
+    OfficialLut("dlog_vivid", "DJI", "D-Log → Rec.709 Vivid", "https://www.dji.com/lut",
+                (rf"{_DLOG}.*709.*vivid", rf"{_DLOG}.*vivid.*709"), _DJI_HINT, base="dlog"),
+    OfficialLut("dlogm", "DJI", "D-Log M → Rec.709", "https://www.dji.com/lut",
+                (rf"{_DLOGM}.*709",), _DJI_HINT + " D-Log M has no published curve: without its LUT, KangEdit "
+                "approximates it with the D-Log curve.", base="dlog"),
+    OfficialLut("dlog2", "DJI", "D-Log2 → Rec.709", "https://www.dji.com/lut",
+                (rf"{_DLOG2}.*709",), _DJI_HINT, r"vivid", base="dlog"),
+    OfficialLut("dlog2_vivid", "DJI", "D-Log2 → Rec.709 Vivid", "https://www.dji.com/lut",
+                (rf"{_DLOG2}.*709.*vivid", rf"{_DLOG2}.*vivid.*709"), _DJI_HINT, base="dlog"),
     OfficialLut("slog3_sg3c", "Sony", "S-Log3 / S-Gamut3.Cine → Rec.709",
                 "https://pro.sony/bp_BR/technology/professional-video-lut-look-up-table",
                 (r"slog3sgamut3\.?cine.*cine\+?709", r"slog3sgamut3\.?cine.*709", r"s-?log3.*gamut3\.?cine.*709")),
@@ -239,13 +269,162 @@ RESOLVE_LUT_DIRS = [
 ]
 
 
+# Log profiles without a built-in curve, converted only by their official LUT.
+LUT_ONLY = {e.profile: e for e in OFFICIAL_LUTS if e.base}
+
+
+@dataclass(frozen=True)
+class DjiLut:
+    """One DJI camera's conversion LUT as listed on dji.com/lut."""
+    product: str
+    profile: str                  # OFFICIAL_LUTS profile it converts
+    page: str                     # download page slug on dji.com
+    file: str = ""                # direct .cube / .zip on DJI's servers ("" = page only)
+
+    @property
+    def page_url(self) -> str:
+        return f"https://www.dji.com/downloads/softwares/{self.page}"
+
+
+_T = "https://terra-1-g.djicdn.com/851d20f7b9f64838a34cd02351370894/"
+_DL = "https://dl.djicdn.com/downloads/"
+# Every log -> Rec.709 LUT on https://www.dji.com/lut (D-Log -> Rec.2020 HLG, Linear -> D-Log and the
+# transcoding tools are left out: they don't convert to Rec.709). Older or duplicate versions of a file
+# are replaced by DJI's newest (V2.0, 65-point where offered).
+DJI_LUTS = [
+    DjiLut("Mavic 4 Pro", "dlogm", "mavic-4-pro-dlog-m-to-rec709-lut",
+           _T + "WA341%20LUT/DJI%20Mavic%204%20Pro%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Mavic 3 series", "dlogm", "dji-mavic-3-d-log-m-709-lut",
+           _T + "M3/DJI%20Mavic%203%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Mini 5 Pro", "dlogm", "mini-5-pro-dlog-m-to-rec709-lut",
+           _T + "WA150%20LUT/DJI%20Mini%205%20Pro%20D-Log%20M%20to%20Rec.709%20LUT.cube"),
+    DjiLut("Mini 4 Pro", "dlogm", "mini-4-pro-dlog-to-rec709",
+           _T + "140%20lut/DJI%20Mini%204%20Pro%20D-Log%20M%20to%20Rec.709%20V1_.cube"),
+    DjiLut("Air 3S", "dlogm", "air-3s-dlog-to-rec709",
+           _T + "234_lut/DJI%20Air%203S%20%20D-Log%20M%20to%20Rec.709%20V1_.cube"),
+    DjiLut("Air 3", "dlogm", "air-3-dlog-to-rec709",
+           _T + "DJI%20Air%203%20Lut/DJI%20Air%203%20D-Log%20M%20to%20Rec.709%20V1_.cube"),
+    DjiLut("Avata 2", "dlogm", "avata-2-dlog-to-rec709",
+           _T + "avata2%20d-log/DJI%20Avata%202%20D-Log%20M%20to%20Rec.709%20V1._.cube"),
+    DjiLut("Avata 360", "dlogm", "avata-360-dlog-m-to-rec709-lut",
+           _T + "WA530%20Lut/DJI%20Avata%20360%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Flip", "dlogm", "flip-dlog-to-rec709",
+           _T + "141%20LUT/DJI%20Flip%20D-Log%20M%20to%20Rec.709%20V1_.cube"),
+    DjiLut("Lito X1", "dlogm", "lito-x1-dlog-m-to-rec709-lut",
+           _T + "WA151%20Lut/DJI%20Lito%20X1%20D-Log%20M%20to%20Rec.709%20LUT.cube"),
+    DjiLut("O4 Air Unit series", "dlogm", "o4-air-unit-dlog-to-rec709",
+           _T + "ZA530%20LUT/DJI%20O4%20Air%20Unit%20Series%20D-Log%20M%20to%20Rec.709%20V1_.cube"),
+    DjiLut("Osmo Pocket 3", "dlogm", "osmo-pocket-3-dlog-to-rec709",
+           "https://www-dl.djicdn.com/5e45168b46b342d5b88f72c458ba6e79/OP3%20LUT%E6%96%87%E4%BB%B6%E7%89%B9%E6%AE%8A"
+           "%E5%A4%84%E7%90%86/DJI%20OSMO%20Pocket%203%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Osmo Action 6", "dlogm", "dji-osmo-action-6-d-log-m-to-rec-709-lut",
+           _T + "AC206%20LUT/DJI%20OSMO%20Action%206%20D-LogM%20to%20Rec.709%20LUT-11.17.cube"),
+    DjiLut("Osmo Action 5 Pro (vivid)", "dlogm", "dji-osmo-action-5-pro-d-log-m-to-rec-709-vivid-lut",
+           _T + "AC204%E8%BD%AF%E4%BB%B6/DJI%20OSMO%20Action%205%20Pro%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Osmo Action 4 (vivid)", "dlogm", "dji-osmo-action-4-d-log-m-to-rec-709-vivid-lut",
+           _T + "203/DJI%20OSMO%20Action%204%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Osmo Nano (vivid)", "dlogm", "osmo-nano-d-log-m-to-rec-709-vivid-lut",
+           _T + "OW001%20LUT/DJI%20OSMO%20Osmo%20Nano%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Osmo 360", "dlogm", "osmo-360-dlog-m-to-rec709-lut",
+           _T + "OQ101%20LUT/DJI%20Osmo%20360%20D-Log%20M%20to%20Rec.709%20V1.cube"),
+    DjiLut("Mavic 4 Pro", "dlog", "mavic-4-pro-dlog-to-rec709-lut",
+           _T + "WA341%20LUT/DJI%20Mavic%204%20Pro%20D-Log%20to%20Rec.709%20V1.cube"),
+    DjiLut("Mavic 3 series", "dlog", "transcoding-mavic-3"),
+    DjiLut("Osmo Pocket 4", "dlog", "osmo-pocket-4-dlog-to-rec709-lut",
+           _T + "HG214%20Lut/DJI%20OSMO%20Pocket%204%20D-Log%20to%20Rec.709%20V2.0.cube"),
+    DjiLut("Osmo Pocket 4P", "dlog", "osmo-pocket-4p-dlog-to-rec709-lut-size33-2",
+           _T + "HG224%20LUT/DJI%20OSMO%20Pocket%204P%20D-Log%20to%20Rec.709%20V2.0%20size33.cube"),
+    DjiLut("Zenmuse X9", "dlog", "dji-zenmuse-x9-dlog2rec709-lut"),
+    DjiLut("Zenmuse X5S / X7", "dlog", "transcoding-zenmuse-x7-rec", _DL + "zenmuse+x7/20171017/D-Log+to+Rec709.zip"),
+    DjiLut("Phantom 4", "dlog", "transcoding-phantom-4", _DL + "phantom_4/Phantom_4_Dlog_3DLUT_20160606.zip"),
+    DjiLut("Phantom 3 (to sRGB)", "dlog", "transcoding-phantom-3", _DL + "phantom_3/Phantom_3_Dlog_3DLUT.zip"),
+    DjiLut("Inspire 1 / Zenmuse X5 (to sRGB)", "dlog", "transcoding-zenmuse-x5r",
+           _DL + "zenmuse_x5s/X5_series_Dlog_3DLUT.zip"),
+    DjiLut("Mavic 4 Pro", "dlog_vivid", "mavic-4-pro-dlog-to-rec709-vivid-lut",
+           _T + "WA341%20LUT/DJI%20Mavic%204%20Pro%20D-Log%20to%20Rec.709%20vivid%20V1.cube"),
+    DjiLut("Mavic 3 series", "dlog_vivid", "vivid-lut",
+           _T + "mavic%203/DJI%20Mavic%203%20D-Log%20to%20Rec.709%20vivid%20V1.cube"),
+    DjiLut("Osmo Pocket 4", "dlog_vivid", "osmo-pocket-4-dlog-to-rec709-lut-vivid",
+           _T + "HG214%20Lut/DJI%20OSMO%20Pocket%204%20D-Log%20to%20Rec.709%20vivid%20V2.0.cube"),
+    DjiLut("Osmo Pocket 4P", "dlog_vivid", "osmo-pocket-4p-dlog-to-rec709-lut-vivid-size33-2",
+           _T + "HG224%20LUT/DJI%20OSMO%20Pocket%204P%20D-Log%20to%20Rec.709%20vivid%20V2.0%20size33.cube"),
+    DjiLut("Osmo Pocket 4P", "dlog2", "osmo-pocket-4p-dlog-2-to-rec709-lut-size65",
+           _T + "HG224%20LUT/DJI%20OSMO%20Pocket%204P%20D-Log2%20to%20Rec.709%20V1.0%20size65.cube"),
+    DjiLut("Osmo Pocket 4P", "dlog2_vivid", "osmo-pocket-4p-dlog-2-to-rec709-lut-vivid-size65",
+           _T + "HG224%20LUT/DJI%20OSMO%20Pocket%204P%20D-Log2%20to%20Rec.709%20vivid%20V1.0%20size65.cube"),
+]
+
+
 def official_matches(entry: OfficialLut, luts: list[tuple[str, str]]) -> list[str]:
     """Library LUT paths that look like `entry`'s official file, best first."""
     out: list[str] = []
+    skip = re.compile(entry.exclude) if entry.exclude else None
     for pat in entry.patterns:
         rx = re.compile(pat)
-        out += [path for name, path in luts if rx.search(name.lower()) and path not in out]
+        out += [path for name, path in luts
+                if rx.search(name.lower()) and not (skip and skip.search(name.lower())) and path not in out]
     return out
+
+
+# Official LUT chosen for each profile in the LUT dialog ({profile: path}); set by the UI.
+_choices: dict[str, str] = {}
+_resolved: dict[str, Optional[str]] = {}
+_resolved_stamp: tuple = ()
+
+
+def set_official_choices(mapping: dict[str, str]) -> None:
+    global _choices
+    with _cache_lock:
+        _choices = dict(mapping)
+        _resolved.clear()
+
+
+def official_lut_path(profile: str) -> Optional[str]:
+    """The LUT that converts `profile`: the one chosen in the LUT dialog, else the best-matching library
+    file. None when there is none. Cheap enough to call per frame (re-resolved when the library changes)."""
+    global _resolved_stamp
+    try:
+        stamp = (os.stat(_library_dir()).st_mtime_ns,)
+    except OSError:
+        stamp = ()
+    with _cache_lock:
+        if stamp != _resolved_stamp:
+            _resolved.clear()
+            _resolved_stamp = stamp
+        if profile in _resolved:
+            return _resolved[profile]
+        chosen = _choices.get(profile)
+    path = chosen if chosen and os.path.exists(chosen) else None
+    if path is None:
+        entry = next((e for e in OFFICIAL_LUTS if e.profile == profile), None)
+        matches = official_matches(entry, library()) if entry else []
+        path = matches[0] if matches else None
+    with _cache_lock:
+        _resolved[profile] = path
+    return path
+
+
+_lib_dir: Optional[str] = None
+
+
+def _library_dir() -> str:
+    global _lib_dir
+    if _lib_dir is None:
+        _lib_dir = str(lut_dir())
+    return _lib_dir
+
+
+def download_official(url: str, timeout: float = 60.0) -> list[str]:
+    """Download an official LUT (.cube, or a .zip of them) from the maker's server into the library."""
+    name = urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1])
+    base, ext = os.path.splitext(name)
+    base = re.sub(r"[._ ]+$", "", base).replace("  ", " ") or "LUT"   # "…V1._.cube" -> "…V1.cube"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (KangEdit video editor)"})
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = os.path.join(tmp, re.sub(r'[<>:"/\\|?*]', "_", base) + ext.lower())
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dst, "wb") as fo:
+            shutil.copyfileobj(resp, fo)
+        return import_any(dst)
 
 
 def import_any(src: str) -> list[str]:

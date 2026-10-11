@@ -6,3 +6,8 @@ __pycache__/
 ffmpeg/
 # default cache folder (proxies, analysis, temporary files)
 cache/
+# written by scripts/build.py for packaged builds
+kangedit/_build_info.py
+# PyInstaller output
+build/
+dist/

@@ -11,24 +11,24 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
                                QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
                                QTabWidget, QWidget)
 
-from .. import APP_NAME, __version__, camera
+from .. import APP_NAME, camera, version_string
 from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import AutoEditSettings, apply_edit_style, select
 from .. import sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, edit_caption, listen, project_layout, transcribe, write_srt
-from ..color import Grade, auto_correct, lut_profile, profile_label
+from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
                       clear_cache, default_cache_root, fmt_bytes, folder_size, legacy_cache_root, lut_dir,
-                      open_path, set_cache_root, sfx_dir)
+                      open_path, set_cache_root, settings, sfx_dir)
 from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
 from ..models import Footage, Project, SoundClip, TimelineClip, new_id
@@ -42,7 +42,7 @@ from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
 from .theme import fmt_time
 from .timeline import TimelinePanel
-from .viewer import Viewer
+from .viewer import ADJUST_MODES, Viewer
 
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 
@@ -56,7 +56,8 @@ class MainWindow(QMainWindow):
         self.project = Project()
         self.analyses: dict[str, Analysis] = {}
         self.captions: list[Caption] = []
-        self.qs = QSettings(APP_NAME, APP_NAME)
+        self.qs = settings()
+        lutlib.set_official_choices(self._official_luts())
         self._init_cache_root()
         self.tasks = TaskQueue()
         self.last_auto = self._load_auto_settings()
@@ -130,6 +131,9 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&File")
         m.addAction(self._act("New project", self.new_project, "Ctrl+N"))
         m.addAction(self._act("Open project…", self.open_project, "Ctrl+O"))
+        self.recent_menu = m.addMenu("Open recent")
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        self.recent_menu.setEnabled(bool(self._recent_projects()))
         m.addAction(self._act("Save project", self.save_project, "Ctrl+S"))
         m.addAction(self._act("Save project as…", lambda: self.save_project(True), "Ctrl+Shift+S"))
         m.addSeparator()
@@ -201,6 +205,23 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&View")
         m.addAction(self._act("Fit timeline", self.tl.fit, "Shift+Z"))
+        sub = m.addMenu("Color in viewer")
+        sub.setToolTipsVisible(True)
+        group = QActionGroup(self)
+        self.a_adjust: dict[str, QAction] = {}
+        for key, label in ADJUST_MODES:
+            a = QAction(label.split(": ", 1)[1].capitalize(), self, checkable=True)
+            a.setToolTip("Log conversion, LUTs and grading in the viewer (export always includes them)")
+            a.triggered.connect(lambda _=False, k=key: self.viewer.set_adjust_mode(k))
+            group.addAction(a)
+            sub.addAction(a)
+            self.a_adjust[key] = a
+        sub.addSeparator()
+        sub.addAction(self._act("Toggle color on / off", self._toggle_adjustments, "Ctrl+Shift+B",
+                                "Show the picture as recorded, without log conversion, LUTs or grading"))
+        self.viewer.set_adjust_mode(self.qs.value("viewer_color", "on", type=str))
+        self.a_adjust[self.viewer.adjust_mode].setChecked(True)
+        self.viewer.adjust_mode_changed.connect(self._adjust_mode_changed)
         a = QAction("Rule-of-thirds guides", self, checkable=True)
         a.toggled.connect(lambda v: (setattr(self.viewer.canvas, "show_guides", v), self.viewer.canvas.update()))
         m.addAction(a)
@@ -208,7 +229,7 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&Help")
         m.addAction(self._act("Keyboard shortcuts", self.show_shortcuts, "F1"))
         m.addAction(self._act(f"About {APP_NAME}", lambda: QMessageBox.about(
-            self, APP_NAME, f"<b>{APP_NAME} {__version__}</b><br>Automatic best-moment video editor.<br>"
+            self, APP_NAME, f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br>"
                             "Python · PySide6 · FFmpeg · OpenCV · faster-whisper")))
 
         for key, slot in (("Space", lambda: self.viewer.toggle_play()),
@@ -360,6 +381,16 @@ class MainWindow(QMainWindow):
         self.viewer.refresh()
         self._update_title()
 
+    def _toggle_adjustments(self):
+        self.viewer.set_adjust_mode("off" if self.viewer.adjust_mode == "on" else "on")
+
+    def _adjust_mode_changed(self, mode: str):
+        self.qs.setValue("viewer_color", mode)
+        self.a_adjust[mode].setChecked(True)
+        self.lbl_status.setText({"on": "Viewer shows color adjustments",
+                                 "playback": "Color adjustments are hidden while playing (export unaffected)",
+                                 "off": "Viewer shows the picture as recorded (export unaffected)"}[mode])
+
     def _toggle_proxies(self, on: bool):
         self.project.settings.use_proxies = on
         self.viewer.refresh()
@@ -450,6 +481,52 @@ class MainWindow(QMainWindow):
         if missing:
             QMessageBox.warning(self, APP_NAME, "Some footage files are missing:\n" + "\n".join(missing[:15]))
         self.set_project(p)
+        self._add_recent(path)
+
+    # ------------------------------------------------------------------ recent projects
+    MAX_RECENT = 10
+
+    def _recent_projects(self) -> list[str]:
+        v = self.qs.value("recent_projects", [])
+        if isinstance(v, str):   # QSettings returns a lone entry as a plain string on some platforms
+            v = [v]
+        return [p for p in (v or []) if p]
+
+    def _set_recent(self, paths: list[str]):
+        self.qs.setValue("recent_projects", paths[:self.MAX_RECENT])
+        self.recent_menu.setEnabled(bool(paths))
+
+    def _add_recent(self, path: str):
+        path = os.path.abspath(path)
+        key = os.path.normcase(path)
+        self._set_recent([path] + [p for p in self._recent_projects() if os.path.normcase(p) != key])
+
+    def _fill_recent_menu(self):
+        m = self.recent_menu
+        m.clear()
+        paths = self._recent_projects()
+        for k, path in enumerate(paths, 1):
+            name, folder = (s.replace("&", "&&") for s in (os.path.basename(path), os.path.dirname(path)))
+            a = m.addAction(f"&{k % 10}  {name}    —  {folder}")
+            a.setToolTip(path)
+            a.setStatusTip(path)
+            a.triggered.connect(lambda _=False, p=path: self.open_recent(p))
+            if not os.path.exists(path):
+                a.setText(a.text() + "  (missing)")
+        if paths:
+            m.addSeparator()
+            m.addAction(self._act("Clear recent projects", lambda: self._set_recent([])))
+
+    def open_recent(self, path: str):
+        if not os.path.exists(path):
+            r = QMessageBox.question(self, APP_NAME, f"The project file no longer exists:\n{path}\n\n"
+                                     "Remove it from the recent projects?")
+            if r == QMessageBox.Yes:
+                key = os.path.normcase(path)
+                self._set_recent([p for p in self._recent_projects() if os.path.normcase(p) != key])
+            return
+        if self._confirm_discard():
+            self.load_project_file(path)
 
     def save_project(self, save_as: bool = False) -> bool:
         path = self.project.path
@@ -466,6 +543,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Could not save project:\n{e}")
             return False
         self._update_title()
+        self._add_recent(path)
         self.lbl_status.setText(f"Saved {path}")
         return True
 
@@ -591,6 +669,7 @@ class MainWindow(QMainWindow):
 
     def queue_proxies(self, ids: list[str]):
         height = self.project.settings.proxy_height
+        use_gpu = self.qs.value("gpu_proxies", True, type=bool)
         for fid in ids:
             f = self.project.footage.get(fid)
             if f is None:
@@ -605,16 +684,17 @@ class MainWindow(QMainWindow):
                     self.refresh_all(captions=False)
                     self._schedule_audio()
 
-            self.tasks.submit(f"Proxy {f.name}", lambda p, c, f=f: generate_proxy(f, height, p, c), done,
+            self.tasks.submit(f"Proxy {f.name}", lambda p, c, f=f: generate_proxy(f, height, p, c, use_gpu), done,
                               self._task_error(f"Proxy for {f.name}"))
 
     def proxy_dialog(self):
         if not self.project.footage:
             QMessageBox.information(self, APP_NAME, "Import some footage first.")
             return
-        dlg = ProxyDialog(self.project, self)
+        dlg = ProxyDialog(self.project, self.qs.value("gpu_proxies", True, type=bool), self)
         if dlg.exec() != ProxyDialog.Accepted:
             return
+        self.qs.setValue("gpu_proxies", dlg.chk_gpu.isChecked())
         self.project.settings.proxy_height = dlg.cb_res.currentData()
         if dlg.chk_all.isChecked():
             ids = [fid for fid, f in self.project.footage.items() if not f.has_proxy()]
@@ -824,6 +904,15 @@ class MainWindow(QMainWindow):
             if f is not None:
                 f.log_profile, f.log_note, f.log_pending = key, "Chosen manually", False
         self.refresh_all(captions=False)
+        entry = lutlib.LUT_ONLY.get(key)
+        if entry is not None and missing_lut(key):
+            r = QMessageBox.question(
+                self, APP_NAME, f"{entry.menu_label} converts with {entry.maker}'s own LUT, which isn't in the "
+                f"LUT library yet.\n\nUntil it is, the footage is shown and exported with the built-in "
+                f"{profile_label(entry.base)} curve as an approximation.\n\nGet the LUT now?",
+                QMessageBox.Yes | QMessageBox.No)
+            if r == QMessageBox.Yes:
+                self.official_luts_dialog()
 
     # ================================================================== camera / log detection
     def _identify_camera(self, f: Footage, info) -> None:
@@ -957,6 +1046,9 @@ class MainWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, APP_NAME, "Some LUTs could not be imported:\n\n" + "\n".join(errors[:12]))
         self.inspector.reload_luts()
+        if imported:   # LUT-only profiles (DJI D-Log M...) may have just got their official LUT
+            self.bin.refresh()
+            self.viewer.refresh()
         return imported
 
     def _official_luts(self) -> dict:
@@ -970,27 +1062,34 @@ class MainWindow(QMainWindow):
 
     def _official_profile(self, profile: str) -> str:
         """The official LUT to use instead of a detected built-in profile, when the user set one up."""
-        if not self.qs.value("official_lut_auto", True, type=bool):
-            return profile
+        if not self.qs.value("official_lut_auto", True, type=bool) or profile in lutlib.LUT_ONLY:
+            return profile   # LUT-only profiles find their official LUT by themselves
         path = self._official_luts().get(profile)
         return lut_profile(path) if path else profile
 
     def official_luts_dialog(self):
         dlg = OfficialLutDialog(self._official_luts(), self.qs.value("official_lut_auto", True, type=bool),
                                 self._import_lut_files, self)
-        if dlg.exec() != OfficialLutDialog.Accepted:
+        accepted = dlg.exec() == OfficialLutDialog.Accepted
+        self.inspector.reload_luts()   # the dialog may have downloaded LUTs either way
+        self.bin.refresh()
+        self.viewer.refresh()
+        if not accepted:
             return
         mapping = dlg.mapping()
         for e in lutlib.OFFICIAL_LUTS:
             self.qs.setValue(f"official_lut/{e.profile}", mapping.get(e.profile, ""))
         self.qs.setValue("official_lut_auto", dlg.chk_auto.isChecked())
+        lutlib.set_official_choices(self._official_luts())
+        self.bin.refresh()
+        self.viewer.refresh()
         if not dlg.chk_apply.isChecked():
             return
         # Footage converted with a built-in profile that now has an official LUT.
         changed = 0
         self.project_checkpoint()
         for f in self.project.footage.values():
-            if f.log_profile in mapping:
+            if f.log_profile in mapping and f.log_profile not in lutlib.LUT_ONLY:
                 f.log_profile = lut_profile(mapping[f.log_profile])
                 changed += 1
         self.project.dirty = changed > 0 or self.project.dirty
@@ -1612,7 +1711,8 @@ class MainWindow(QMainWindow):
             "Ctrl+A — select all clips\nR — replace clip with another best moment\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline\n"
-            "Ctrl+wheel on timeline — zoom\n\n"
+            "Ctrl+Shift+B — color adjustments in the viewer on / off\n"
+            "Ctrl+wheel on timeline — zoom · on the Media thumbnails — thumbnail size\n\n"
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"

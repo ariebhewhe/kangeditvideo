@@ -10,7 +10,7 @@ picks the best ones under these rules:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 import numpy as np

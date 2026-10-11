@@ -44,8 +44,9 @@ class FrameDecoder:
         self.out_h = max(2, int(self.src_h * scale) // 2 * 2)
         self._iter = None
         self._pos_t: Optional[float] = None      # time of the last frame consumed from the stream
-        self._last_t: Optional[float] = None     # time of the last frame returned (_last_img)
-        self._last_img: Optional[np.ndarray] = None
+        self._last_t: Optional[float] = None     # time of the last frame returned (_last_frame)
+        self._last_frame = None                  # av.VideoFrame
+        self._last_img: Optional[tuple] = None   # (frame, its RGB image): conversion cache for frame_at
         self._next_frame = None
         self._closing = False
         # While catching up to a target far ahead (after a keyframe seek), non-reference frames are
@@ -69,7 +70,8 @@ class FrameDecoder:
             for frame in packet.decode():
                 yield frame
 
-    def _to_rgb(self, frame) -> np.ndarray:
+    def to_rgb(self, frame) -> np.ndarray:
+        """Convert a frame from raw_at to RGB. Thread-safe: playback converts on several threads."""
         rng = frame.color_range
         src_range = "JPEG" if rng == 2 else "MPEG"
         f = frame.reformat(width=self.out_w, height=self.out_h, format="rgb24",
@@ -104,11 +106,28 @@ class FrameDecoder:
         returns True the nearest frame decoded so far is returned instead, so a newer request isn't
         stuck behind a stale one; the decoder stays positioned for the next call.
         """
+        frame, _ = self.raw_at(t, interrupt)
+        return None if frame is None else self.rgb_of(frame)
+
+    def rgb_of(self, frame) -> np.ndarray:
+        """to_rgb, reusing the last conversion when the same frame is shown again (grading a still)."""
+        cached = self._last_img
+        if cached is not None and cached[0] is frame:
+            return cached[1]
+        img = self.to_rgb(frame)
+        self._last_img = (frame, img)
+        return img
+
+    def raw_at(self, t: float, interrupt: Optional[Callable[[], bool]] = None) -> tuple:
+        """(av.VideoFrame shown at source time t or None, whether t was reached without an interrupt).
+
+        Only decodes: convert with to_rgb, possibly on another thread, while this decoder moves on.
+        """
         with self.lock:
             if self._closing:
-                return None
-            if self._last_t is not None and abs(t - self._last_t) < self.frame_dur * 0.5 and self._last_img is not None:
-                return self._last_img
+                return None, False
+            if self._last_t is not None and abs(t - self._last_t) < self.frame_dur * 0.5 and self._last_frame is not None:
+                return self._last_frame, True
             forward_ok = (self._iter is not None and self._pos_t is not None
                           and self._pos_t - self.frame_dur * 0.5 <= t <= self._pos_t + 2.0)
             if not forward_ok:
@@ -127,7 +146,7 @@ class FrameDecoder:
                     if ft + self.frame_dur * 0.5 < t:
                         best = frame
                         if self._closing:
-                            return None
+                            return None, False
                         if interrupt is not None and interrupt():
                             interrupted = True
                             break
@@ -144,12 +163,12 @@ class FrameDecoder:
             if self._skip_until is not None and (self._iter is None or interrupted):
                 self._skip_nonref(None)
             if best is None:
-                return self._last_img
+                return self._last_frame, False
             bt = (best.time or 0.0) - self.start
             self._pos_t = bt
             self._last_t = bt if interrupted or abs(bt - t) < 1.0 else t
-            self._last_img = self._to_rgb(best)
-            return self._last_img
+            self._last_frame = best
+            return best, not interrupted
 
 
 class DecoderPool:

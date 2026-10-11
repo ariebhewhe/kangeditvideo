@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Callable, Optional
 
 import numpy as np
@@ -183,7 +183,11 @@ LOG_PROFILES: dict[str, LogProfile] = {
     "hlg": LogProfile("HLG HDR (phones) / Rec.2020", _hlg, "ire", "rec2020"),
 }
 
-LOG_CHOICES = [("none", "None (Rec.709 / standard)")] + [(k, p.label) for k, p in LOG_PROFILES.items()]
+# Built-in curves, each followed by the LUT-only profiles of the same family (DJI D-Log M, D-Log2...).
+LOG_CHOICES = [("none", "None (Rec.709 / standard)")]
+for _k, _p in LOG_PROFILES.items():
+    LOG_CHOICES.append((_k, _p.label))
+    LOG_CHOICES += [(e.profile, e.menu_label) for e in lutlib.OFFICIAL_LUTS if e.base == _k]
 
 
 def is_lut_profile(log_profile: str) -> bool:
@@ -195,10 +199,38 @@ def lut_profile(path: str) -> str:
     return LUT_PREFIX + path
 
 
+def effective_profile(log_profile: str) -> str:
+    """What converts `log_profile`: a LUT-only profile (DJI D-Log M...) becomes "lut:<its official LUT>", or
+    the built-in curve that approximates it while that LUT isn't imported. Other profiles are unchanged."""
+    entry = lutlib.LUT_ONLY.get(log_profile)
+    if entry is None:
+        return log_profile
+    path = lutlib.official_lut_path(log_profile)
+    return lut_profile(path) if path else entry.base
+
+
+def missing_lut(log_profile: str) -> bool:
+    """A LUT-only profile whose official LUT isn't in the library (shown approximated)."""
+    return log_profile in lutlib.LUT_ONLY and lutlib.official_lut_path(log_profile) is None
+
+
 def profile_label(log_profile: str) -> str:
     if is_lut_profile(log_profile):
         return "LUT: " + lutlib.lut_name(log_profile[len(LUT_PREFIX):])
-    return dict(LOG_CHOICES).get(log_profile, log_profile)
+    label = dict(LOG_CHOICES).get(log_profile, log_profile)
+    return label + " — LUT not imported, approximated" if missing_lut(log_profile) else label
+
+
+def profile_short(log_profile: str) -> str:
+    """Compact label for the viewer's status line."""
+    if log_profile == "none":
+        return ""
+    if is_lut_profile(log_profile):
+        return "LUT " + lutlib.lut_name(log_profile[len(LUT_PREFIX):])
+    entry = lutlib.LUT_ONLY.get(log_profile)
+    if entry is not None:
+        return entry.label.split(" →")[0].upper() + (" (APPROX.)" if missing_lut(log_profile) else "")
+    return log_profile.upper()
 
 TONEMAPS = [("filmic", "Filmic (soft highlight roll-off)"), ("standard", "Standard Rec.709 (hard clip)")]
 
@@ -282,6 +314,7 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
     rgb = np.asarray(rgb, dtype=np.float32)
     shape = rgb.shape
     x = rgb.reshape(-1, 3)
+    log_profile = effective_profile(log_profile)
 
     lin = _to_linear(x, log_profile)
     lin = lin * np.float32(2.0 ** grade.exposure)
@@ -317,7 +350,8 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
 
 
 def needs_color(grade: Grade, log_profile: str) -> bool:
-    return log_profile in LOG_PROFILES or is_lut_profile(log_profile) or not grade.is_identity()
+    return (log_profile in LOG_PROFILES or log_profile in lutlib.LUT_ONLY or is_lut_profile(log_profile)
+            or not grade.is_identity())
 
 
 # ----------------------------------------------------------------------------- LUTs
@@ -373,12 +407,14 @@ class LutCache:
         self._max = max_items
         self._lock = threading.Lock()
 
+    # Keyed by the effective profile, so a LUT-only profile's table is rebuilt once its official LUT arrives.
     def peek(self, grade: Grade, log_profile: str, tonemap: str) -> Optional[PreviewLut]:
-        return self._items.get((grade.key(), log_profile, tonemap))
+        return self._items.get((grade.key(), effective_profile(log_profile), tonemap))
 
     def get(self, grade: Grade, log_profile: str, tonemap: str) -> Optional[PreviewLut]:
         if not needs_color(grade, log_profile):
             return None
+        log_profile = effective_profile(log_profile)
         key = (grade.key(), log_profile, tonemap)
         lut = self._items.get(key)
         if lut is None:
@@ -413,6 +449,7 @@ def auto_correct(frames: list[np.ndarray], log_profile: str, tonemap: str = "fil
     g = Grade() if base is None else Grade.from_dict(base.to_dict())
     if not frames:
         return g
+    log_profile = effective_profile(log_profile)
     px = np.concatenate([f.reshape(-1, 3)[:: max(1, f.size // 3 // 40000)] for f in frames]).astype(np.float32) / 255.0
     lin = _to_linear(px, log_profile)
     lin = np.maximum(lin, 1e-5)

@@ -1,0 +1,18 @@
+# Tool settings only: KangEdit runs from source (install.py) or as a packaged build (scripts/build.py).
+# The version lives in kangedit/__init__.py.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["packaging/*.spec"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+# Long lines, zip() without strict=, short names and closures used within their own loop iteration are
+# the code's existing style, not bugs.
+ignore = ["E501", "E741", "B905", "B007", "B023"]

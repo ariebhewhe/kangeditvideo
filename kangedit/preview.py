@@ -1,8 +1,11 @@
 """Background frame rendering for the viewer.
 
-Decoding (a long-GOP seek can take a second), grading and reframing all run on a worker thread so
-the UI never blocks. Still requests (scrubbing, slipping, edits) are latest-wins; during playback
-the worker reads ahead into a small buffer that the UI drains in sync with the playback clock.
+Decoding (a long-GOP seek can take a second), grading and reframing all run off the UI thread so
+the UI never blocks. Still requests (scrubbing, slipping, edits) are latest-wins. Playback is a
+pipeline: one thread only decodes, in timeline order, and hands each decoded frame to a small pool
+that converts, grades and reframes it. The UI drains the resulting buffer in sync with the playback
+clock. 4K H.265 decodes at roughly the frame rate on its own, so keeping conversion and grading off
+the decode thread is what lets playback keep up.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import bisect
 import threading
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -18,14 +22,24 @@ import cv2
 import numpy as np
 
 from . import reframe
-from .color import Grade, LutCache, apply_grade, needs_color
+from .color import Grade, LutCache, apply_grade, needs_color, profile_short
 from .decoder import DecoderPool
 from .edits import blend
 from .models import Footage
 
-READ_AHEAD = 30          # frames buffered during playback
+READ_AHEAD = 45          # frames buffered (ready or being rendered) during playback
 START_FRAMES = 6         # playback's clock starts once this many frames are ready (or the buffer stalls)
 STILL_PATIENCE = 0.12    # s a still keeps decoding toward its exact frame once a newer one is waiting
+# Conversion and grading release the GIL, so these threads render in parallel with the decoder. Two keep
+# up with 30 fps (grading itself is split over more threads, see color.PreviewLut); more only compete with
+# the decoder's own frame threads.
+RENDER_THREADS = 2
+# Decoded frames waiting for the pool hold full-size source pictures (24 MB for 4K 10-bit): cap them.
+MAX_INFLIGHT = RENDER_THREADS * 2
+# Pre-roll competes with playback for the same cores: it starts only with this many frames buffered and
+# gives way (resuming later where it stopped) once the buffer falls below PREROLL_YIELD.
+PREROLL_MIN = READ_AHEAD // 3
+PREROLL_YIELD = READ_AHEAD // 5
 # Clip i decodes on decoder slot i % SLOTS, so while it plays the next clips' decoders can be
 # positioned at their first frames (pre-roll): a cut into long-GOP footage costs up to a second
 # of decoding from the previous keyframe, far more than the read-ahead buffer covers.
@@ -61,6 +75,7 @@ class Look:
     width: int
     height: int
     decode_h: int
+    color: bool = True           # False: show the picture as recorded (no log conversion, LUTs or grade)
 
 
 @dataclass
@@ -69,6 +84,14 @@ class Rendered:
     t: float                     # timeline time (playback) or the requested time (stills)
     info: str
     serial: int = 0
+
+
+@dataclass
+class _Pending:
+    """A playback frame in the buffer: its image is ready once `future` is done."""
+    t: float
+    info: str
+    future: Future
 
 
 class PreviewEngine:
@@ -80,7 +103,9 @@ class PreviewEngine:
         self._still: Optional[tuple] = None      # (serial, shot, src_t, t, look)
         self._still_serial = 0
         self._play: Optional[dict] = None
-        self._buf: deque[Rendered] = deque()
+        self._buf: deque[_Pending] = deque()
+        self._inflight = 0                        # submitted playback frames the pool hasn't finished
+        self._pool = ThreadPoolExecutor(RENDER_THREADS, thread_name_prefix="preview-render")
         self._lut_wanted: list[tuple] = []        # (grade, log_profile, tonemap), most urgent first
         self._quit = False
         threading.Thread(target=self._run, name="preview", daemon=True).start()
@@ -103,14 +128,14 @@ class PreviewEngine:
         fps = max(1.0, fps)
         with self._cv:
             self._still = None
-            self._buf.clear()
+            self._clear_buffer()
             self._play = {"shots": shots, "starts": [s.start for s in shots], "look": look,
                           "t0": t0, "clock0": clock0, "fps": fps, "k": int(np.ceil(t0 * fps - 1e-6)),
                           "end": shots[-1].start + shots[-1].dur if shots else 0.0, "prerolled": set()}
             # Build the grading LUTs of the clips ahead in play order, starting at the playhead.
             first = max(0, bisect.bisect_right(self._play["starts"], t0) - 1)
             seen, wanted = set(), []
-            for s in shots[first:] + shots[:first]:
+            for s in (shots[first:] + shots[:first]) if look.color else []:
                 key = (s.grade.key(), s.log_profile, s.tonemap)
                 if (key not in seen and needs_color(s.grade, s.log_profile)
                         and self.luts.peek(s.grade, s.log_profile, s.tonemap) is None):
@@ -125,28 +150,48 @@ class PreviewEngine:
                 self._play["clock0"] = clock0
 
     def ready_to_start(self) -> bool:
-        """Enough frames are buffered to start the clock without an immediate stall."""
+        """Enough frames are ready to start the clock without an immediate stall."""
         with self._cv:
             play = self._play
-            return play is None or len(self._buf) >= START_FRAMES or len(self._buf) >= READ_AHEAD \
-                or (self._buf and play["k"] / play["fps"] >= play["end"])
+            if play is None:
+                return True
+            ready = 0
+            for p in self._buf:
+                if not p.future.done():
+                    break
+                ready += 1
+            return ready >= START_FRAMES or (ready > 0 and ready == len(self._buf) and (
+                len(self._buf) >= READ_AHEAD or play["k"] / play["fps"] >= play["end"]))
 
     def stop_playback(self) -> None:
         with self._cv:
             self._play = None
-            self._buf.clear()
+            self._clear_buffer()
             self._lut_wanted.clear()
             self._cv.notify_all()
 
     def take_frame(self, now_t: float) -> Optional[Rendered]:
-        """Newest buffered playback frame due at timeline time now_t (older ones are discarded)."""
+        """Newest ready playback frame due at timeline time now_t (older ones are discarded)."""
         out = None
         with self._cv:
-            while self._buf and self._buf[0].t <= now_t:
+            last = -1
+            for i, p in enumerate(self._buf):
+                if p.t > now_t:
+                    break
+                if p.future.done():
+                    last = i
+            for _ in range(last + 1):
                 out = self._buf.popleft()
+                out.future.cancel()   # no-op once done; skips late frames the pool hasn't started
             if out is not None:
                 self._cv.notify_all()
-        return out
+        if out is None:
+            return None
+        try:
+            img = out.future.result()
+        except Exception:  # noqa: BLE001 - a frame that failed to render is skipped
+            return None
+        return None if img is None else Rendered(img, out.t, out.info)
 
     def drop_decoders(self) -> None:
         self.decoders.drop()
@@ -155,15 +200,23 @@ class PreviewEngine:
         with self._cv:
             self._quit = True
             self._play = None
+            self._clear_buffer()
             self._cv.notify_all()
+        self._pool.shutdown(wait=False, cancel_futures=True)
         self.decoders.close()
+
+    def _clear_buffer(self) -> None:
+        """(Caller holds _cv.)"""
+        for p in self._buf:
+            p.future.cancel()
+        self._buf.clear()
 
     # ------------------------------------------------------------------ worker
     def _run(self) -> None:
         while True:
             with self._cv:
                 while not self._quit and self._still is None and not (
-                        self._play is not None and len(self._buf) < READ_AHEAD):
+                        self._play is not None and len(self._buf) < READ_AHEAD and self._inflight < MAX_INFLIGHT):
                     self._cv.wait()
                 if self._quit:
                     return
@@ -174,7 +227,7 @@ class PreviewEngine:
                     self._render_still(*still)
                 elif play is not None:
                     self._render_next(play)
-            except Exception:  # noqa: BLE001 — a bad file must not kill the preview thread
+            except Exception:  # noqa: BLE001 - a bad file must not kill the preview thread
                 if play is not None:
                     play["k"] += 1
                 time.sleep(0.01)
@@ -188,18 +241,19 @@ class PreviewEngine:
 
         try:
             if shots:
-                out = self._compose(shots, shot.index, t, look, False, newer_waiting)
+                layers, mix = self._gather(shots, shot.index, t, look, newer_waiting)
             else:
-                img = self._decode(shot, src_t, look, newer_waiting)
-                out = None if img is None else self._finish(img, shot, look, playing=False)
-            if out is None:
+                layers, mix = self._layer(shot, src_t, look, newer_waiting), None
+            if not layers:
                 return
+            out = self._render(layers, mix, look, False)
         except Exception as e:  # noqa: BLE001
             self._on_still(Rendered(None, t, f"Cannot decode {shot.footage.name}: {e}", serial))
             return
         self._on_still(Rendered(out, t, self._info(shot, look), serial))
 
     def _render_next(self, play: dict) -> None:
+        """Decode the next playback frame and queue it for rendering on the pool."""
         fps = play["fps"]
         k = play["k"]
         t = k / fps
@@ -208,25 +262,37 @@ class PreviewEngine:
                 if self._play is play:
                     self._play = None   # nothing left to read ahead
             return
-        # Fell behind the clock (slow decode): jump ahead instead of rendering frames already late.
+        # Fell behind the clock (slow decode): jump ahead instead of rendering frames already late. The
+        # frames in between still have to be decoded, so aim a little further than the clock.
         clock0 = play["clock0"]
         now_t = play["t0"] + time.perf_counter() - clock0 if clock0 is not None else play["t0"]
         if t < now_t - 1.0 / fps:
-            k = int(np.ceil(now_t * fps)) + 2
+            k = int(np.ceil(now_t * fps)) + 3
             t = k / fps
             if t >= play["end"]:
                 return
         i = max(0, bisect.bisect_right(play["starts"], t) - 1)
         shot = play["shots"][i]
         look = play["look"]
-        out = self._compose(play["shots"], i, t, look, True, None)
+        layers, mix = self._gather(play["shots"], i, t, look, None)
+        fut = self._pool.submit(self._render, layers, mix, look, True) if layers else None
         with self._cv:
             if self._play is not play:
+                if fut is not None:
+                    fut.cancel()
                 return          # stopped or restarted meanwhile
             play["k"] = k + 1
             play["shot"] = i
-            if out is not None:
-                self._buf.append(Rendered(out, t, self._info(shot, look)))
+            if fut is not None:
+                self._inflight += 1
+                self._buf.append(_Pending(t, self._info(shot, look), fut))
+            self._cv.notify_all()
+        if fut is not None:
+            fut.add_done_callback(self._rendered)
+
+    def _rendered(self, _fut: Future) -> None:
+        with self._cv:
+            self._inflight -= 1
             self._cv.notify_all()
 
     def _run_preroll(self) -> None:
@@ -235,27 +301,41 @@ class PreviewEngine:
                 job = None
                 while not self._quit and job is None:
                     play = self._play
-                    # Pre-roll competes for the same CPU cores: never while playback is starving.
-                    if play is not None and len(self._buf) >= min(READ_AHEAD // 3, START_FRAMES):
+                    if play is not None and len(self._buf) >= PREROLL_MIN:
                         cur = play.get("shot", max(0, bisect.bisect_right(play["starts"], play["t0"]) - 1))
                         for j in range(cur + 1, min(cur + 1 + PREROLL, len(play["shots"]))):
                             if j not in play["prerolled"]:
                                 play["prerolled"].add(j)
-                                job = (play["shots"][j], play["look"], play["fps"])
+                                job = (play, j)
                                 break
                     if job is None:
                         self._cv.wait()
                 if self._quit:
                     return
-            shot, look, fps = job
-            try:   # decode the clip's first frame now; playback then continues from there sequentially
-                first_t = np.ceil((shot.start - shot.half_in) * fps - 1e-6) / fps
-                self._decode(shot, shot.src_in + max(-shot.half_in, first_t - shot.start), look, None)
-            except Exception:  # noqa: BLE001
-                pass
+            play, j = job
+            shot, look, fps = play["shots"][j], play["look"], play["fps"]
 
-    def _compose(self, shots: list[Shot], i: int, t: float, look: Look, playing: bool, interrupt) -> Optional[np.ndarray]:
-        """The timeline frame at t: shot i, or two shots blended inside a transition."""
+            def starving() -> bool:
+                return self._play is not play or len(self._buf) < PREROLL_YIELD
+
+            try:   # position the clip's decoder at its first frame; playback then continues from there
+                first_t = np.ceil((shot.start - shot.half_in) * fps - 1e-6) / fps
+                dec = self.decoders.get(shot.footage, look.use_proxies, look.decode_h, shot.index % SLOTS)
+                _, reached = dec.raw_at(shot.src_in + max(-shot.half_in, first_t - shot.start), starving)
+            except Exception:  # noqa: BLE001
+                reached = True
+            if not reached:
+                with self._cv:   # gave way to playback: finish once the buffer has refilled
+                    play["prerolled"].discard(j)
+
+    def _layer(self, shot: Shot, src_t: float, look: Look, interrupt) -> list:
+        dec = self.decoders.get(shot.footage, look.use_proxies, look.decode_h, shot.index % SLOTS)
+        frame, _ = dec.raw_at(src_t, interrupt)
+        return [] if frame is None else [(dec, frame, shot)]
+
+    def _gather(self, shots: list[Shot], i: int, t: float, look: Look, interrupt) -> tuple[list, Optional[tuple]]:
+        """Decode the timeline at t: ([(decoder, frame, shot)], None) for shot i, or both shots' layers and
+        (transition, progress) inside a transition. No layers when decoding failed."""
         shot = shots[i]
         pair = None
         if shot.half_in > 0 and i > 0 and t < shot.start + shot.half_in:
@@ -266,20 +346,19 @@ class PreviewEngine:
         if pair is not None:
             a, b, kind, cut, half = pair
             # Both sides run into their handles: a past its out point, b before its in point.
-            ia = self._decode(a, a.src_in + (t - a.start), look, interrupt)
-            ib = self._decode(b, b.src_in + (t - b.start), look, interrupt)
-            if ia is not None and ib is not None:
-                return blend(kind, self._finish(ia, a, look, playing), self._finish(ib, b, look, playing),
-                             (t - (cut - half)) / (2 * half))
-        img = self._decode(shot, shot.src_in + min(max(0.0, t - shot.start), shot.dur), look, interrupt)
-        return None if img is None else self._finish(img, shot, look, playing)
+            layers = (self._layer(a, a.src_in + (t - a.start), look, interrupt)
+                      + self._layer(b, b.src_in + (t - b.start), look, interrupt))
+            if len(layers) == 2:
+                return layers, (kind, (t - (cut - half)) / (2 * half))
+        return self._layer(shot, shot.src_in + min(max(0.0, t - shot.start), shot.dur), look, interrupt), None
 
-    def _decode(self, shot: Shot, src_t: float, look: Look, interrupt) -> Optional[np.ndarray]:
-        dec = self.decoders.get(shot.footage, look.use_proxies, look.decode_h, shot.index % SLOTS)
-        return dec.frame_at(src_t, interrupt)
+    def _render(self, layers: list, mix: Optional[tuple], look: Look, playing: bool) -> np.ndarray:
+        """Convert, grade and reframe decoded layers (on the render pool during playback)."""
+        imgs = [self._finish(dec.rgb_of(frame), shot, look, playing) for dec, frame, shot in layers]
+        return blend(mix[0], imgs[0], imgs[1], mix[1]) if mix is not None else imgs[0]
 
     def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
-        fn = self._grader(shot, playing)
+        fn = self._grader(shot, playing) if look.color else None
         out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGRA)   # Qt's native 32-bit layout: cheapest to paint
 
@@ -317,5 +396,5 @@ class PreviewEngine:
     def _info(shot: Shot, look: Look) -> str:
         f = shot.footage
         using_proxy = look.use_proxies and f.has_proxy()
-        return (f"{f.name}  {'PROXY' if using_proxy else 'ORIGINAL'}"
-                f"{'  ' + f.log_profile.upper() if f.log_profile != 'none' else ''}")
+        color = profile_short(f.log_profile) if look.color else "COLOR OFF"
+        return f"{f.name}  {'PROXY' if using_proxy else 'ORIGINAL'}" + (f"  {color}" if color else "")

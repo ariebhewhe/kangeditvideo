@@ -16,6 +16,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 - [Official camera LUTs](#official-camera-luts)
 - [Where files are stored](#where-files-are-stored)
 - [Troubleshooting](#troubleshooting)
+- [Development and releases](#development-and-releases)
 - [Project layout](#project-layout)
 - [Third-party software](#third-party-software)
 
@@ -39,16 +40,19 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 | | |
 |---|---|
-| **Smooth preview** | Decoding, grading and reframing run in the background. Playback reads ahead and prepares the next clips while one plays, so cuts in long-GOP 4K H.265 play without stutter. Scrubbing never freezes the window. |
+| **Smooth preview** | Playback is a pipeline: one thread only decodes, while a pool of threads converts, grades and reframes, so 4K H.265 keeps up with the frame rate. The next clips are prepared while one plays, and that preparation steps aside whenever playback needs the CPU. Scrubbing never freezes the window. |
+| **Color on / off in the viewer** | The viewer menu below the picture (or *View → Color in viewer*, **Ctrl+Shift+B**) turns the log conversion, LUTs and grading off, always or only while playing, for lighter playback. Export always includes them. |
 | **Timeline** | Drag to reorder, drag edges to trim, **Alt/Shift+drag** to slip. **Ctrl+click** / **Shift+click** / **Ctrl+A** select several clips. Delete, duplicate, auto color, transitions and *Replace with another best moment* work on the whole selection. |
 | **Transitions & split edits** | Per clip, in the Inspector or the right-click menu. Transitions are centered on the cut and use the footage around each clip, so the timeline length and captions don't move. |
+| **Media list views** | The **☰** / **▦** buttons above the Media list switch between the detail view (duration, format, camera, log profile, status) and a thumbnail grid. In the grid, move the mouse across a thumbnail to scrub through the clip; Ctrl+wheel resizes the thumbnails. |
+| **Recent projects** | *File → Open recent* lists the last 10 projects you opened or saved. |
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
 
 ### Color
 
 | | |
 |---|---|
-| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices. |
+| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices. DJI D-Log M, D-Log2 and the D-Log / D-Log2 *Vivid* looks are in the same menu and use DJI's official LUTs (see [Official camera LUTs](#official-camera-luts)). |
 | **Camera auto-detect** | The camera is identified from the file's metadata, and its log profile is chosen from the metadata or the picture. **Detect all** re-runs it for every file in the background. |
 | **Official camera LUTs** | Use the makers' own conversion LUTs (DJI D-Log M, Sony, Panasonic, Fujifilm, Nikon, ARRI…) instead of the built-in curves. See [Official camera LUTs](#official-camera-luts). |
 | **LUTs (.cube)** | Import 1D/3D `.cube` LUTs (or the `.zip` they come in) as a log conversion or as a creative look with a strength slider. |
@@ -70,11 +74,17 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Ratios & resolutions** | 16:9, 9:16, 1:1, 4:5, 4:3, 2.39:1 at 720p, 1080p, 1440p or 4K. Fill (crop with per-clip pan/zoom), fit, or blurred-background fit. |
 | **Codecs** | H.264, H.265 or ProRes 422 HQ. |
 | **GPU encoding** | H.264/H.265 use the graphics card's encoder when it has one (NVIDIA NVENC, AMD AMF, Intel Quick Sync, Apple VideoToolbox), and fall back to the CPU automatically. H.265 exports were about 3.7× faster on an AMD RX 480. |
-| **Proxies** | Optional 360–1080p short-GOP H.264 copies for lighter editing. Exports use the originals unless you choose *Draft export*. |
+| **Proxies** | Optional 360–1080p short-GOP H.264 copies for lighter editing. They are decoded and encoded on the graphics card when it can (same detection as analysis and export), and redone on the CPU for footage the GPU can't decode. Exports use the originals unless you choose *Draft export*. |
 
 ---
 
 ## Install and run
+
+### Ready-made builds
+
+Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** and **Linux (x64)**: no Python needed. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time. `SHA256SUMS.txt` lists the archives' checksums.
+
+### From source
 
 You need **Python 3.10 or newer**. The launcher sets up everything else on the first start:
 
@@ -162,6 +172,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Shift+Z | Fit the timeline |
 | Ctrl+Shift+A | Auto Edit… |
+| Ctrl+Shift+B | Color adjustments in the viewer on / off |
 | F1 | Shortcut list |
 
 | Mouse on the timeline | Action |
@@ -200,7 +211,7 @@ Camera makers publish their own log → Rec.709 conversion LUTs. **Tools → Off
 
 | Maker | Log | Where |
 |---|---|---|
-| DJI | D-Log M, D-Log | [dji.com/lut](https://www.dji.com/lut) |
+| DJI | D-Log M, D-Log, D-Log2 (+ Vivid) | [dji.com/lut](https://www.dji.com/lut): **Download** in the dialog fetches any camera's LUT directly |
 | Sony | S-Log3 / S-Gamut3(.Cine), S-Log2 | [Sony LUT library](https://pro.sony/bp_BR/technology/professional-video-lut-look-up-table) |
 | Panasonic | V-Log, V-Log L | [LUMIX downloads](https://av.jpn.support.panasonic.com/support/global/cs/dsc/download/index3.html) |
 | Fujifilm | F-Log, F-Log2 | [fujifilm-x.com LUTs](https://www.fujifilm-x.com/en-gb/support/download/lut/) |
@@ -209,11 +220,12 @@ Camera makers publish their own log → Rec.709 conversion LUTs. **Tools → Off
 | Canon | C-Log2, C-Log3 | Your camera's page on Canon's support site → Downloads → "Canon lookup table" |
 | Blackmagic | Film Gen5 | Installed with DaVinci Resolve (**Import from DaVinci Resolve**) |
 
-1. Download the LUT from the maker's page (KangEdit can't download these itself, because the pages require accepting the maker's terms).
+1. **DJI:** click **Download…** in a DJI row and pick your camera. Every log → Rec.709 LUT on [dji.com/lut](https://www.dji.com/lut) is listed (32 cameras and variants), downloaded from DJI's own servers into the LUT library, and selected. Two entries without a direct file (Mavic 3 D-Log, Zenmuse X9) open their download page instead.
+   **Other makers:** download the LUT from the maker's page (KangEdit can't download these itself, because the pages require accepting the maker's terms).
 2. Click **Import LUT files (.cube / .zip)…** and choose the file as downloaded. Recognized official files are marked ★ and selected automatically.
 3. Keep **Use these LUTs automatically when a camera's log profile is detected** ticked, and optionally switch existing footage now.
 
-DJI cameras can record D-Log or D-Log M. Most current models (Mini 4/5 Pro, Air 3/3S, Avata 2, Osmo Pocket 3, Osmo Action 4–6, Mavic 3) use D-Log M, so pick the D-Log M LUT in the DJI row for those.
+DJI cameras record D-Log M (Mini 4/5 Pro, Air 3/3S, Avata 2/360, Flip, Osmo Pocket 3, Osmo Action 4–6, Osmo 360, Osmo Nano), D-Log (Mavic 3/4 Pro, Osmo Pocket 4/4P, Zenmuse, Phantom 3/4, Inspire 1) or D-Log2 (Osmo Pocket 4P). DJI has published no curve for D-Log M or D-Log2, so those menu entries convert with DJI's LUT. Until it's imported they are approximated with the D-Log curve and marked *LUT not imported, approximated*; choosing one offers to get the LUT.
 
 ---
 
@@ -243,20 +255,51 @@ Earlier versions kept the cache in the user data folder. On the first start afte
 | macOS: "run.sh: Permission denied" | Run `chmod +x run.sh run.command` once, or start it with `sh run.sh`. |
 | FFmpeg download failed (offline, proxy, firewall) | Install FFmpeg yourself and put it on `PATH`. KangEdit uses it automatically. |
 | Playback starts after a short pause | The first frame of long-GOP footage has to be decoded from the previous keyframe. Proxies make the pause much shorter. |
-| Choppy playback on a slow computer | Turn on proxies (toolbar → *Use proxies*), then **Generate proxies**. |
+| Choppy playback on a slow computer | Set the viewer to *Color: off while playing* (Ctrl+Shift+B toggles color), and turn on proxies (toolbar → *Use proxies*), then **Generate proxies**. |
+| Proxies aren't faster with the GPU | Older cards (e.g. AMD RX 400/500) decode 4K H.265 no faster than a many-core CPU, and can't decode high-bitrate files at all (KangEdit then uses the CPU). Untick *Use the graphics card* in the Proxies dialog. |
 | Export uses the CPU | Your GPU has no H.264/H.265 encoder, its driver is too old, or ProRes is selected. Untick *Encode on the graphics card* to force the CPU. |
 | Captions are slow | Choose `large-v3-turbo` (or `small`) under *Captions → Style…*. |
 | Sound search fails | MyInstants is unreachable from your network. Import audio files instead. |
 
 ---
 
+## Development and releases
+
+```sh
+pip install -r requirements-dev.txt   # app packages + pytest, ruff, PyInstaller
+ruff check .                          # lint
+pytest                                # tests (settings and libraries go to a temporary folder)
+python main.py --self-test            # every module loads and the main window opens (offscreen)
+python scripts/build.py               # packaged build for this platform → dist/KangEdit-<version>-<platform>.zip
+```
+
+**Versioning.** `kangedit/__init__.py` holds the version (semantic versioning: `MAJOR.MINOR.PATCH`). Release tags are `vMAJOR.MINOR.PATCH` and must match it. `python scripts/bump_version.py patch|minor|major|X.Y.Z` changes it. Packaged builds also show the commit and build date in *Help → About* and `--version`.
+
+**GitHub Actions** (`.github/workflows/`):
+
+| Workflow | When | What |
+|---|---|---|
+| **CI** | Every push and pull request | Lint, tests and the self-test on Windows, macOS and Linux with Python 3.10 and 3.12. On `main` it also packages development builds (workflow artifacts, kept 30 days). |
+| **Build** | Called by CI and Release, or by hand | PyInstaller builds for Windows x64, macOS arm64 and Linux x64. Each build runs its own self-test before it is archived. |
+| **Release** | A `v*.*.*` tag is pushed | Checks the tag against the version, tests, builds every platform and publishes a GitHub Release with the archives, `SHA256SUMS.txt` and generated release notes. |
+| **Bump version** | By hand (*Actions → Bump version → Run workflow*) | Bumps the version (patch / minor / major / explicit), commits, tags and runs Release. If `main` is protected, allow GitHub Actions to push to it, or bump locally and push the tag. |
+
+To release by hand instead: `python scripts/bump_version.py minor`, commit, then `git tag v1.1.0 && git push origin main v1.1.0`.
+
+---
+
 ## Project layout
 
 ```
-main.py                 entry point:  python main.py [project.kgproj | video files…]
+main.py                 entry point:  python main.py [project.kgproj | video files…] [--version | --self-test]
 install.py              cross-platform setup (venv, packages, FFmpeg)
 run.bat / run.sh / run.command   launchers for Windows / macOS + Linux / macOS Finder
-requirements.txt
+requirements.txt        app packages;  requirements-dev.txt: + test, lint and packaging tools
+pyproject.toml          pytest and ruff settings
+scripts/                build.py (packaged build), bump_version.py (versioning)
+packaging/              PyInstaller spec
+tests/                  pytest suite
+.github/workflows/      CI, Build, Release, Bump version
 kangedit/
   app.py                startup (offers the FFmpeg download when it's missing)
   config.py             paths (app folder, cache, user data), constants, open_path()
@@ -272,10 +315,10 @@ kangedit/
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
   export.py             FFmpeg filtergraph rendering (+ preview audio mix)
-  preview.py            background preview engine: read-ahead, pre-roll, transitions
+  preview.py            background preview engine: decode thread + render pool, read-ahead, pre-roll, transitions
   decoder.py            PyAV frame-accurate decoding
   reframe.py            aspect-ratio crop/fit geometry (shared by preview and export)
-  proxy.py              proxy generation
+  proxy.py              proxy generation (GPU decode/encode with CPU fallback)
   models.py             project model, undo, save/load (.kgproj)
   tasks.py              background task queue
   ui/                   PySide6 interface: viewer, timeline, media bin, inspector, captions,

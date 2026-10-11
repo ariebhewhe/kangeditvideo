@@ -1,21 +1,71 @@
-"""Media bin: imported footage with status, thumbnails and per-footage actions."""
+"""Media bin: imported footage with status, thumbnails and per-footage actions.
+
+Two views of the same footage: a detail list (columns) and a thumbnail grid. In the grid, moving the
+mouse across a thumbnail scrubs through the clip (analysis keeps one thumbnail per second).
+"""
 
 from __future__ import annotations
 
 import os
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QAction, QIcon, QImage, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QMenu, QPushButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QListView, QListWidget, QListWidgetItem, QMenu,
+                               QPushButton, QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from .. import lut as lutlib
 from ..analysis import Analysis
 from ..color import LOG_CHOICES, lut_profile, profile_label
-from ..config import VIDEO_EXTENSIONS, open_path
+from ..config import VIDEO_EXTENSIONS, open_path, settings
 from ..models import Project
 from .theme import fmt_time
+
+THUMB_SIZES = (96, 128, 160, 200, 256)   # thumbnail widths in the grid (Ctrl+wheel steps through them)
+
+
+def _pixmap(arr: np.ndarray) -> QPixmap:
+    arr = np.ascontiguousarray(arr)
+    img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB888).copy()
+    return QPixmap.fromImage(img)
+
+
+class _Grid(QListWidget):
+    """Thumbnail grid: Ctrl+wheel resizes, hovering scrubs through a clip's thumbnails."""
+    zoom = Signal(int)                   # +1 / -1
+    hover = Signal(object, float)        # item (or None), horizontal position over its icon 0..1
+
+    def __init__(self):
+        super().__init__()
+        self.setViewMode(QListView.IconMode)
+        self.setResizeMode(QListView.Adjust)
+        self.setMovement(QListView.Static)
+        self.setUniformItemSizes(True)
+        self.setWordWrap(True)
+        self.setSpacing(6)
+        self.setMouseTracking(True)
+        self.viewport().installEventFilter(self)
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            self.zoom.emit(1 if e.angleDelta().y() > 0 else -1)
+            e.accept()
+            return
+        super().wheelEvent(e)
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.MouseMove:
+            pos = e.position().toPoint()
+            it = self.itemAt(pos)
+            if it is not None:
+                r = self.visualItemRect(it)
+                self.hover.emit(it, (pos.x() - r.left()) / max(1, r.width()))
+            else:
+                self.hover.emit(None, 0.0)
+        elif e.type() == QEvent.Leave:
+            self.hover.emit(None, 0.0)
+        return super().eventFilter(obj, e)
 
 
 class MediaBin(QWidget):
@@ -28,6 +78,11 @@ class MediaBin(QWidget):
         super().__init__(parent)
         self.project = project
         self.analyses: dict[str, Analysis] = {}
+        self._qs = settings()
+        self._thumb_w = self._qs.value("bin_thumb_size", 160, type=int)
+        if self._thumb_w not in THUMB_SIZES:
+            self._thumb_w = 160
+        self._scrubbing = None            # grid item whose icon shows a scrubbed frame
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Footage", "Duration", "Format", "Camera", "Log", "Status"])
         self.tree.setRootIsDecorated(False)
@@ -43,30 +98,122 @@ class MediaBin(QWidget):
         self.tree.setColumnWidth(3, 90)
         self.tree.setColumnWidth(4, 70)
 
+        self.grid = _Grid()
+        self.grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.grid.customContextMenuRequested.connect(self._menu)
+        self.grid.itemDoubleClicked.connect(lambda *_: self.action.emit("append_best", self.selected_ids()))
+        self.grid.zoom.connect(self._zoom)
+        self.grid.hover.connect(self._scrub)
+        self._apply_thumb_size()
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.tree)
+        self.stack.addWidget(self.grid)
+
         b_import = QPushButton("＋ Import footage")
         b_import.setObjectName("primary")
         b_import.clicked.connect(self.import_requested.emit)
         b_remove = QPushButton("Remove")
         b_remove.clicked.connect(lambda: self.action.emit("remove", self.selected_ids()))
+        self.btn_details = QToolButton(text="☰", checkable=True, autoExclusive=True)
+        self.btn_details.setToolTip("Detail view: duration, format, camera, log profile and status")
+        self.btn_thumbs = QToolButton(text="▦", checkable=True, autoExclusive=True)
+        self.btn_thumbs.setToolTip("Thumbnail view (hover to scrub, Ctrl+wheel to resize)")
+        self.btn_details.clicked.connect(lambda: self.set_view_mode("details"))
+        self.btn_thumbs.clicked.connect(lambda: self.set_view_mode("thumbnails"))
         top = QHBoxLayout()
         top.addWidget(b_import, 1)
         top.addWidget(b_remove)
+        top.addWidget(self.btn_details)
+        top.addWidget(self.btn_thumbs)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addLayout(top)
-        lay.addWidget(self.tree, 1)
+        lay.addWidget(self.stack, 1)
         self.setAcceptDrops(True)
+        self.set_view_mode(self._qs.value("bin_view", "details", type=str))
 
+    # ------------------------------------------------------------------ view mode
+    def set_view_mode(self, mode: str):
+        """"details" (list with columns) or "thumbnails" (grid)."""
+        thumbs = mode == "thumbnails"
+        sel = self.selected_ids()
+        self.stack.setCurrentWidget(self.grid if thumbs else self.tree)
+        (self.btn_thumbs if thumbs else self.btn_details).setChecked(True)
+        self._qs.setValue("bin_view", "thumbnails" if thumbs else "details")
+        self._select(sel)
+
+    def view_mode(self) -> str:
+        return "thumbnails" if self.stack.currentWidget() is self.grid else "details"
+
+    def _apply_thumb_size(self):
+        w = self._thumb_w
+        h = w * 9 // 16
+        self.grid.setIconSize(QSize(w, h))
+        self.grid.setGridSize(QSize(w + 16, h + 44))
+
+    def _zoom(self, step: int):
+        i = THUMB_SIZES.index(self._thumb_w) + step
+        if 0 <= i < len(THUMB_SIZES):
+            self._thumb_w = THUMB_SIZES[i]
+            self._qs.setValue("bin_thumb_size", self._thumb_w)
+            self._apply_thumb_size()
+
+    def _scrub(self, item, x: float):
+        """Show the clip's frame under the mouse on its grid thumbnail."""
+        if self._scrubbing is not None and self._scrubbing is not item:
+            self._set_grid_icon(self._scrubbing, None)
+            self._scrubbing = None
+        if item is None:
+            return
+        a = self.analyses.get(item.data(Qt.UserRole))
+        if a is None or not len(a.thumbs):
+            return
+        self._scrubbing = item
+        self._set_grid_icon(item, min(len(a.thumbs) - 1, max(0, int(x * len(a.thumbs)))))
+
+    def _set_grid_icon(self, item, index):
+        """index None: the clip's representative (middle) thumbnail."""
+        a = self.analyses.get(item.data(Qt.UserRole))
+        if a is not None and len(a.thumbs):
+            item.setIcon(QIcon(_pixmap(a.thumbs[len(a.thumbs) // 2 if index is None else index])))
+        else:
+            item.setIcon(QIcon(self._placeholder()))
+
+    def _placeholder(self) -> QPixmap:
+        pm = QPixmap(128, 72)
+        pm.fill(QColor("#22252b"))
+        p = QPainter(pm)
+        p.setPen(QColor("#6b6e76"))
+        p.drawText(pm.rect(), Qt.AlignCenter, "Analyzing…")
+        p.end()
+        return pm
+
+    # ------------------------------------------------------------------ content
     def set_project(self, project: Project):
         self.project = project
         self.refresh()
 
     def selected_ids(self) -> list[str]:
+        if self.stack.currentWidget() is self.grid:
+            return [it.data(Qt.UserRole) for it in self.grid.selectedItems()]
         return [it.data(0, Qt.UserRole) for it in self.tree.selectedItems()]
+
+    def _select(self, ids):
+        ids = set(ids)
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            it.setSelected(it.data(0, Qt.UserRole) in ids)
+        for i in range(self.grid.count()):
+            it = self.grid.item(i)
+            it.setSelected(it.data(Qt.UserRole) in ids)
 
     def refresh(self):
         sel = set(self.selected_ids())
         self.tree.clear()
+        self.grid.clear()
+        self._scrubbing = None
         for f in self.project.footage.values():
             status = []
             status.append("Proxy ✓" if f.has_proxy() else "No proxy")
@@ -86,12 +233,20 @@ class MediaBin(QWidget):
             it.setToolTip(4, f"{profile_label(f.log_profile)}" + (f"\n{f.log_note}" if f.log_note else ""))
             a = self.analyses.get(f.id)
             if a is not None and len(a.thumbs):
-                arr = np.ascontiguousarray(a.thumbs[len(a.thumbs) // 2])
-                img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB888).copy()
-                it.setIcon(0, QIcon(QPixmap.fromImage(img)))
+                it.setIcon(0, QIcon(_pixmap(a.thumbs[len(a.thumbs) // 2])))
             self.tree.addTopLevelItem(it)
-            if f.id in sel:
-                it.setSelected(True)
+
+            badges = [b for b, on in (("P", f.has_proxy()), ("CC", f.transcript is not None),
+                                      (f"×{used}", used)) if on]
+            gi = QListWidgetItem(f"{f.name}\n{fmt_time(f.duration, frames=False)}"
+                                 + (f"  ·  {log}" if log != "—" else "") + (f"  ·  {' '.join(badges)}" if badges else ""))
+            gi.setData(Qt.UserRole, f.id)
+            gi.setToolTip(f"{f.path}\n{f.width}×{f.height} {f.fps:.2f}p {f.bit_depth}bit · {f.camera or 'unknown camera'}"
+                          f"\n{profile_label(f.log_profile)}\n{' · '.join(status)}")
+            gi.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            self.grid.addItem(gi)
+            self._set_grid_icon(gi, None)
+        self._select(sel)
 
     def _menu(self, pos):
         ids = self.selected_ids()
@@ -141,7 +296,14 @@ class MediaBin(QWidget):
         a = QAction("Remove from project", m)
         a.triggered.connect(lambda: self.action.emit("remove", ids))
         m.addAction(a)
-        m.exec(self.tree.viewport().mapToGlobal(pos))
+        m.addSeparator()
+        view = m.addMenu("View")
+        for mode, label in (("details", "Details"), ("thumbnails", "Thumbnails")):
+            a = QAction(label, view, checkable=True)
+            a.setChecked(self.view_mode() == mode)
+            a.triggered.connect(lambda _=False, md=mode: self.set_view_mode(md))
+            view.addAction(a)
+        m.exec(self.stack.currentWidget().viewport().mapToGlobal(pos))
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():

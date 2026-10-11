@@ -192,7 +192,9 @@ def _scan(u: _Unit, hw: Optional[str], threads: int, cancel: threading.Event,
     scale = f"scale={{}}:{{}}:flags=area:in_color_matrix={j.matrix}:in_range=auto:out_range=pc"
     args = [ffmpeg_bin(), "-v", "error", "-nostdin", "-skip_frame", "noref"]
     if hw:
-        args += ["-hwaccel", hw, "-hwaccel_output_format", HW_OUTPUT_FORMAT[hw], "-noautorotate"]
+        # -xerror: a GPU that can't decode a stream (e.g. high-bitrate 4K H.265 on older cards) otherwise
+        # yields garbage frames with exit code 0; failing makes this segment rerun on the CPU.
+        args += ["-xerror", "-hwaccel", hw, "-hwaccel_output_format", HW_OUTPUT_FORMAT[hw], "-noautorotate"]
         sw, sh = (h, w) if j.rotation in (90, 270) else (w, h)
         vf = f"fps={SAMPLE_RATE},hwdownload,format={j.hw_format}," + scale.format(sw, sh) + _ROTATE.get(j.rotation, "")
     else:

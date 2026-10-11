@@ -1,0 +1,47 @@
+# One-click release: bump kangedit.__version__ (semantic versioning), commit, tag vX.Y.Z, then run Release.
+# (A tag pushed with the workflow token doesn't trigger other workflows, so Release is called directly.)
+name: Bump version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "patch, minor, major, or an explicit version (X.Y.Z)"
+        required: true
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-version
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          version=$(python scripts/bump_version.py "$BUMP" | tail -n 1)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): v$version"
+          git tag -a "v$version" -m "KangEdit $version"
+          git push origin HEAD "v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: bump
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.bump.outputs.tag }}

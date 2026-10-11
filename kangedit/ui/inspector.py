@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayo
                                QLabel, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
-from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, lut_profile, profile_label
+from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import Project, TimelineClip
 
@@ -293,7 +293,7 @@ class Inspector(QScrollArea):
         self.sp_out.setValue(clip.src_out)
         select_data(self.cb_log, f.log_profile, profile_label(f.log_profile))
         self.cb_tone.setCurrentIndex(max(0, self.cb_tone.findData(f.tonemap)))
-        self.cb_tone.setEnabled(f.log_profile in LOG_PROFILES)
+        self.cb_tone.setEnabled(effective_profile(f.log_profile) in LOG_PROFILES)
         select_data(self.cb_look, clip.grade.look, f"LUT: {lutlib.lut_name(clip.grade.look)}")
         self.look_mix.setEnabled(bool(clip.grade.look))
         self.look_mix.set_value(clip.grade.look_mix)
@@ -346,7 +346,7 @@ class Inspector(QScrollArea):
             f.log_profile = self.cb_log.currentData()
             f.log_note, f.log_pending = "Chosen manually", False
         f.tonemap = self.cb_tone.currentData()
-        self.cb_tone.setEnabled(f.log_profile in LOG_PROFILES)
+        self.cb_tone.setEnabled(effective_profile(f.log_profile) in LOG_PROFILES)
         self._show_camera(f)
         self.changed.emit("footage_color")
 

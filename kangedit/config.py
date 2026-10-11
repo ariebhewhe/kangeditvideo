@@ -11,14 +11,27 @@ from pathlib import Path
 from typing import Optional
 
 
-# The folder KangEdit runs from (holds main.py); its downloaded FFmpeg and default cache live here.
-APP_DIR = Path(__file__).resolve().parent.parent
+# The folder KangEdit runs from (holds main.py, or a packaged build's executable); its downloaded FFmpeg
+# and default cache live here.
+APP_DIR = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+           else Path(__file__).resolve().parent.parent)
+
+
+def settings():
+    """The app's QSettings: the system store, or KangEdit.ini in $KANGEDIT_SETTINGS_DIR (tests, CI, portable use)."""
+    from PySide6.QtCore import QSettings
+    folder = os.environ.get("KANGEDIT_SETTINGS_DIR")
+    if folder:
+        return QSettings(os.path.join(folder, "KangEdit.ini"), QSettings.IniFormat)
+    return QSettings("KangEdit", "KangEdit")
 
 
 def app_data_dir() -> Path:
     """Per-user data (LUT and sound libraries): %LOCALAPPDATA%, ~/Library/Application Support or
-    ~/.local/share."""
-    if os.name == "nt":
+    ~/.local/share ($KANGEDIT_DATA_DIR overrides it)."""
+    if os.environ.get("KANGEDIT_DATA_DIR"):
+        base = os.environ["KANGEDIT_DATA_DIR"]
+    elif os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
     elif sys.platform == "darwin":
         base = os.path.expanduser("~/Library/Application Support")
@@ -31,7 +44,8 @@ def app_data_dir() -> Path:
 
 def ffmpeg_dir() -> Path:
     """Where the automatic FFmpeg download goes (checked before PATH)."""
-    return APP_DIR / "ffmpeg"
+    from .ffmpeg_setup import bin_dir
+    return bin_dir().parent
 
 
 _cache_root: Optional[Path] = None   # user-chosen cache folder; None = default_cache_root()

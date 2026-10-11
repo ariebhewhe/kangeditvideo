@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from . import APP_NAME
+from . import APP_NAME, version_string
 from .ffmpeg import ffmpeg_bin, ffprobe_bin
 
 
@@ -68,8 +68,59 @@ def _download_ffmpeg() -> bool:
     return True
 
 
+def self_test() -> int:
+    """CI / packaging check: every module and native library loads, and the main window builds and closes
+    offscreen with throwaway settings (no network, no dialogs). Exit code 0 on success."""
+    import importlib
+    import os
+    import pkgutil
+    import shutil
+    import tempfile
+    import traceback
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    tmp = tempfile.mkdtemp(prefix="kangedit-selftest-")
+    os.environ["KANGEDIT_SETTINGS_DIR"] = os.environ["KANGEDIT_DATA_DIR"] = tmp
+    try:
+        import kangedit
+        for mod in pkgutil.walk_packages(kangedit.__path__, "kangedit."):
+            importlib.import_module(mod.name)
+        for lib in ("av", "cv2", "numpy", "ctranslate2", "faster_whisper"):
+            importlib.import_module(lib)
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        from .ui.main_window import MainWindow
+        win = MainWindow()
+        win.show()
+        app.processEvents()
+        win.project.dirty = False
+        win.close()
+        app.processEvents()
+        _report(f"{APP_NAME} {version_string()} self-test OK")
+        return 0
+    except Exception:  # noqa: BLE001
+        _report(traceback.format_exc())
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _report(text: str) -> None:
+    """Print, and append to $KANGEDIT_SELFTEST_LOG: a windowed build has no console (sys.stdout is None)."""
+    import os
+    log = os.environ.get("KANGEDIT_SELFTEST_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(text.rstrip() + "\n")
+    if sys.stdout is not None:
+        print(text, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
+    if "--version" in argv[1:]:
+        _report(f"{APP_NAME} {version_string()}")
+        return 0
+    if "--self-test" in argv[1:]:
+        return self_test()
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)

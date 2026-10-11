@@ -1,0 +1,5 @@
+# Tests, lint and packaging (CI and release builds). The app itself only needs requirements.txt.
+-r requirements.txt
+pytest>=8.0
+ruff>=0.6
+pyinstaller>=6.10
