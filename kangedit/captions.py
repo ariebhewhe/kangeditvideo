@@ -342,6 +342,24 @@ def edit_caption(project: Project, cap: Caption, new_text: str) -> None:
     f.transcript[idx[0]:idx[0]] = new
 
 
+def delete_captions(project: Project, caps: list[Caption]) -> int:
+    """Remove these captions' words from the transcripts (so they stay gone after re-trims). Returns how
+    many words were removed. "Generate captions" can transcribe the footage again."""
+    by_footage: dict[str, set[int]] = {}
+    for cap in caps:
+        by_footage.setdefault(cap.footage_id, set()).update(cap.word_idx)
+    removed = 0
+    for fid, idx in by_footage.items():
+        f = project.footage.get(fid)
+        if not f or not f.transcript:
+            continue
+        for k in sorted(idx, reverse=True):
+            if 0 <= k < len(f.transcript):
+                del f.transcript[k]
+                removed += 1
+    return removed
+
+
 def _ts(t: float, sep: str = ",") -> str:
     t = max(0.0, t)
     h = int(t // 3600)

@@ -16,10 +16,14 @@ from ..analysis import WAVE_RATE, Analysis
 from ..captions import Caption
 from ..edits import TRANSITIONS, edits
 from ..models import Project, SoundClip
+from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
 from .theme import CLIP_COLORS, fmt_time
 
 RULER = 24
-TRACK_Y = RULER + 6
+TEXT_Y = RULER + 4                 # text / title track: two rows so overlapping titles stay visible
+TEXT_ROW = 16
+TEXT_H = TEXT_ROW * 2
+TRACK_Y = TEXT_Y + TEXT_H + 4
 TRACK_H = 84
 WAVE_H = 18
 SFX_Y = TRACK_Y + TRACK_H + 6     # sound-effect layer: two rows so overlapping sounds stay visible
@@ -45,6 +49,8 @@ class TimelineView(QWidget):
     sound_selected = Signal(str)
     sounds_changed = Signal()            # a sound was moved / trimmed (after edit_started)
     sound_dropped = Signal(list, float)  # audio file paths dropped on the timeline, at timeline time
+    text_selected = Signal(str)
+    texts_changed = Signal()             # a title was moved / trimmed (after edit_started)
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -67,6 +73,7 @@ class TimelineView(QWidget):
         self.setMinimumHeight(CAP_Y + CAP_H + 10)
         self.setAcceptDrops(True)
         self.selected_sound = ""
+        self.selected_text = ""
         self._sound_max: dict[str, float] = {}   # file length per sound file (trim limit)
 
     # ------------------------------------------------------------------ selection
@@ -135,7 +142,7 @@ class TimelineView(QWidget):
         return max(0.0, (x + self.scroll_x) / self.pps)
 
     def content_width(self) -> float:
-        end = max([self.project.duration] + [x.end for x in self.project.sounds])
+        end = max([self.project.duration] + [x.end for x in self.project.sounds] + [x.end for x in self.project.texts])
         return end * self.pps + 200
 
     def fit(self):
@@ -232,6 +239,7 @@ class TimelineView(QWidget):
         p.fillRect(QRectF(0, TRACK_Y, self.width(), TRACK_H), QColor("#1d1f23"))
         p.fillRect(QRectF(0, CAP_Y, self.width(), CAP_H), QColor("#1a1b1f"))
         self._paint_sounds(p)
+        self._paint_texts(p)
 
         if not self.project.clips:
             p.setPen(QColor("#5d6068"))
@@ -438,13 +446,7 @@ class TimelineView(QWidget):
     # ------------------------------------------------------------------ sound-effect layer
     def _sound_rows(self) -> list[tuple[SoundClip, int]]:
         """Each sound with its display row (0/1): overlapping sounds alternate rows."""
-        out, row_end = [], [-1e9, -1e9]
-        for x in sorted(self.project.sounds, key=lambda x: x.start):
-            row = 0 if row_end[0] <= x.start + 1e-6 else 1 if row_end[1] <= x.start + 1e-6 else \
-                (0 if row_end[0] <= row_end[1] else 1)
-            row_end[row] = max(row_end[row], x.end)
-            out.append((x, row))
-        return out
+        return self._rows(self.project.sounds)
 
     def _sound_rects(self) -> list[tuple[SoundClip, QRectF]]:
         out = []
@@ -502,11 +504,188 @@ class TimelineView(QWidget):
                 p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 7)))
 
+    # ------------------------------------------------------------------ text track
+    @staticmethod
+    def _rows(items) -> list[tuple[object, int]]:
+        """Each item (with .start / .end) and its display row (0/1): overlapping items alternate rows."""
+        out, row_end = [], [-1e9, -1e9]
+        for x in sorted(items, key=lambda x: x.start):
+            row = 0 if row_end[0] <= x.start + 1e-6 else 1 if row_end[1] <= x.start + 1e-6 else \
+                (0 if row_end[0] <= row_end[1] else 1)
+            row_end[row] = max(row_end[row], x.end)
+            out.append((x, row))
+        return out
+
+    def _text_rects(self) -> list[tuple[object, QRectF]]:
+        out = []
+        for x, row in self._rows(self.project.texts):
+            x0, x1 = self.t_to_x(x.start), self.t_to_x(x.end)
+            out.append((x, QRectF(x0, TEXT_Y + row * TEXT_ROW + 1, max(3.0, x1 - x0), TEXT_ROW - 2)))
+        return out
+
+    def _text_hit(self, pos: QPointF):
+        if not (TEXT_Y <= pos.y() <= TEXT_Y + TEXT_H):
+            return None, None
+        for x, r in reversed(self._text_rects()):
+            if r.left() - 2 <= pos.x() <= r.right() + 2 and r.top() <= pos.y() <= r.bottom():
+                if pos.x() - r.left() <= 5 and r.width() > 15:
+                    return x, "t_trim_l"
+                if r.right() - pos.x() <= 5 and r.width() > 15:
+                    return x, "t_trim_r"
+                return x, "t_move"
+        return None, "lane"
+
+    def _paint_texts(self, p: QPainter):
+        p.fillRect(QRectF(0, TEXT_Y, self.width(), TEXT_H), QColor("#1b1d21"))
+        f = QFont()
+        f.setPixelSize(10)
+        p.setFont(f)
+        if not self.project.texts:
+            p.setPen(QColor("#4d5058"))
+            p.drawText(QRectF(8, TEXT_Y, self.width() - 16, TEXT_H), Qt.AlignVCenter | Qt.AlignLeft,
+                       "Titles & text — right-click here to add one, or use the Text tab")
+            return
+        for x, r in self._text_rects():
+            if r.right() < 0 or r.left() > self.width():
+                continue
+            sel = x.id == self.selected_text
+            p.setPen(QPen(QColor("#ffffff"), 1.5) if sel else Qt.NoPen)
+            p.setBrush(QColor("#2f9e8f") if sel else QColor("#237a6f"))
+            p.drawRoundedRect(r, 3, 3)
+            if r.width() > 18:
+                p.setPen(QColor("#eafffb"))
+                label = "T  " + x.text.replace("\n", " / ")
+                p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                           p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 7)))
+
+    def select_text(self, text_id: str):
+        self.selected_text = text_id
+        if text_id:
+            if self._selected:
+                self.selected = ""
+                self.selection_changed.emit("")
+            self.selected_sound = ""
+        self.text_selected.emit(text_id)
+        self.update()
+
+    def _text_press(self, e, pos) -> bool:
+        x, part = self._text_hit(pos)
+        if part is None:
+            return False
+        t = self.x_to_t(pos.x())
+        if x is None:     # empty part of the lane
+            if e.button() == Qt.RightButton:
+                self._lane_menu(e.globalPosition().toPoint(), t)
+                return True
+            self.select_text("")
+            self.seek.emit(t)
+            self._drag = {"kind": "scrub"}
+            return True
+        self.select_text(x.id)
+        if e.button() == Qt.RightButton:
+            self._text_menu(e.globalPosition().toPoint(), x.id)
+            return True
+        self._drag = {"kind": part, "text": x.id, "x0": pos.x(), "start0": x.start, "dur0": x.duration,
+                      "active": False}
+        return True
+
+    def _text_move(self, pos, d: dict):
+        x = next((s for s in self.project.texts if s.id == d["text"]), None)
+        if x is None:
+            return
+        dx = pos.x() - d["x0"]
+        if not d["active"]:
+            if abs(dx) < 3:
+                return
+            d["active"] = True
+            self.edit_started.emit()
+        dt = dx / self.pps
+        snaps = [self.playhead] + self.project.clip_starts() + [self.project.duration]
+        if d["kind"] == "t_move":
+            start = max(0.0, d["start0"] + dt)
+            for t in snaps:   # snap either edge to the playhead and the cuts
+                if abs((start - t) * self.pps) < 6:
+                    start = t
+                    break
+                if abs((start + x.duration - t) * self.pps) < 6:
+                    start = t - x.duration
+                    break
+            x.start = max(0.0, self._snap(start))
+        elif d["kind"] == "t_trim_l":
+            end = d["start0"] + d["dur0"]
+            start = min(max(0.0, d["start0"] + dt), end - MIN_DUR)
+            start = next((t for t in snaps if abs((start - t) * self.pps) < 6 and t < end - MIN_DUR), start)
+            x.start, x.duration = start, end - start
+        else:
+            end = max(d["start0"] + MIN_DUR, d["start0"] + d["dur0"] + dt)
+            end = next((t for t in snaps if abs((end - t) * self.pps) < 6 and t > d["start0"] + MIN_DUR), end)
+            x.duration = end - d["start0"]
+        self.update()
+        self.texts_changed.emit()
+
+    def _menu_action(self, m: QMenu, label: str, key: str, payload: str):
+        a = QAction(label, m)
+        a.triggered.connect(lambda _=False: self.context_action.emit(key, payload))
+        m.addAction(a)
+        return a
+
+    def _add_text_menu(self, m: QMenu, t: float, title: str = "Add text here"):
+        sub = m.addMenu(title)
+        for key, cfg in TEXT_PRESETS.items():
+            self._menu_action(sub, cfg["label"], f"text_add:{key}", f"{t:.4f}")
+
+    def _text_menu(self, gpos, text_id: str):
+        m = QMenu(self)
+        self._menu_action(m, "Edit text…\tDouble-click", "text_edit", text_id)
+        self._menu_action(m, "Move to playhead", "text_to_playhead", text_id)
+        self._menu_action(m, "Duplicate", "text_duplicate", text_id)
+        for title, table, prefix in (("Animation in", ANIM_IN, "text_anim_in"), ("Animation out", ANIM_OUT, "text_anim_out")):
+            sub = m.addMenu(title)
+            for k, label in table.items():
+                self._menu_action(sub, label, f"{prefix}:{k}", text_id)
+        sub = m.addMenu("Position")
+        for k, label in (("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom"), ("lower_left", "Lower left")):
+            self._menu_action(sub, label, f"text_pos:{k}", text_id)
+        m.addSeparator()
+        self._menu_action(m, "Delete text\tDel", "text_delete", text_id)
+        m.exec(gpos)
+
+    def _lane_menu(self, gpos, t: float):
+        """Right-click on an empty part of the timeline."""
+        m = QMenu(self)
+        self._add_text_menu(m, t)
+        self._menu_action(m, "Add sound effect…", "open_sounds", "")
+        m.addSeparator()
+        self._menu_action(m, "Move playhead here", "seek", f"{t:.4f}")
+        if self.project.clips:
+            self._menu_action(m, "Split at playhead\tS", "split_playhead", "")
+            self._menu_action(m, "Select all clips\tCtrl+A", "select_all", "")
+        self._menu_action(m, "Fit timeline\tShift+Z", "fit", "")
+        m.addSeparator()
+        self._menu_action(m, "Generate captions", "captions_generate", "")
+        m.exec(gpos)
+
+    def _caption_menu(self, gpos, index: int, t: float):
+        m = QMenu(self)
+        if index >= 0:
+            self._menu_action(m, "Edit caption…", "caption_edit", str(index))
+            self._menu_action(m, "Delete caption", "caption_delete", str(index))
+            m.addSeparator()
+        if self.captions:
+            self._menu_action(m, "Delete all captions…", "caption_delete_all", "")
+        self._menu_action(m, "Generate captions", "captions_generate", "")
+        self._menu_action(m, "Caption style…", "caption_style", "")
+        m.addSeparator()
+        self._add_text_menu(m, t)
+        m.exec(gpos)
+
     def _select_sound(self, sound_id: str):
         self.selected_sound = sound_id
         if sound_id and self._selected:
             self.selected = ""
             self.selection_changed.emit("")
+        if sound_id and self.selected_text:
+            self.select_text("")
         self.sound_selected.emit(sound_id)
         self.update()
 
@@ -597,12 +776,27 @@ class TimelineView(QWidget):
 
     def mousePressEvent(self, e):
         pos = e.position()
+        if e.button() in (Qt.LeftButton, Qt.RightButton) and self._text_press(e, pos):
+            return
+        if e.button() == Qt.RightButton and SFX_Y <= pos.y() <= SFX_Y + SFX_H and self._sound_hit(pos)[0] is None:
+            self._lane_menu(e.globalPosition().toPoint(), self.x_to_t(pos.x()))
+            return
         if e.button() in (Qt.LeftButton, Qt.RightButton) and self._sound_press(e, pos):
             return
         if self.selected_sound and e.button() == Qt.LeftButton:
             self._select_sound("")
+        if self.selected_text and e.button() == Qt.LeftButton:
+            self.select_text("")
         if e.button() == Qt.RightButton:
+            t = self.x_to_t(pos.x())
+            if CAP_Y <= pos.y() <= CAP_Y + CAP_H:
+                idx = next((i for i, cap in enumerate(self.captions) if cap.start <= t < cap.end), -1)
+                self._caption_menu(e.globalPosition().toPoint(), idx, t)
+                return
             c, _ = self._hit(pos)
+            if c is None:
+                self._lane_menu(e.globalPosition().toPoint(), t)
+                return
             if c is not None:
                 if c.id not in self._selection:   # keep a multi-selection the clip belongs to
                     self.selected = c.id
@@ -654,6 +848,12 @@ class TimelineView(QWidget):
         pos = e.position()
         d = self._drag
         if d is None:
+            tx, tpart = self._text_hit(pos)
+            if tx is not None:
+                self.setCursor(Qt.SizeHorCursor if tpart in ("t_trim_l", "t_trim_r") else Qt.OpenHandCursor)
+                self.setToolTip(f"{tx.text}\n{tx.start:.2f}s, {tx.duration:.2f}s long\n"
+                                "Drag: move · Edges: change length · Double-click: edit · Right-click: more")
+                return
             x, spart = self._sound_hit(pos)
             if x is not None:
                 self.setCursor(Qt.SizeHorCursor if spart in ("s_trim_l", "s_trim_r") else Qt.OpenHandCursor)
@@ -677,6 +877,9 @@ class TimelineView(QWidget):
             return
         if "sound" in d:
             self._sound_move(pos, d)
+            return
+        if "text" in d:
+            self._text_move(pos, d)
             return
         idx = self.project.index_of(d["clip"])
         if idx < 0:
@@ -730,6 +933,15 @@ class TimelineView(QWidget):
             self.setCursor(Qt.ArrowCursor)
             self.refresh()
             return
+        if "text" in d:
+            if d["active"]:
+                self.texts_changed.emit()
+                self.edit_finished.emit()
+            else:
+                self.seek.emit(self.x_to_t(e.position().x()))
+            self.setCursor(Qt.ArrowCursor)
+            self.refresh()
+            return
         if d["kind"] == "move" and d.get("active") and d.get("drop") is not None:
             i = self.project.index_of(d["clip"])
             drop = d["drop"]
@@ -755,6 +967,10 @@ class TimelineView(QWidget):
         self.refresh()
 
     def mouseDoubleClickEvent(self, e):
+        tx, _ = self._text_hit(e.position())
+        if tx is not None:
+            self.context_action.emit("text_edit", tx.id)
+            return
         c, _ = self._hit(e.position())
         if c is not None:
             i = self.project.index_of(c.id)

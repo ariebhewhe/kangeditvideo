@@ -18,20 +18,38 @@ from ..color import Grade
 from ..config import frame_size
 from ..decoder import DecoderPool
 from ..edits import TRANSITIONS, edits
-from ..models import Project
+from ..fonts import ensure_qt_font
+from ..models import Project, TextClip
+from ..titles import text_state
 from ..preview import Look, PreviewEngine, Rendered, Shot
+from .text_render import draw_text, text_rect
 from .theme import fmt_time
 
 ADJUST_MODES = [("on", "Color: on"), ("playback", "Color: off while playing"), ("off", "Color: off")]
 
 
 class Canvas(QWidget):
+    text_pressed = Signal(str)                 # a title was clicked (before a possible drag)
+    text_dragged = Signal(str, float, float)   # title id, new anchor x / y (0..1 of the frame)
+    text_released = Signal(str, bool)          # title id, whether it was moved
+    text_activated = Signal(str)               # double-click: edit the title
+    context_menu = Signal(object, str)         # global position, title id under the mouse ("" = none)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image: Optional[QImage] = None
+        self.texts: list[TextClip] = []        # the project's titles (shared list)
+        self.text_t = 0.0                      # timeline time the titles are drawn at
+        self.selected_text = ""
+        self.overlay_gain = 1.0                # timeline fade in / out applied to titles and captions
+        self._frame_rect = QRectF()
+        self._text_rects: list[tuple[str, QRectF]] = []
+        self._text_drag: Optional[dict] = None
+        self.setMouseTracking(True)
         self.caption: Optional[Caption] = None
         self.caption_t = 0.0
         self.caption_style = None
+        self._font_ready = ""
         self.layout = None
         self.out_h = 1080
         self.message = "Import footage and press Auto Edit"
@@ -55,13 +73,86 @@ class Canvas(QWidget):
         r = QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawImage(r, self.image)
+        self._frame_rect = r
         if self.show_guides:
             p.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt.DashLine))
             for k in (1, 2):
                 p.drawLine(QPointF(r.left() + r.width() * k / 3, r.top()), QPointF(r.left() + r.width() * k / 3, r.bottom()))
                 p.drawLine(QPointF(r.left(), r.top() + r.height() * k / 3), QPointF(r.right(), r.top() + r.height() * k / 3))
+        self._draw_texts(p, r)
         if self.caption and self.caption_style is not None:
+            p.setOpacity(self.overlay_gain)
             self._draw_caption(p, r)
+            p.setOpacity(1.0)
+
+    def _draw_texts(self, p: QPainter, r: QRectF):
+        self._text_rects = []
+        for tc in self.texts:
+            st = text_state(tc, self.text_t)
+            if st is None:
+                continue
+            draw_text(p, r, tc, st, self.overlay_gain)
+            rect = text_rect(tc, r)
+            self._text_rects.append((tc.id, rect))
+            if tc.id == self.selected_text:
+                p.setPen(QPen(QColor("#4c8dff"), 1.5, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(rect)
+
+    def _text_at(self, pos: QPointF) -> str:
+        for tid, rect in reversed(self._text_rects):
+            if rect.contains(pos):
+                return tid
+        return ""
+
+    def mousePressEvent(self, e):
+        pos = e.position()
+        tid = self._text_at(pos)
+        if e.button() == Qt.RightButton:
+            if tid:
+                self.text_pressed.emit(tid)
+            self.context_menu.emit(e.globalPosition().toPoint(), tid)
+            return
+        if e.button() == Qt.LeftButton and tid:
+            tc = next((x for x in self.texts if x.id == tid), None)
+            if tc is not None:
+                self.text_pressed.emit(tid)
+                self._text_drag = {"id": tid, "p0": pos, "x0": tc.x, "y0": tc.y, "moved": False}
+                return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        d = self._text_drag
+        pos = e.position()
+        if d is None:
+            self.setCursor(Qt.SizeAllCursor if self._text_at(pos) else Qt.ArrowCursor)
+            return
+        r = self._frame_rect
+        if r.width() <= 0:
+            return
+        dx, dy = pos.x() - d["p0"].x(), pos.y() - d["p0"].y()
+        if not d["moved"] and abs(dx) + abs(dy) < 3:
+            return
+        d["moved"] = True
+        x = min(1.0, max(0.0, d["x0"] + dx / r.width()))
+        y = min(1.0, max(0.0, d["y0"] + dy / r.height()))
+        if abs(x - 0.5) * r.width() < 6:      # snap to the centre lines
+            x = 0.5
+        if abs(y - 0.5) * r.height() < 6:
+            y = 0.5
+        self.text_dragged.emit(d["id"], x, y)
+
+    def mouseReleaseEvent(self, e):
+        d, self._text_drag = self._text_drag, None
+        if d is not None:
+            self.text_released.emit(d["id"], d["moved"])
+            return
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        tid = self._text_at(e.position())
+        if tid:
+            self.text_activated.emit(tid)
 
     def _draw_caption(self, p: QPainter, r: QRectF):
         """Same layout and word animations as the burned-in export (captions.write_ass)."""
@@ -84,6 +175,9 @@ class Canvas(QWidget):
             lines = wrap_words(words, lay.max_chars, lay.max_lines)
         if not lines:
             return
+        if st.font != self._font_ready:
+            ensure_qt_font(st.font)
+            self._font_ready = st.font
         font = QFont(st.font)
         font.setPixelSize(int(px))
         font.setBold(True)
@@ -428,6 +522,9 @@ class Viewer(QWidget):
         self.canvas.image = QImage(out.data, out.shape[1], out.shape[0], out.strides[0], QImage.Format_RGB32)
         self.canvas.caption = None
         t = self.t if still else r.t
+        self.canvas.texts = self.project.texts
+        self.canvas.text_t = t if self._override is None else -1.0
+        self.canvas.overlay_gain = self._look().fade_gain(t)
         st = self.project.settings.captions
         if self._override is None and st.enabled:
             for c in self.captions:

@@ -13,9 +13,9 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
-                               QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
-                               QTabWidget, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QHBoxLayout,
+                               QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
+                               QSizePolicy, QSplitter, QTabWidget, QToolButton, QWidget)
 
 from .. import APP_NAME, camera, version_string
 from .. import lut as lutlib
@@ -23,7 +23,7 @@ from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyz
 from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, select
 from .. import sfx
 from ..bookends import find_bookends, story_order
-from ..captions import Caption, build_captions, edit_caption, listen, project_layout, transcribe, write_srt
+from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -31,17 +31,20 @@ from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDE
                       open_path, set_cache_root, settings, sfx_dir)
 from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
-from ..models import Footage, Project, SoundClip, TimelineClip, new_id
+from ..models import Footage, Project, SoundClip, TextClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
 from ..tasks import TaskQueue
+from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
 from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
                       ProxyDialog)
 from .inspector import Inspector
 from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
+from .text_panel import TextPanel
 from .theme import fmt_time
 from .timeline import TimelinePanel
+from .tour import TourOverlay, TourStep
 from .viewer import ADJUST_MODES, Viewer
 
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
@@ -80,6 +83,9 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(self.project)
         self.caps_panel = CaptionsPanel()
         self.sfx_panel = SoundPanel()
+        self.text_panel = TextPanel(self.project)
+        self._exported = False
+        self._tour: Optional[TourOverlay] = None
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(self.viewer)
@@ -95,16 +101,22 @@ class MainWindow(QMainWindow):
         d_bin.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.LeftDockWidgetArea, d_bin)
         tabs = QTabWidget()
-        tabs.addTab(self.inspector, "Inspector")
-        tabs.addTab(self.caps_panel, "Captions")
-        tabs.addTab(self.sfx_panel, "Sounds")
+        tabs.addTab(self.inspector, "🎨 Clip")
+        tabs.addTab(self.caps_panel, "💬 Captions")
+        tabs.addTab(self.text_panel, "🔤 Text")
+        tabs.addTab(self.sfx_panel, "🔊 Sounds")
+        tabs.setTabToolTip(0, "Colour, log conversion, reframe, volume and transition of the selected clip")
+        tabs.setTabToolTip(1, "Generate, edit, style and delete captions")
+        tabs.setTabToolTip(2, "Animated titles and text")
+        tabs.setTabToolTip(3, "Sound effects")
         self.right_tabs = tabs
-        d_right = QDockWidget("Clip", self)
+        d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")
         d_right.setWidget(tabs)
         d_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
         self.resizeDocks([d_bin, d_right], [430, 370], Qt.Horizontal)
+        self.d_bin, self.d_right = d_bin, d_right
 
         self._build_actions()
         self._build_toolbar()
@@ -115,6 +127,7 @@ class MainWindow(QMainWindow):
         self._audio_timer = QTimer(self, singleShot=True, interval=700)
         self._audio_timer.timeout.connect(self._render_audio)
         QTimer.singleShot(800, self._offer_legacy_cache)
+        QTimer.singleShot(900, self._first_run_tour)
 
     # ================================================================== construction
     def _act(self, text, slot, shortcut=None, tip=None) -> QAction:
@@ -155,6 +168,9 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
         m.addAction(self._act("Replace with another best moment",
                               lambda: self.clip_action("alt_moment", self.tl.selected), "R"))
+        m.addSeparator()
+        m.addAction(self._act("Add title at playhead", lambda: self.add_text("title"), "T",
+                              "Add an animated title where the playhead is (more templates in the Text tab)"))
 
         m = mb.addMenu("&Tools")
         self.a_auto = self._act("Auto Edit…", self.auto_edit_dialog, "Ctrl+Shift+A",
@@ -228,8 +244,12 @@ class MainWindow(QMainWindow):
         a = QAction("Rule-of-thirds guides", self, checkable=True)
         a.toggled.connect(lambda v: (setattr(self.viewer.canvas, "show_guides", v), self.viewer.canvas.update()))
         m.addAction(a)
+        self.a_guides = a
 
         m = mb.addMenu("&Help")
+        self.a_tour = self._act("Guided tour", lambda: self.show_tour(), "Shift+F1",
+                                "A short walk through the app: import, auto edit, refine and export")
+        m.addAction(self.a_tour)
         m.addAction(self._act("Keyboard shortcuts", self.show_shortcuts, "F1"))
         m.addAction(self._act(f"About {APP_NAME}", lambda: QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br>"
@@ -245,66 +265,107 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(key), self, activated=slot)
 
     def _build_toolbar(self):
+        """The four steps, left to right: 1. Import › 2. Auto Edit › 3. Refine › 4. Export."""
         tb = self.addToolBar("Main")
         tb.setObjectName("main")
         tb.setMovable(False)
-        tb.addAction(self.a_import)
-        b = QPushButton("✨ Auto Edit")
-        b.setObjectName("primary")
-        b.setToolTip("Find the best moments and build the edit (Short or Long format)")
-        b.clicked.connect(self.auto_edit_dialog)
-        tb.addWidget(b)
-        for text, factor, tip in (("− Shorter", 0.75, "Regenerate the auto edit about 25% shorter"),
-                                  ("+ Longer", 1.25, "Regenerate the auto edit about 25% longer")):
-            rb = QPushButton(text)
-            rb.setToolTip(tip + " (same settings and footage)")
-            rb.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
-            tb.addWidget(rb)
+
+        def arrow():
+            lbl = QLabel(" › ")
+            lbl.setStyleSheet("color: #5d6068; font-size: 16px;")
+            return lbl
+
+        def group(*widgets) -> QWidget:
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(4)
+            for x in widgets:
+                h.addWidget(x)
+            return w
+
+        self.btn_import = QPushButton("1. Import")
+        self.btn_import.setToolTip("Add your video files (Ctrl+I). You can also drag them onto the Media panel.")
+        self.btn_import.clicked.connect(self.import_dialog)
+        tb.addWidget(self.btn_import)
+        tb.addWidget(arrow())
+
+        self.btn_auto = QPushButton("2. ✨ Auto Edit")
+        self.btn_auto.setObjectName("primary")
+        self.btn_auto.setToolTip("Find the best moments and build the edit (Short or Long format)")
+        self.btn_auto.clicked.connect(self.auto_edit_dialog)
+        b_short, b_long = QPushButton("−"), QPushButton("+")
+        for b, factor, tip in ((b_short, 0.75, "Regenerate the auto edit about 25% shorter"),
+                               (b_long, 1.25, "Regenerate the auto edit about 25% longer")):
+            b.setFixedWidth(30)
+            b.setToolTip(tip + " (same settings and footage)")
+            b.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
         hb = QPushButton("🎣 New hook")
-        hb.setToolTip("Replace the opening hook with another strong moment not used in the edit (H). "
+        hb.setToolTip("Replace the first clip (the hook) with another strong moment not used in the edit (H). "
                       "Click again for the next one; Undo brings the previous back.")
         hb.clicked.connect(self.new_hook)
-        tb.addWidget(hb)
-        tb.addSeparator()
-        tb.addAction(self.a_proxies)
-        self.chk_proxy = QCheckBox("Use proxies")
-        self.chk_proxy.setToolTip("Play back from proxies when available")
-        self.chk_proxy.toggled.connect(self._toggle_proxies)
-        tb.addWidget(self.chk_proxy)
-        tb.addSeparator()
-        tb.addAction(self.a_color_all)
-        tb.addAction(self.a_captions)
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Frame "))
-        self.cb_aspect = QComboBox()
-        for k in ASPECT_RATIOS:
-            self.cb_aspect.addItem(k, k)
-        tb.addWidget(self.cb_aspect)
-        self.cb_res = QComboBox()
-        for k in RESOLUTIONS:
-            self.cb_res.addItem(k, k)
-        tb.addWidget(self.cb_res)
-        self.cb_fps = QComboBox()
-        for r in FRAME_RATES:
-            self.cb_fps.addItem(f"{r:g} fps", r)
-        tb.addWidget(self.cb_fps)
-        self.cb_fit = QComboBox()
-        for k, v in FIT_MODES.items():
-            self.cb_fit.addItem(v, k)
-        tb.addWidget(self.cb_fit)
-        for cb in (self.cb_aspect, self.cb_res, self.cb_fps, self.cb_fit):
-            cb.currentIndexChanged.connect(self._project_controls_changed)
+        self.grp_auto = group(self.btn_auto, b_short, b_long, hb)
+        tb.addWidget(self.grp_auto)
+        tb.addWidget(arrow())
+
+        refine = QLabel("3. Refine")
+        refine.setStyleSheet("color: #9aa0ab;")
+        btns = [refine]
+        for text, tab, tip in (("🎨 Color", self.inspector, "Colour, reframe and audio of the selected clip"),
+                               ("💬 Captions", self.caps_panel, "Generate and edit captions"),
+                               ("🔤 Text", self.text_panel, "Add animated titles and text"),
+                               ("🔊 Sounds", self.sfx_panel, "Add sound effects")):
+            b = QToolButton(text=text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, w=tab: self.show_refine(w))
+            btns.append(b)
+        self.grp_refine = group(*btns)
+        tb.addWidget(self.grp_refine)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
-        b = QPushButton("⬆ Export")
-        b.setObjectName("primary")
-        b.clicked.connect(self.export_dialog)
-        tb.addWidget(b)
+
+        lbl = QLabel("Frame")
+        lbl.setStyleSheet("color: #9aa0ab;")
+        self.cb_aspect = QComboBox()
+        for k in ASPECT_RATIOS:
+            self.cb_aspect.addItem(k, k)
+        self.cb_res = QComboBox()
+        for k in RESOLUTIONS:
+            self.cb_res.addItem(k, k)
+        self.cb_fps = QComboBox()
+        for r in FRAME_RATES:
+            self.cb_fps.addItem(f"{r:g} fps", r)
+        self.cb_fit = QComboBox()
+        for k, v in FIT_MODES.items():
+            self.cb_fit.addItem(v, k)
+        for cb, tip in ((self.cb_aspect, "Shape of the finished video"), (self.cb_res, "Export resolution"),
+                        (self.cb_fps, "Frame rate"), (self.cb_fit, "How footage of another shape fills the frame")):
+            cb.setToolTip(tip)
+            cb.currentIndexChanged.connect(self._project_controls_changed)
+        self.chk_proxy = QCheckBox("Proxies")
+        self.chk_proxy.setToolTip("Play back from small proxy copies when available (Tools → Generate proxies)")
+        self.chk_proxy.toggled.connect(self._toggle_proxies)
+        self.grp_frame = group(lbl, self.cb_aspect, self.cb_res, self.cb_fps, self.cb_fit, self.chk_proxy)
+        tb.addWidget(self.grp_frame)
+        tb.addWidget(arrow())
+
+        self.btn_export = QPushButton("4. ⬆ Export")
+        self.btn_export.setObjectName("primary")
+        self.btn_export.setToolTip("Render the finished video (Ctrl+E)")
+        self.btn_export.clicked.connect(self.export_dialog)
+        tb.addWidget(self.btn_export)
+        self.btn_help = QToolButton(text=" ? ")
+        self.btn_help.setToolTip("Guided tour (Shift+F1)")
+        self.btn_help.clicked.connect(lambda: self.show_tour())
+        tb.addWidget(self.btn_help)
 
     def _build_statusbar(self):
         sb = self.statusBar()
         self.lbl_status = QLabel("Ready")
+        self.lbl_next = QLabel("")
+        self.lbl_next.setStyleSheet("color: #7fb2ff; padding: 0 8px;")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setFixedWidth(260)
@@ -313,6 +374,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self.tasks.cancel_all)
         sb.addWidget(self.lbl_status, 1)
+        sb.addPermanentWidget(self.lbl_next)
         sb.addPermanentWidget(self.progress)
         sb.addPermanentWidget(self.btn_cancel)
 
@@ -337,7 +399,20 @@ class MainWindow(QMainWindow):
         self.tl.sounds_changed.connect(self._sounds_changed)
         self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
-        self.tl.context_action.connect(self.clip_action)
+        self.tl.context_action.connect(self._timeline_action)
+        self.tl.text_selected.connect(self._on_text_selected)
+        self.tl.texts_changed.connect(lambda: self._texts_changed(panel_fields=True))
+        cv = self.viewer.canvas
+        cv.text_pressed.connect(self.tl.select_text)
+        cv.text_dragged.connect(self._text_dragged)
+        cv.text_released.connect(lambda tid, moved: moved and self._texts_changed(panel_fields=True))
+        cv.text_activated.connect(lambda tid: self._text_action("text_edit", tid))
+        cv.context_menu.connect(self._viewer_menu)
+        self.text_panel.add_requested.connect(self.add_text)
+        self.text_panel.selected.connect(lambda tid: self.tl.select_text(tid) if tid != self.tl.selected_text else None)
+        self.text_panel.before_change.connect(self.project_checkpoint)
+        self.text_panel.changed.connect(lambda: self._texts_changed(panel=False))
+        self.text_panel.delete_requested.connect(lambda tid: self._text_action("text_delete", tid))
         self.tl.caption_clicked.connect(lambda i: (self.right_tabs.setCurrentWidget(self.caps_panel),
                                                    self.caps_panel.select(i)))
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
@@ -357,6 +432,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.style_requested.connect(self.caption_style_dialog)
         self.caps_panel.export_srt.connect(self.save_srt)
         self.caps_panel.text_edited.connect(self._caption_edited)
+        self.caps_panel.delete_requested.connect(self._delete_captions)
         self.caps_panel.seek.connect(self.viewer.seek)
         self.caps_panel.toggled.connect(self._toggle_captions)
 
@@ -415,6 +491,28 @@ class MainWindow(QMainWindow):
     def _update_title(self):
         name = os.path.basename(self.project.path) if self.project.path else "Untitled"
         self.setWindowTitle(f"{name}{' *' if self.project.dirty else ''} — {APP_NAME}")
+        self._update_flow()
+
+    def _update_flow(self):
+        """Tick the finished steps and say what to do next."""
+        p = self.project
+        steps = ((self.btn_import, "1. Import", bool(p.footage)), (self.btn_auto, "2. ✨ Auto Edit", bool(p.clips)),
+                 (self.btn_export, "4. ⬆ Export", self._exported))
+        for b, text, done in steps:
+            b.setText(text + ("  ✓" if done else ""))
+        if not p.footage:
+            hint = "Next: 1. Import your footage (or drag files onto Media)"
+        elif not p.clips:
+            hint = "Next: 2. ✨ Auto Edit builds the edit for you"
+        elif not self._exported:
+            hint = "Next: 3. refine (right-click anything for options), then 4. Export"
+        else:
+            hint = ""
+        self.lbl_next.setText(hint)
+
+    def show_refine(self, panel: QWidget):
+        self.d_right.show()
+        self.right_tabs.setCurrentWidget(panel)
 
     def project_checkpoint(self, key: str = ""):
         now = time.monotonic()
@@ -436,6 +534,7 @@ class MainWindow(QMainWindow):
         self.viewer.refresh()
         clip = self.selected_clip()
         self.inspector.set_clip(clip)
+        self.text_panel.refresh()
         self._update_title()
 
     def selected_clip(self) -> Optional[TimelineClip]:
@@ -446,8 +545,9 @@ class MainWindow(QMainWindow):
         self.tasks.cancel_all()
         self.project = project
         self.analyses = {}
-        for w in (self.viewer, self.tl, self.bin, self.inspector):
+        for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel):
             w.set_project(project)
+        self._exported = False
         self._sync_project_controls()
         missing = []
         for fid, f in project.footage.items():
@@ -840,18 +940,14 @@ class MainWindow(QMainWindow):
         self.tasks.submit(name, job, done, self._task_error("Auto edit"))
 
     def new_hook(self):
-        """Put a different strong moment at the start as the hook: replaces the clip labelled "hook" (or the
-        first clip of a hook-first edit), otherwise inserts one before everything."""
+        """Replace the first clip (the hook) with a different strong moment; on an empty timeline add one."""
         clips = self.project.clips
         ids = [fid for fid in (self._auto_ids or list(self.project.footage))
                if fid in self.project.footage and fid in self.analyses]
         if not ids:
             QMessageBox.information(self, APP_NAME, "Analyze some footage first (or run ✨ Auto Edit).")
             return
-        idx = next((k for k, c in enumerate(clips) if c.label == "hook"), None)
-        if idx is None and clips and self.last_auto.order == "hook" and clips[0].label != "opening":
-            idx = 0
-        old = clips[idx] if idx is not None else None
+        old = clips[0] if clips else None
         s = self.last_auto
         length = old.duration if old else (s.clip_max if s.video_format != "long" else min(s.clip_max, 6.0))
         footage = {fid: self.project.footage[fid] for fid in ids}
@@ -873,9 +969,7 @@ class MainWindow(QMainWindow):
             old.footage_id, old.src_in, old.src_out, old.score = hook.footage_id, hook.src_in, hook.src_out, hook.score
             old.label = "hook"
         else:
-            clips.insert(0, hook)
-            if len(clips) > 1:
-                clips[1].transition, clips[1].audio_split = "", 0.0
+            clips.append(hook)
         self._after_structure_change()
         self.tl.selected = (old or hook).id
         self.tl.update()
@@ -1171,10 +1265,30 @@ class MainWindow(QMainWindow):
         try:
             cache_root()
         except OSError:
-            set_cache_root(None)   # keep the setting: the drive may just be disconnected
-            QTimer.singleShot(0, lambda: QMessageBox.warning(
-                self, APP_NAME, f"The cache folder is not available:\n{path}\n\n"
-                                "The default cache folder is used for this session."))
+            set_cache_root(None)   # the drive may just be disconnected: let the user decide
+            QTimer.singleShot(0, lambda: self._cache_root_missing(path))
+
+    def _cache_root_missing(self, path: str):
+        box = QMessageBox(QMessageBox.Warning, APP_NAME,
+                          f"The cache folder is not available:\n{path}\n\n"
+                          f"The default cache folder is used for now:\n{cache_root()}", parent=self)
+        b_choose = box.addButton("Choose another folder…", QMessageBox.AcceptRole)
+        b_default = box.addButton("Always use the default", QMessageBox.DestructiveRole)
+        box.addButton("Ask again next time", QMessageBox.RejectRole)
+        box.setInformativeText("Keep asking if it is on a drive that is not connected right now.")
+        box.exec()
+        if box.clickedButton() is b_default:
+            self.qs.remove("cache_dir")
+            self.lbl_status.setText(f"Cache folder: {cache_root()}")
+        elif box.clickedButton() is b_choose:
+            new = QFileDialog.getExistingDirectory(self, "Choose cache folder", str(cache_root()))
+            if not new:
+                return
+            if os.path.normcase(str(Path(new).resolve())) == os.path.normcase(str(cache_root().resolve())):
+                self.qs.setValue("cache_dir", new)   # the folder already in use: just remember it
+                self.lbl_status.setText(f"Cache folder: {cache_root()}")
+            elif not self._change_cache_folder(new):
+                self._cache_root_missing(path)
 
     def cache_dialog(self):
         CacheDialog(self._change_cache_folder, self._clear_cache, self).exec()
@@ -1496,8 +1610,236 @@ class MainWindow(QMainWindow):
         self.tl.refresh()
         self._sounds_changed()
 
+    # ================================================================== titles & text
+    def add_text(self, preset: str = "title", t: Optional[float] = None):
+        """Add a title from a template at time t (default: the playhead)."""
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Put some clips on the timeline first (2. ✨ Auto Edit).")
+            return
+        t = self.viewer.t if t is None else t
+        tc = make_text(preset, t, self.project.duration)
+        self.project_checkpoint()
+        self.project.texts.append(tc)
+        self._texts_changed()
+        self.tl.select_text(tc.id)
+        self.show_refine(self.text_panel)
+        self.viewer.seek(min(self.project.duration - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
+        self.lbl_status.setText(f"Added \"{TEXT_PRESETS[preset]['label']}\" — type your text in the Text tab, "
+                                "drag it in the viewer to place it")
+        QTimer.singleShot(0, self.text_panel.focus_text)
+
+    def _text(self, tid: str) -> Optional[TextClip]:
+        return next((x for x in self.project.texts if x.id == tid), None)
+
+    def _text_action(self, action: str, tid: str):
+        tc = self._text(tid)
+        if tc is None:
+            return
+        if action == "text_edit":
+            self.tl.select_text(tid)
+            self.show_refine(self.text_panel)
+            if not (tc.start <= self.viewer.t < tc.end):
+                self.viewer.seek(min(tc.end - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
+            QTimer.singleShot(0, self.text_panel.focus_text)
+            return
+        self.project_checkpoint()
+        if action == "text_delete":
+            self.project.texts.remove(tc)
+            if self.tl.selected_text == tid:
+                self.tl.select_text("")
+        elif action == "text_to_playhead":
+            tc.start = round(self.viewer.t, 3)
+        elif action == "text_duplicate":
+            d = TextClip.from_dict(tc.to_dict())
+            d.id, d.start = new_id(), tc.end
+            self.project.texts.append(d)
+            self.tl.select_text(d.id)
+        elif action.startswith("text_anim_in:"):
+            tc.anim_in = action.split(":", 1)[1]
+        elif action.startswith("text_anim_out:"):
+            tc.anim_out = action.split(":", 1)[1]
+        elif action.startswith("text_pos:"):
+            tc.x, tc.y, tc.align = {"top": (0.5, 0.12, "center"), "middle": (0.5, 0.5, "center"),
+                                    "bottom": (0.5, 0.82, "center"),
+                                    "lower_left": (0.06, 0.8, "left")}[action.split(":", 1)[1]]
+        self._texts_changed()
+
+    def _texts_changed(self, panel: bool = True, panel_fields: bool = False):
+        """After titles changed: redraw the timeline / viewer and (unless the panel made the change) the panel."""
+        self.project.dirty = True
+        if panel:
+            self.text_panel.refresh()
+        elif panel_fields:
+            self.text_panel.refresh()
+        self.tl.update()
+        self.tl.view_changed.emit()
+        self.viewer.canvas.texts = self.project.texts
+        self.viewer.canvas.update()
+        self._update_title()
+
+    def _on_text_selected(self, tid: str):
+        self.viewer.canvas.selected_text = tid
+        self.viewer.canvas.update()
+        if (self.text_panel.text.id if self.text_panel.text else "") != tid:
+            self.text_panel.refresh(select=tid)
+        if tid:
+            self.show_refine(self.text_panel)
+
+    def _text_dragged(self, tid: str, x: float, y: float):
+        tc = self._text(tid)
+        if tc is None:
+            return
+        self.project_checkpoint(f"text:{tid}:drag")
+        tc.x, tc.y = x, y
+        self.viewer.canvas.update()
+
+    # ================================================================== right-click menus
+    def _timeline_action(self, key: str, payload: str):
+        """Context-menu commands from the timeline (clips, titles, captions, empty space)."""
+        if key.startswith("text_add:"):
+            self.add_text(key.split(":", 1)[1], float(payload))
+        elif key.startswith("text_"):
+            self._text_action(key, payload)
+        elif key == "open_sounds":
+            self.show_refine(self.sfx_panel)
+        elif key == "seek":
+            self.viewer.seek(float(payload))
+        elif key == "split_playhead":
+            self.split_at_playhead()
+        elif key == "fit":
+            self.tl.fit()
+        elif key == "captions_generate":
+            self.generate_captions()
+        elif key == "caption_style":
+            self.caption_style_dialog()
+        elif key == "caption_edit":
+            i = int(payload)
+            self.show_refine(self.caps_panel)
+            self.caps_panel.select(i)
+            item = self.caps_panel.table.item(i, 2)
+            if item is not None:
+                self.caps_panel.table.editItem(item)
+        elif key == "caption_delete":
+            self._delete_captions([int(payload)])
+        elif key == "caption_delete_all":
+            self._delete_captions(list(range(len(self.captions))))
+        else:
+            self.clip_action(key, payload)
+
+    def _viewer_menu(self, gpos, tid: str):
+        m = QMenu(self)
+        tc = self._text(tid) if tid else None
+        if tc is not None:
+            for key, label in (("text_edit", "Edit text…"), ("text_duplicate", "Duplicate text")):
+                m.addAction(label, lambda k=key: self._text_action(k, tid))
+            for title, table, prefix in (("Animation in", ANIM_IN, "text_anim_in"),
+                                         ("Animation out", ANIM_OUT, "text_anim_out")):
+                sub = m.addMenu(title)
+                for k, label in table.items():
+                    a = sub.addAction(label, lambda k=k, pre=prefix: self._text_action(f"{pre}:{k}", tid))
+                    a.setCheckable(True)
+                    a.setChecked(getattr(tc, prefix[5:]) == k)
+            m.addAction("Delete text", lambda: self._text_action("text_delete", tid))
+            m.addSeparator()
+        if self.project.clips:
+            sub = m.addMenu("Add title here")
+            for key, cfg in TEXT_PRESETS.items():
+                sub.addAction(cfg["label"], lambda k=key: self.add_text(k))
+            m.addAction("Pause" if self.viewer.playing else "Play", self.viewer.toggle_play)
+            m.addSeparator()
+        sub = m.addMenu("Color in viewer")
+        for a in self.a_adjust.values():
+            sub.addAction(a)
+        m.addAction(self.a_guides)
+        sub = m.addMenu("Frame shape")
+        for k in ASPECT_RATIOS:
+            a = sub.addAction(k, lambda k=k: self.cb_aspect.setCurrentIndex(self.cb_aspect.findData(k)))
+            a.setCheckable(True)
+            a.setChecked(self.project.settings.aspect == k)
+        if self.viewer.canvas.image is not None:
+            m.addSeparator()
+            m.addAction("Save this frame as an image…", self._save_frame)
+        m.exec(gpos)
+
+    def _save_frame(self):
+        cv = self.viewer.canvas
+        rect = cv._frame_rect.toAlignedRect()
+        if rect.isEmpty():
+            return
+        start = os.path.splitext(self.project.path)[0] + f"_{self.viewer.t:.1f}s.png" if self.project.path else "frame.png"
+        path, _ = QFileDialog.getSaveFileName(self, "Save frame", start, "PNG image (*.png);;JPEG image (*.jpg)")
+        if path:
+            cv.grab(rect).save(path)
+            self.lbl_status.setText(f"Saved {path}")
+
+    # ================================================================== guided tour
+    def _first_run_tour(self):
+        if not self.qs.value("tour_done", False, type=bool):
+            self.show_tour()
+
+    def show_tour(self, start: int = 0):
+        if self._tour is not None:
+            return
+        tl = self.tl
+        steps = [
+            TourStep("Welcome to KangEdit 👋",
+                     "Turn your footage into a finished edit in four steps:<br>"
+                     "<b>1. Import › 2. Auto Edit › 3. Refine › 4. Export</b><br><br>"
+                     "This tour takes a minute. Open it again any time with the <b>?</b> button or "
+                     "<b>Help → Guided tour</b>."),
+            TourStep("1. Import your footage",
+                     "Drag video files onto the <b>Media</b> panel, or click <b>1. Import</b>.<br>"
+                     "<b>Right-click</b> footage for more: add it to the timeline, camera log profile, proxies…",
+                     lambda: self.d_bin),
+            TourStep("2. Let Auto Edit build the edit",
+                     "<b>✨ Auto Edit</b> picks the best moments and puts them on the timeline.<br>"
+                     "<b>− / +</b> rebuild it shorter or longer; <b>🎣 New hook</b> swaps the first clip for "
+                     "another strong moment.",
+                     lambda: self.grp_auto),
+            TourStep("Preview",
+                     "<b>Space</b> plays and pauses. Titles can be <b>dragged here</b> to place them.<br>"
+                     "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.",
+                     lambda: self.viewer.canvas),
+            TourStep("The timeline",
+                     "From the top: <b>titles</b>, <b>video clips</b>, <b>sound effects</b> and <b>captions</b>.<br>"
+                     "Drag clips to reorder, drag their edges to trim, <b>Alt-drag</b> to slide which moment "
+                     "a clip shows.",
+                     lambda: self.timeline),
+            TourStep("Right-click anything",
+                     "Every part of the timeline has its own menu: <b>clips</b> (transitions, J/L cuts, another "
+                     "moment), <b>empty space</b> (add a title or a sound), <b>captions</b> (edit, delete) and "
+                     "<b>titles</b> (animations, position).",
+                     lambda: (tl, tl.rect().adjusted(0, 24, 0, 0))),
+            TourStep("3. Refine",
+                     "Fine-tune here: <b>🎨 Clip</b> colour & reframe, <b>💬 Captions</b>, <b>🔤 Text</b> for "
+                     "animated titles, and <b>🔊 Sounds</b>. The <b>3. Refine</b> buttons in the toolbar jump "
+                     "to each tab.",
+                     lambda: self.d_right),
+            TourStep("Frame",
+                     "The shape of the finished video (9:16 for Reels / TikTok, 16:9 for YouTube…), its "
+                     "resolution and frame rate.",
+                     lambda: self.grp_frame),
+            TourStep("4. Export",
+                     "Render the finished video. Captions can be burned in or saved as an .srt file.",
+                     lambda: self.btn_export),
+            TourStep("That's it!",
+                     "Start with <b>1. Import</b>. If you get stuck, the hint at the bottom right says what to do "
+                     "next, and the <b>?</b> button brings this tour back.",
+                     lambda: self.btn_help),
+        ]
+        self._tour = TourOverlay(self, steps)
+
+        def done(_completed: bool):
+            self._tour = None
+            self.qs.setValue("tour_done", True)
+
+        self._tour.finished.connect(done)
+        self._tour.start(start)
+
     def _delete_selected(self):
-        if self.tl.selected_sound:
+        if self.tl.selected_text:
+            self._text_action("text_delete", self.tl.selected_text)
+        elif self.tl.selected_sound:
             self._sound_action("sound_delete", self.tl.selected_sound)
         else:
             self.clip_action("delete", self.tl.selected)
@@ -1674,6 +2016,22 @@ class MainWindow(QMainWindow):
             edit_caption(self.project, self.captions[row], text)
             QTimer.singleShot(0, self.update_captions)
 
+    def _delete_captions(self, rows: list[int]):
+        caps = [self.captions[r] for r in rows if 0 <= r < len(self.captions)]
+        if not caps:
+            return
+        if len(caps) == len(self.captions) and len(caps) > 1 and QMessageBox.question(
+                self, APP_NAME, f"Delete all {len(caps)} captions?\n\nUndo brings them back; Generate captions "
+                                "can transcribe the footage again.") != QMessageBox.Yes:
+            return
+        self.project_checkpoint()
+        delete_captions(self.project, caps)
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText(f"Deleted {len(caps)} caption(s) — Ctrl+Z to undo")
+
     def _toggle_captions(self, on: bool):
         self.project.settings.captions.enabled = on
         self.viewer.refresh()
@@ -1706,6 +2064,8 @@ class MainWindow(QMainWindow):
         proj = self._clone_project()
 
         def done(path):
+            self._exported = True
+            self._update_flow()
             r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
                                         QMessageBox.Open | QMessageBox.Ok)
             if r == QMessageBox.Open:
@@ -1721,6 +2081,7 @@ class MainWindow(QMainWindow):
         p.footage = {fid: copy.deepcopy(f) for fid, f in self.project.footage.items()}
         p.clips = [TimelineClip.from_dict(c.to_dict()) for c in self.project.clips]
         p.sounds = [SoundClip.from_dict(x.to_dict()) for x in self.project.sounds]
+        p.texts = [TextClip.from_dict(x.to_dict()) for x in self.project.texts]
         return p
 
     # ================================================================== preview audio

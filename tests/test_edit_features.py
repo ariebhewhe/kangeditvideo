@@ -1,5 +1,5 @@
 """New hook, timeline fades and cancelling a stuck background task."""
-
+import os
 import time
 
 import numpy as np
@@ -122,3 +122,35 @@ def test_long_take_of_one_scene_gives_several_moments():
     assert len(from_long) >= 5
     assert from_long[-1] - from_long[0] > 100          # spread over the recording, not bunched
     assert sum(c.duration for c in clips) > 0.9 * s.target_duration
+
+
+def test_delete_some_and_all_captions_and_undo():
+    from kangedit.captions import build_captions, delete_captions
+
+    p = Project()
+    f = Footage("a.mp4", 30.0, 1920, 1080, 30.0, True)
+    f.transcript = [{"s": 1.0 + 2 * k, "e": 1.5 + 2 * k, "w": f"w{k}."} for k in range(8)]   # one caption each
+    p.footage[f.id] = f
+    p.clips = [TimelineClip(f.id, 0.0, 20.0)]
+    caps = build_captions(p)
+    assert len(caps) == 8
+    snap = p._snapshot()
+    delete_captions(p, [caps[1], caps[4]])
+    assert [c.text for c in build_captions(p)] == ["w0.", "w2.", "w3.", "w5.", "w6.", "w7."]
+    delete_captions(p, build_captions(p))
+    assert build_captions(p) == []
+    p._restore(snap)
+    assert len(build_captions(p)) == 8
+
+
+def test_font_files_are_found_by_name():
+    from kangedit import fonts
+
+    fams = fonts.system_fonts()
+    if not fams:
+        return   # a machine without fonts (minimal CI image)
+    name, files = next(iter(fams.items()))
+    assert all(os.path.exists(x) for x in files)
+    assert fonts.font_files(name.upper()) == files
+    assert name in fonts.families_in_file(files[0])
+    assert fonts.font_files("No Such Font 123") == []

@@ -126,6 +126,42 @@ class SoundClip:
 
 
 @dataclass
+class TextClip:
+    """An animated title / text overlay on the text track (see titles.py)."""
+    text: str
+    start: float                   # timeline position, seconds
+    duration: float = 3.0
+    preset: str = ""               # titles.TEXT_PRESETS key it was made from
+    font: str = "Arial"
+    size_pct: float = 8.0          # font height, % of frame height
+    color: str = "#FFFFFF"
+    bold: bool = True
+    italic: bool = False
+    outline: bool = True           # dark outline around the letters (ignored with a box)
+    box: bool = False              # background box behind each line
+    box_color: str = "#000000"
+    box_opacity: float = 60.0      # %
+    align: str = "center"          # left | center | right (also which side of the block sits at x)
+    x: float = 0.5                 # anchor position, 0..1 of the frame (vertical: block centre)
+    y: float = 0.5
+    anim_in: str = "fade"          # titles.ANIM_IN key
+    anim_out: str = "fade"         # titles.ANIM_OUT key
+    anim_dur: float = 0.5          # seconds of each animation
+    id: str = field(default_factory=new_id)
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "TextClip":
+        return TextClip(**{k: v for k, v in d.items() if k in TextClip.__dataclass_fields__})
+
+
+@dataclass
 class CaptionStyle:
     enabled: bool = True
     font: str = "Arial"
@@ -190,6 +226,7 @@ class Project:
         self.footage: dict[str, Footage] = {}
         self.clips: list[TimelineClip] = []
         self.sounds: list[SoundClip] = []
+        self.texts: list[TextClip] = []
         self.settings = ProjectSettings()
         self.path: Optional[str] = None
         self.dirty = False
@@ -244,6 +281,7 @@ class Project:
         return {
             "clips": [c.to_dict() for c in self.clips],
             "sounds": [x.to_dict() for x in self.sounds],
+            "texts": [x.to_dict() for x in self.texts],
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
@@ -252,6 +290,7 @@ class Project:
     def _restore(self, snap: dict) -> None:
         self.clips = [TimelineClip.from_dict(d) for d in snap["clips"]]
         self.sounds = [SoundClip.from_dict(d) for d in snap.get("sounds", [])]
+        self.texts = [TextClip.from_dict(d) for d in snap.get("texts", [])]
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
@@ -309,6 +348,7 @@ class Project:
             "footage": [f.to_dict() for f in self.footage.values()],
             "clips": [c.to_dict() for c in self.clips],
             "sounds": [x.to_dict() for x in self.sounds],
+            "texts": [x.to_dict() for x in self.texts],
         }
 
     def save(self, path: str) -> None:
@@ -330,5 +370,6 @@ class Project:
             p.footage[f.id] = f
         p.clips = [TimelineClip.from_dict(c) for c in data.get("clips", []) if c.get("footage_id") in p.footage]
         p.sounds = [SoundClip.from_dict(x) for x in data.get("sounds", [])]
+        p.texts = [TextClip.from_dict(x) for x in data.get("texts", [])]
         p.path = path
         return p

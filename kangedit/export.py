@@ -14,6 +14,8 @@ from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import needs_color, write_cube
 from .config import cache_dir, frame_size
 from .edits import ClipPlan, plan
+from .fonts import copy_family
+from .titles import write_titles_ass
 from .ffmpeg import FFmpegError, ProgressCb, ffmpeg_matrix, hw_encoder, hw_encoder_args, hw_encoder_label, run_ffmpeg
 from .models import Project
 
@@ -175,15 +177,28 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
     _join(graph, plans, s.fps, video=True)
     aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k))
     vout = "vcat"
+    fonts_dir = os.path.join(workdir, "fonts")
+    texts = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
+    if texts:
+        write_titles_ass(os.path.join(workdir, "titles.ass"), texts, tw, th, s.fps)
+        found = [copy_family(f, fonts_dir) for f in {x.font for x in texts}]
+        graph.append(f"[{vout}]subtitles=titles.ass{':fontsdir=fonts' if any(found) else ''}[vtitles]")
+        vout = "vtitles"
     caps = build_captions(project, aspect=s.aspect) if s.captions != "none" else []
     cap_layout = caption_layout(project.settings.captions, tw, th, project.settings.video_format)
     if s.captions in ("burn", "both") and caps:
         write_ass(os.path.join(workdir, "captions.ass"), caps, project.settings.captions, tw, th, cap_layout)
-        graph.append("[vcat]subtitles=captions.ass[vsub]")
+        # Hand libass the font's own files: it may not find fonts installed for this user only by name.
+        fontsdir = ":fontsdir=fonts" if copy_family(project.settings.captions.font, fonts_dir) else ""
+        graph.append(f"[{vout}]subtitles=captions.ass{fontsdir}[vsub]")
         vout = "vsub"
     fi, fo = project.settings.fades(project.duration)
-    if fi > 0 or fo > 0:   # after the captions, so they fade with the picture
-        fades = ([f"fade=t=in:st=0:d={fi:.4f}"] if fi > 0 else []) +                 ([f"fade=t=out:st={max(0.0, project.duration - fo):.4f}:d={fo:.4f}"] if fo > 0 else [])
+    if fi > 0 or fo > 0:   # after the titles and captions, so they fade with the picture
+        fades = []
+        if fi > 0:
+            fades.append(f"fade=t=in:st=0:d={fi:.4f}")
+        if fo > 0:
+            fades.append(f"fade=t=out:st={max(0.0, project.duration - fo):.4f}:d={fo:.4f}")
         graph.append(f"[{vout}]{','.join(fades)}[vfaded]")
         vout = "vfaded"
     if s.captions in ("srt", "both") and caps:

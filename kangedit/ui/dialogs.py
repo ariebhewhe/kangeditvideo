@@ -6,9 +6,9 @@ import os
 import threading
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGridLayout,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
                                QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout)
 
@@ -19,6 +19,7 @@ from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
                       fmt_bytes, folder_size, frame_size, open_path)
 from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
+from ..fonts import ensure_qt_font, font_files, system_fonts
 from ..models import Project
 
 FIT_MODES = {"fill": "Fill (crop to frame)", "fit": "Fit (black bars)", "blur": "Fit with blurred background"}
@@ -348,6 +349,27 @@ class ExportDialog(QDialog):
         )
 
 
+def font_combo(current: str) -> QComboBox:
+    """Editable list of the installed font families (type to search), each shown in its own font."""
+    cb = QComboBox()
+    cb.setEditable(True)
+    cb.setInsertPolicy(QComboBox.NoInsert)
+    cb.setMaxVisibleItems(20)
+    families = list(system_fonts()) or QFontDatabase.families()
+    for fam in families:
+        cb.addItem(fam)
+        cb.setItemData(cb.count() - 1, QFont(fam, 11), Qt.FontRole)
+    comp = cb.completer()
+    comp.setFilterMode(Qt.MatchContains)
+    comp.setCaseSensitivity(Qt.CaseInsensitive)
+    idx = cb.findText(current, Qt.MatchFixedString)
+    if idx >= 0:
+        cb.setCurrentIndex(idx)
+    else:
+        cb.setEditText(current)
+    return cb
+
+
 class CaptionStyleDialog(QDialog):
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -374,8 +396,11 @@ class CaptionStyleDialog(QDialog):
 
         g = QGroupBox("Style")
         f = QFormLayout(g)
-        self.cb_font = QFontComboBox()
-        self.cb_font.setCurrentText(st.font)
+        self.cb_font = font_combo(st.font)
+        self.lbl_font = QLabel("Aa Bb 123 — the quick brown fox")
+        self.lbl_font.setMinimumHeight(34)
+        self.cb_font.currentTextChanged.connect(self._font_preview)
+        self._font_preview(self.cb_font.currentText())
         self.sp_size = QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" % of height")
         self.sp_size.setRange(2, 15)
         self.sp_size.setValue(st.size_pct)
@@ -424,6 +449,7 @@ class CaptionStyleDialog(QDialog):
         f.addRow(self.chk_auto)
         f.addRow("Presets", presets)
         f.addRow("Font", self.cb_font)
+        f.addRow("", self.lbl_font)
         f.addRow("Size", self.sp_size)
         f.addRow("Position", self.cb_pos)
         f.addRow("Max chars / line", self.sp_chars)
@@ -442,6 +468,15 @@ class CaptionStyleDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
         self._auto_toggled(self.chk_auto.isChecked())
+
+    def _font_preview(self, family: str):
+        ensure_qt_font(family)
+        font = QFont(family)
+        font.setPixelSize(22)
+        font.setBold(True)
+        self.lbl_font.setFont(font)
+        installed = bool(font_files(family))
+        self.lbl_font.setToolTip("" if installed else "This font is not installed: the export uses a fallback font.")
 
     def _preset(self, c):
         self.sp_size.setValue(c["size"])
