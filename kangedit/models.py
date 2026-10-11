@@ -107,11 +107,21 @@ class SoundClip:
     src_out: float = 0.0
     volume: float = 1.0
     name: str = ""
+    fade_in: float = 0.0           # seconds
+    fade_out: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
     def duration(self) -> float:
         return max(0.0, self.src_out - self.src_in)
+
+    def fades(self) -> tuple[float, float]:
+        """Fade in / out lengths, shortened together when they don't both fit in the sound."""
+        d, fi, fo = self.duration, max(0.0, self.fade_in), max(0.0, self.fade_out)
+        if fi + fo > d:
+            k = d / (fi + fo)
+            fi, fo = fi * k, fo * k
+        return fi, fo
 
     @property
     def end(self) -> float:

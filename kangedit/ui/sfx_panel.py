@@ -38,6 +38,8 @@ class SoundPanel(QWidget):
     add_sound = Signal(str, str)          # library path, name -> add at the playhead
     add_music = Signal(str, str, str)     # library path, title, video page -> background music for the edit
     volume_changed = Signal(float)        # new volume (1.0 = 100%) for the sound selected on the timeline
+    fade_changed = Signal(str, float)     # "in" / "out", seconds, for the sound selected on the timeline
+    fit_requested = Signal()              # fit the selected sound to the timeline
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,16 +138,34 @@ class SoundPanel(QWidget):
         self.vol.changed.connect(lambda val: self.volume_changed.emit(val / 100.0))
         row.addWidget(self.vol, 1)
         v.addLayout(row)
+        self.fades = {}
+        for which, label in (("in", "Fade in"), ("out", "Fade out")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            sl = ParamSlider(0, 10, 0, 0.1, 1, " s")
+            sl.setToolTip(f"{label} of the sound selected on the timeline")
+            sl.changed.connect(lambda val, w=which: self.fade_changed.emit(w, val))
+            row.addWidget(sl, 1)
+            v.addLayout(row)
+            self.fades[which] = sl
+        self.b_fit = QPushButton("⇔ Fit to timeline")
+        self.b_fit.setToolTip("Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
+                              "cut it with a fade out if it is longer")
+        self.b_fit.clicked.connect(self.fit_requested.emit)
+        v.addWidget(self.b_fit)
         self.set_selected_sound(None)
         return box
 
     def set_selected_sound(self, x) -> None:
         """Show the volume of a timeline SoundClip (None: nothing selected, slider disabled)."""
-        self.vol.setEnabled(x is not None)
+        for w in (self.vol, self.b_fit, *self.fades.values()):
+            w.setEnabled(x is not None)
         self.lbl_selected.setText(x.name or os.path.basename(x.path) if x is not None
-                                  else "Click a sound effect or music on the timeline to change its volume.")
+                                  else "Click a sound effect or music on the timeline to change its volume and fades.")
         if x is not None:
             self.vol.set_value(x.volume * 100.0)
+            self.fades["in"].set_value(x.fade_in)
+            self.fades["out"].set_value(x.fade_out)
 
     # ------------------------------------------------------------------ music
     def _music_box(self) -> QGroupBox:

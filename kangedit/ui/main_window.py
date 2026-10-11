@@ -439,6 +439,11 @@ class MainWindow(QMainWindow):
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
         self.sfx_panel.add_music.connect(self.add_music)
         self.sfx_panel.volume_changed.connect(self._selected_sound_volume)
+        self.sfx_panel.fade_changed.connect(
+            lambda which, v: self.tl.selected_sound and self._sound_action(f"sound_fade_{which}:{v}",
+                                                                           self.tl.selected_sound))
+        self.sfx_panel.fit_requested.connect(
+            lambda: self.tl.selected_sound and self._sound_action("sound_fit", self.tl.selected_sound))
         for sig in (self.tl.sound_selected, self.tl.text_selected, self.tl.selection_changed):
             sig.connect(lambda *_: self._sync_sound_panel())
         self.tl.context_action.connect(self._timeline_action)
@@ -1887,8 +1892,13 @@ class MainWindow(QMainWindow):
         if action == "sound_preview":
             self.sfx_panel.preview_file(x.path)
             return
-        # one undo step per volume drag, not per slider tick
-        self.project_checkpoint(f"sound:{sound_id}:volume" if action.startswith("sound_volume:") else "")
+        if action == "sound_fit":
+            self._fit_sound(x)
+            return
+        # one undo step per volume / fade drag, not per slider tick
+        key = action.split(":", 1)[0]
+        self.project_checkpoint(f"sound:{sound_id}:{key}"
+                                if key in ("sound_volume", "sound_fade_in", "sound_fade_out") else "")
         if action == "sound_delete":
             self.project.sounds.remove(x)
             self.tl.selected_sound = ""
@@ -1896,8 +1906,30 @@ class MainWindow(QMainWindow):
             x.start = round(self.viewer.t, 3)
         elif action.startswith("sound_volume:"):
             x.volume = float(action.split(":", 1)[1])
+        elif action.startswith("sound_fade_in:"):
+            x.fade_in = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("sound_fade_out:"):
+            x.fade_out = max(0.0, float(action.split(":", 1)[1]))
         self.tl.refresh()
         self._sounds_changed()
+
+    def _fit_sound(self, x: SoundClip):
+        """Lay the sound over the whole timeline: repeated with crossfades, or cut with a fade out."""
+        total = self.project.duration
+        file_len = sfx.duration(x.path)
+        if total <= 0 or file_len <= 0:
+            self.lbl_status.setText("Nothing to fit: the timeline is empty or the sound can't be read.")
+            return
+        copies = sfx.fit_to_timeline(x, file_len, total)
+        self.project_checkpoint()
+        # earlier copies of the same file would play over the fitted ones
+        self.project.sounds = [s for s in self.project.sounds if s.path != x.path] + copies
+        self.tl.selected_sound = copies[0].id
+        self.tl.refresh()
+        self._sounds_changed()
+        label = x.name or os.path.basename(x.path)
+        self.lbl_status.setText(f"“{label}” fits the timeline: repeated {len(copies)}× with crossfades"
+                                if len(copies) > 1 else f"“{label}” fits the timeline, with a fade out at the end")
 
     # ================================================================== titles & text
     def add_text(self, preset: str = "title", t: Optional[float] = None):
@@ -2502,7 +2534,7 @@ class MainWindow(QMainWindow):
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
-            "SFX layer: drag sounds to move, edges to trim, right-click for volume"))
+            "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline"))
 
     def closeEvent(self, e):
         if not self._confirm_discard():

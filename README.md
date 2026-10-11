@@ -183,7 +183,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Ctrl+click / Shift+click | Add to the selection / select a range |
 | Right-click a clip | Transition, J/L cut, color, duplicate, delete… |
 | Drag / drag edges of a sound | Move / trim the sound |
-| Right-click a sound | Volume, move to the playhead, delete |
+| Right-click a sound | Volume, fade in / out, fit to timeline, move to the playhead, delete |
 | Ctrl+wheel | Zoom |
 
 On macOS, use ⌘ where this table says Ctrl.
@@ -199,7 +199,7 @@ The **Sounds** tab searches [MyInstants](https://www.myinstants.com), a large co
 - The **Library** list holds every sound you added or imported. Drag one onto the timeline, or add it at the playhead.
 - **Import…** adds your own audio files (MP3, WAV, OGG, M4A, FLAC…). You can also drop audio files straight onto the timeline.
 
-Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*).
+Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*), each with its own fade in and fade out (right-click → *Fade in* / *Fade out*, or the sliders in the **Sounds** tab). *Fit to timeline* lays a sound over the whole edit: a shorter sound is repeated with 2-second crossfades, a longer one is cut to the edit's length with a fade out.
 
 > MyInstants sounds are uploaded by its users and may be copyrighted. Make sure you're allowed to use a sound before you publish a video with it.
 

@@ -60,3 +60,33 @@ def test_music_goes_under_the_whole_edit(qapp, tmp_path):
         w.project.dirty = False
         w.close()
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_fit_to_timeline_repeats_short_sounds_with_crossfades():
+    from kangedit import sfx
+    from kangedit.models import SoundClip
+    x = SoundClip("loop.mp3", 3.0, 0.0, 5.0, 0.5, "loop", fade_in=1.0)
+    copies = sfx.fit_to_timeline(x, 10.0, 25.0)
+    c = sfx.FIT_CROSSFADE
+    assert copies[0].id == x.id and copies[0].start == 0.0 and copies[0].fade_in == 1.0
+    assert copies[-1].end == pytest.approx(25.0)
+    for a, b in zip(copies, copies[1:]):
+        assert a.end - b.start == pytest.approx(c)          # neighbours overlap by the crossfade
+        assert a.fade_out == b.fade_in == pytest.approx(c)
+    assert all(y.volume == 0.5 and y.src_in == 0.0 for y in copies)
+
+
+def test_fit_to_timeline_cuts_long_sounds_with_a_fade_out():
+    from kangedit import sfx
+    from kangedit.models import SoundClip
+    x = SoundClip("song.mp3", 2.0, 1.0, 4.0)
+    [y] = sfx.fit_to_timeline(x, 200.0, 30.0)
+    assert (y.start, y.src_in, y.duration) == (0.0, 1.0, pytest.approx(30.0)) and y.fade_out > 0
+
+
+def test_sound_fades_fit_in_the_sound():
+    from kangedit.models import SoundClip
+    x = SoundClip("a.mp3", 0.0, 0.0, 2.0, fade_in=3.0, fade_out=1.0)
+    fi, fo = x.fades()
+    assert fi + fo == pytest.approx(2.0) and fi == pytest.approx(3 * fo)
+    assert SoundClip.from_dict(x.to_dict()).fade_in == 3.0

@@ -72,6 +72,10 @@ def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.
             f"apad,atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[{out}]")
 
 
+def _curve(fade: float) -> str:
+    return ":curve=qsin" if fade > 0.05 else ""
+
+
 def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int) -> str:
     """Mix the SFX layer over [acat] (inputs from index k on). Returns the label of the final audio."""
     dur = project.duration
@@ -81,11 +85,13 @@ def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int) -
     labels = []
     for j, x in enumerate(sounds):
         inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.duration:.4f}", "-i", x.path]
-        fade = min(0.02, x.duration / 4)
+        fi, fo = x.fades()
+        fi, fo = max(fi, 0.005), max(fo, min(0.02, x.duration / 4))   # at least a click-free edge
         delay = int(round(max(0.0, x.start) * 1000))
+        # quarter-sine fades: crossfading copies of a sound (fit to timeline) keep an even loudness
         graph.append(f"[{k + j}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"volume={x.volume:.3f},afade=t=in:d=0.005,"
-                     f"afade=t=out:st={max(0.0, x.duration - fade):.4f}:d={fade:.3f},"
+                     f"volume={x.volume:.3f},afade=t=in:d={fi:.4f}{_curve(fi)},"
+                     f"afade=t=out:st={max(0.0, x.duration - fo):.4f}:d={fo:.4f}{_curve(fo)},"
                      f"adelay=delays={delay}:all=1[sfx{j}]")
         labels.append(f"[sfx{j}]")
     # normalize=0: sounds add to the edit's audio at their own level instead of ducking it.

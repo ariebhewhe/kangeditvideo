@@ -523,6 +523,7 @@ class TimelineView(QWidget):
                     p.setPen(Qt.NoPen)
                     p.setBrush(QColor(255, 220, 180, 110))
                     p.drawPolygon(poly)
+            self._paint_fades(p, x, r)
             if r.width() > 24:
                 p.setPen(QColor("#fff4ea"))
                 label = x.name or os.path.splitext(os.path.basename(x.path))[0]
@@ -530,6 +531,19 @@ class TimelineView(QWidget):
                     label += f"  {x.volume * 100:.0f}%"
                 p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 7)))
+
+    def _paint_fades(self, p: QPainter, x: SoundClip, r: QRectF):
+        """Fade in / out as shaded corners with a ramp line."""
+        fi, fo = x.fades()
+        p.setPen(QPen(QColor(255, 244, 234, 200), 1))
+        p.setBrush(QColor(0, 0, 0, 90))
+        for w, left in ((fi * self.pps, True), (fo * self.pps, False)):
+            if w < 2:
+                continue
+            if left:
+                p.drawPolygon(QPolygonF([r.topLeft(), QPointF(r.left() + w, r.top()), r.bottomLeft()]))
+            else:
+                p.drawPolygon(QPolygonF([QPointF(r.right() - w, r.top()), r.topRight(), r.bottomRight()]))
 
     # ------------------------------------------------------------------ text track
     @staticmethod
@@ -765,12 +779,24 @@ class TimelineView(QWidget):
 
     def _sound_menu(self, gpos, sound_id: str):
         m = QMenu(self)
-        for key, label in (("sound_to_playhead", "Move to playhead"), ("sound_preview", "Preview")):
+        for key, label, tip in (("sound_to_playhead", "Move to playhead", ""), ("sound_preview", "Preview", ""),
+                                ("sound_fit", "Fit to timeline",
+                                 "Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
+                                 "cut it with a fade out if it is longer")):
             a = QAction(label, m)
+            a.setToolTip(tip)
             a.triggered.connect(lambda _=False, k=key: self.context_action.emit(k, sound_id))
             m.addAction(a)
+        m.setToolTipsVisible(True)
         x = next((s for s in self.project.sounds if s.id == sound_id), None)
         if x is not None:
+            for key, label, cur in (("sound_fade_in", "Fade in", x.fade_in), ("sound_fade_out", "Fade out", x.fade_out)):
+                sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
+                for v in (0.0, 0.5, 1.0, 2.0, 3.0, 5.0):
+                    a = sub.addAction("Off" if v == 0 else f"{v:g} s")
+                    a.setCheckable(True)
+                    a.setChecked(abs(cur - v) < 1e-3)
+                    a.triggered.connect(lambda _=False, k=key, v=v: self.context_action.emit(f"{k}:{v}", sound_id))
             m.addSeparator()
             box = QWidget()
             row = QHBoxLayout(box)
