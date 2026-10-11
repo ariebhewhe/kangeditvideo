@@ -46,26 +46,37 @@ def _t(*pairs: tuple[str, str]) -> list[Track]:
 SUGGESTIONS: dict[str, list[Track]] = {
     "Vlog": _t(("Cartoon", "On & On (feat. Daniel Levi)"), ("Syn Cole", "Feel Good"), ("Elektronomia", "Sky High"),
                ("Diamond Eyes", "Everything"), ("Jo Cohen & Sex Whales", "We Are"), ("Janji", "Together"),
-               ("Syn Cole", "Gizmo"), ("Itro", "Panda")),
+               ("Syn Cole", "Gizmo"), ("Itro", "Panda"), ("Tobu", "Candyland"), ("Tobu", "Hope"),
+               ("Itro & Tobu", "Cloud 9"), ("Raven & Kreyn", "So Happy"), ("Cartoon", "C U Again (feat. Mikk Mäe)"),
+               ("Unknown Brain", "Why Do I? (feat. Bri Tolani)")),
     "Cinematic": _t(("Kovan & Electro-Light", "Skyline"), ("Lost Sky", "Dreams"), ("Electro-Light", "Symbolism"),
                     ("Ship Wrek & Zookeepers", "Ark"), ("Egzod & Maestro Chives", "Royalty (ft. Neoni)"),
                     ("Rival x Cadmium", "Seasons (feat. Harley Bird)"), ("Distrion & Alex Skrindo", "Entropy"),
-                    ("Rob Gasser", "Hollow")),
+                    ("Rob Gasser", "Hollow"), ("Alan Walker", "Spectre"), ("Alan Walker", "Force"),
+                    ("Phantom Sage", "Our Lives Past (feat. Emily Sandberg)"), ("Laszlo", "Supernova"),
+                    ("Ahrix", "Nova")),
     "Aftermovie / party": _t(("Elektronomia", "Energy"), ("Different Heaven & EH!DE", "My Heart"),
                              ("Janji", "Heroes Tonight (feat. Johnning)"), ("Jim Yosef", "Firefly"),
                              ("DEAF KEV", "Invincible"), ("Culture Code", "Make Me Move (feat. Karra)"),
                              ("Spektrem", "Shine"), ("Unknown Brain", "Superhero (feat. Chris Linton)"),
-                             ("Robin Hustin x TobiMorrow", "Light It Up (feat. Jex)")),
+                             ("Robin Hustin x TobiMorrow", "Light It Up (feat. Jex)"), ("Tobu", "Infectious"),
+                             ("Jensation", "Joystick"), ("DEAF KEV", "Safe & Sound"), ("Lensko", "Let's Go!"),
+                             ("Raven & Kreyn", "Muffin"), ("Elektronomia", "Vision")),
     "Travel": _t(("Lost Sky", "Fearless pt.II (feat. Chris Linton)"), ("Elektronomia", "Limitless"),
                  ("Cartoon", "Why We Lose (feat. Coleman Trapp)"), ("Lost Sky", "Where We Started (feat. Jex)"),
-                 ("Diviners", "Savannah (feat. Philly K)"), ("Jim Yosef", "Eclipse"), ("Elektronomia", "Collide")),
+                 ("Diviners", "Savannah (feat. Philly K)"), ("Jim Yosef", "Eclipse"), ("Elektronomia", "Collide"),
+                 ("Alan Walker", "Fade"), ("Tobu & Itro", "Sunburst"), ("Lost Sky", "Vision"),
+                 ("Elektronomia", "Summersong 2018"), ("Tobu", "Roots"), ("Lensko", "Circles")),
     "Chill": _t(("Ascence", "About You"), ("Cartoon", "Howling (feat. Asena)"), ("Clarx & Harddope", "Castle"),
-                ("Jim Yosef & Anna Yvette", "Linked"), ("Jim Yosef", "Arrow")),
+                ("Jim Yosef & Anna Yvette", "Linked"), ("Jim Yosef", "Arrow"), ("Krys Talk", "Fly Away"),
+                ("Arc North", "Meant To Be (feat. Krista Marina)"), ("Lost Sky", "Fearless"), ("Kisma", "Fingertips"),
+                ("Itro & Kontinuum", "Alive")),
     "Gaming / action": _t(("Disfigure", "Blank"), ("Jim Yosef", "Link"), ("Alex Skrindo", "Jumbo"),
                           ("Different Heaven", "Nekozilla"), ("Lensko", "Cetus"),
                           ("Warriyo", "Mortals (feat. Laura Brehm)"), ("Desmeon", "Hellcat"),
                           ("Max Brhon", "Cyberpunk"), ("Ship Wrek", "Pain"), ("Heuse & Zeus X Crona", "Pill"),
-                          ("Distrion & Electro-Light", "Rubik")),
+                          ("Distrion & Electro-Light", "Rubik"), ("Jim Yosef", "Speed"), ("Jim Yosef", "Lights"),
+                          ("Distrion & Alex Skrindo", "Lightning"), ("Clarx", "Zig Zag")),
 }
 
 
@@ -159,21 +170,54 @@ def find_on_ncs(track: Track) -> Optional[str]:
     return None
 
 
+def _target(source: Union[str, Track]) -> tuple[str, str]:
+    """What yt-dlp is given for a link or a suggested track, and the name to show for it."""
+    if isinstance(source, Track):
+        return find_on_ncs(source) or f"ytsearch1:{source.query}", source.name
+    target = source.strip()
+    if not target:
+        raise ValueError("no link given")
+    if not is_youtube_link(target):
+        raise ValueError("only YouTube links are supported")
+    return target, target
+
+
+def _first_video(info: Optional[dict], label: str) -> dict:
+    if info and info.get("_type") == "playlist":
+        info = next((e for e in info.get("entries") or [] if e), None)
+    if not info:
+        raise ValueError(f"nothing found on YouTube for “{label}”")
+    return info
+
+
+@dataclass
+class Stream:
+    url: str          # the audio stream itself, playable for a few hours
+    title: str
+    page: str         # the video's page
+
+
+def stream(source: Union[str, Track]) -> Stream:
+    """The audio stream of a YouTube link or a suggested track, to listen to it without downloading it."""
+    import yt_dlp
+
+    target, label = _target(source)
+    with yt_dlp.YoutubeDL({**_options(), "format": "bestaudio[ext=m4a]/bestaudio/best",
+                           "noplaylist": True}) as ydl:
+        info = _first_video(ydl.extract_info(target, download=False), label)
+    url = info.get("url") or next((f.get("url") for f in info.get("requested_formats") or [] if f.get("url")), "")
+    if not url:
+        raise ValueError(f"no audio stream found for “{label}”")
+    return Stream(url, clean_title(info.get("title") or label), info.get("webpage_url") or target)
+
+
 def download(source: Union[str, Track], progress: Optional[Callable[[float, str], None]] = None,
              cancel: Optional[threading.Event] = None) -> Downloaded:
     """Download a YouTube link, or a suggested track (from the NCS channel, else the best YouTube search
     result), and extract its sound into the library as an .mp3. A track already in the library is reused."""
     import yt_dlp
 
-    if isinstance(source, Track):
-        target = find_on_ncs(source) or f"ytsearch1:{source.query}"
-        label = source.name
-    else:
-        target = label = source.strip()
-        if not target:
-            raise ValueError("no link given")
-        if not is_youtube_link(target):
-            raise ValueError("only YouTube links are supported")
+    target, label = _target(source)
 
     def hook(d: dict):
         if cancel is not None and cancel.is_set():
@@ -199,12 +243,7 @@ def download(source: Union[str, Track], progress: Optional[Callable[[float, str]
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-            if info and info.get("_type") == "playlist":
-                entries = [e for e in info.get("entries") or [] if e]
-                if not entries:
-                    raise ValueError(f"nothing found on YouTube for “{label}”")
-                info = entries[0]
+            info = _first_video(ydl.extract_info(target, download=False), label)
             title = clean_title(info.get("title") or label)
             url = info.get("webpage_url") or target
             dst = os.path.join(sfx_dir(), _safe_name(title) + ".mp3")

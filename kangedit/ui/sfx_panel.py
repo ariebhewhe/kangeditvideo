@@ -22,6 +22,7 @@ class _Bridge(QObject):
     downloaded = Signal(str, str, str)       # path, name, error
     music_progress = Signal(float, str)
     music_done = Signal(object, str)         # music.Downloaded or None, error
+    music_stream = Signal(object, object, str)   # source, music.Stream or None, error
 
 
 class _LibraryList(QListWidget):
@@ -45,11 +46,16 @@ class SoundPanel(QWidget):
         self._bridge.downloaded.connect(self._on_downloaded)
         self._bridge.music_progress.connect(lambda p, msg: self.lbl_music.setText(f"{msg} {p * 100:.0f}%"))
         self._bridge.music_done.connect(self._on_music)
+        self._bridge.music_stream.connect(self._on_music_stream)
         self._music_busy = False
+        self._streams: dict = {}         # source -> music.Stream, so a track is looked up once
+        self._wanted_stream = None       # the source the last music preview asked for
+        self._stop_buttons: list[QPushButton] = []
         self._query, self._page = "", 1
         self._audio = QAudioOutput(self)
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(self._audio)
+        self._player.playbackStateChanged.connect(self._on_preview_state)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
@@ -71,13 +77,16 @@ class SoundPanel(QWidget):
         row = QHBoxLayout()
         self.b_play = QPushButton("▶ Preview")
         self.b_play.clicked.connect(lambda: self._preview_online(self.results.currentItem()))
+        self.b_stop = QPushButton("■ Stop")
+        self.b_stop.setToolTip("Stop the sound preview")
+        self.b_stop.clicked.connect(self.stop_preview)
         self.b_add = QPushButton("＋ Add at playhead")
         self.b_add.setObjectName("primary")
         self.b_add.clicked.connect(self._add_online)
         self.b_more = QPushButton("More results")
         self.b_more.clicked.connect(lambda: self.search(more=True))
         self.b_more.setEnabled(False)
-        for w in (self.b_play, self.b_add, self.b_more):
+        for w in (self.b_play, self.b_stop, self.b_add, self.b_more):
             row.addWidget(w)
         lay.addLayout(row)
         self.lbl_status = QLabel("")
@@ -92,12 +101,17 @@ class SoundPanel(QWidget):
         self.library.itemDoubleClicked.connect(self._preview_local)
         lay.addWidget(self.library, 2)
         row = QGridLayout()         # two rows of buttons: fits a narrow panel
+        self._stop_buttons.append(self.b_stop)
         for k, (text, slot) in enumerate((("▶ Play", lambda: self._preview_local(self.library.currentItem())),
-                                          ("＋ Add", self._add_local), ("Import…", self._import),
-                                          ("Delete", self._delete), ("Folder", lambda: open_path(sfx_dir())))):
+                                          ("■ Stop", self.stop_preview), ("＋ Add", self._add_local),
+                                          ("Import…", self._import), ("Delete", self._delete),
+                                          ("Folder", lambda: open_path(sfx_dir())))):
             b = QPushButton(text)
             b.clicked.connect(slot)
             row.addWidget(b, k // 3, k % 3)
+            if slot == self.stop_preview:
+                b.setToolTip("Stop the sound preview")
+                self._stop_buttons.append(b)
         lay.addLayout(row)
         note = QLabel("MyInstants sounds are uploaded by its users: make sure you may use a sound before "
                       "publishing a video with it.")
@@ -105,6 +119,7 @@ class SoundPanel(QWidget):
         note.setStyleSheet("color: #6f737c; font-size: 11px;")
         lay.addWidget(note)
         self.refresh_library()
+        self._on_preview_state(self._player.playbackState())
 
     # ------------------------------------------------------------------ selected sound
     def _volume_box(self) -> QGroupBox:
@@ -147,7 +162,7 @@ class SoundPanel(QWidget):
         self.suggestions = QListWidget()
         self.suggestions.currentItemChanged.connect(
             lambda it, _prev: it is not None and self.ed_link.setText(""))
-        self.suggestions.itemDoubleClicked.connect(lambda _it: self._get_music())
+        self.suggestions.itemDoubleClicked.connect(lambda _it: self._preview_music())
         v.addWidget(self.suggestions, 1)
         self.ed_link = QLineEdit(placeholderText="…or paste a YouTube link")
         self.ed_link.setClearButtonEnabled(True)
@@ -159,10 +174,19 @@ class SoundPanel(QWidget):
         self.b_music.setToolTip("Download the track, extract its sound and lay it under the whole edit "
                                 "(at 50% volume: select it on the timeline to change)")
         self.b_music.clicked.connect(self._get_music)
-        b_yt = QPushButton("Open on YouTube")
-        b_yt.setToolTip("Listen to the track first")
+        self.b_music_play = QPushButton("▶ Preview")
+        self.b_music_play.setToolTip("Listen to the track here without downloading it (double-click a track)")
+        self.b_music_play.clicked.connect(self._preview_music)
+        b_stop = QPushButton("■ Stop")
+        b_stop.setToolTip("Stop the music preview")
+        b_stop.clicked.connect(self.stop_preview)
+        self._stop_buttons.append(b_stop)
+        b_yt = QPushButton("YouTube")
+        b_yt.setToolTip("Open the track on YouTube")
         b_yt.clicked.connect(self._open_music)
         row.addWidget(self.b_music, 1)
+        row.addWidget(self.b_music_play)
+        row.addWidget(b_stop)
         row.addWidget(b_yt)
         v.addLayout(row)
         self.lbl_music = QLabel("")
@@ -198,6 +222,44 @@ class SoundPanel(QWidget):
             QDesktopServices.openUrl(QUrl(music.search_url(src)))
         elif src:
             QDesktopServices.openUrl(QUrl(src if "://" in src else "https://" + src))
+
+    def _preview_music(self):
+        src = self._music_source()
+        if not src:
+            self.lbl_music.setText("Pick a suggested track or paste a YouTube link.")
+            return
+        if isinstance(src, str) and not music.is_youtube_link(src):
+            self.lbl_music.setText("That is not a YouTube link.")
+            return
+        self.stop_preview()
+        self._wanted_stream = src
+        if src in self._streams:
+            self._on_music_stream(src, self._streams[src], "")
+            return
+        if not music.available():
+            self.lbl_music.setText("Music preview needs yt-dlp: run install.py again (or pip install yt-dlp).")
+            return
+        self.lbl_music.setText(f"Loading a preview of “{src.name if isinstance(src, music.Track) else src}”…")
+
+        def work():
+            try:
+                self._bridge.music_stream.emit(src, music.stream(src), "")
+            except Exception as e:  # noqa: BLE001 — offline, video unavailable, YouTube changed...
+                msg = str(e).replace("ERROR: ", "")
+                self._bridge.music_stream.emit(src, None, msg.splitlines()[0][:300] if msg else type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_music_stream(self, src, got, error: str):
+        if got is not None:
+            self._streams[src] = got
+        if src != self._wanted_stream:       # another track was picked meanwhile
+            return
+        if got is None:
+            self.lbl_music.setText(f"Couldn't preview the music: {error}")
+            return
+        self.lbl_music.setText(f"Previewing “{got.title}” — ♪ Add to timeline to use it")
+        self._play(QUrl(got.url))
 
     def _get_music(self):
         if self._music_busy:
@@ -274,6 +336,7 @@ class SoundPanel(QWidget):
 
     def _preview_online(self, item):
         if item is not None:
+            self._wanted_stream = None
             self._play(QUrl(item.data(Qt.UserRole).url))
 
     def _add_online(self):
@@ -310,6 +373,7 @@ class SoundPanel(QWidget):
 
     def _preview_local(self, item):
         if item is not None:
+            self._wanted_stream = None
             self._play(QUrl.fromLocalFile(item.data(Qt.UserRole)))
 
     def _add_local(self):
@@ -334,7 +398,7 @@ class SoundPanel(QWidget):
         if QMessageBox.question(self, "Sounds", f"Delete “{item.text()}” from the library?\n\nSounds already on "
                                                 "a timeline that use it will go silent.") != QMessageBox.Yes:
             return
-        self._player.stop()
+        self.stop_preview()
         self._player.setSource(QUrl())
         try:
             os.remove(item.data(Qt.UserRole))
@@ -349,3 +413,12 @@ class SoundPanel(QWidget):
 
     def preview_file(self, path: str):
         self._play(QUrl.fromLocalFile(path))
+
+    def stop_preview(self):
+        """Stop the music / sound preview (also called when the timeline starts playing)."""
+        self._wanted_stream = None
+        self._player.stop()
+
+    def _on_preview_state(self, state):
+        for b in self._stop_buttons:
+            b.setEnabled(state == QMediaPlayer.PlayingState)

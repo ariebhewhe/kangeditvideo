@@ -205,7 +205,7 @@ Sound effects are mixed into the preview and the export at their own volume (rig
 
 ### Background music (NCS)
 
-At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume. **Open on YouTube** lets you listen first.
+At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume. **▶ Preview** (or double-click a track) streams it so you can listen first without downloading it, and **■ Stop** stops it; previews also stop when the timeline starts playing. **YouTube** opens the track in your browser.
 
 NCS music is free to use in videos as long as the description credits it: the credit is copied to the clipboard when you add a track. Music from other YouTube channels needs its owner's permission.
 

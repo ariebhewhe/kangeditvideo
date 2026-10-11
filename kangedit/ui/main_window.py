@@ -76,7 +76,6 @@ class MainWindow(QMainWindow):
         self._progress_text = ""
         self._last_ckpt: tuple = ("", 0.0)
         self._audio_version = 0
-        self._audio_pending: Optional[str] = None
         self._audio_cancel = threading.Event()
 
         self.setWindowTitle(APP_NAME)
@@ -1873,6 +1872,7 @@ class MainWindow(QMainWindow):
     def _selected_sound_volume(self, volume: float):
         if self.tl.selected_sound:
             self._sound_action(f"sound_volume:{volume}", self.tl.selected_sound)
+            self._schedule_audio(150)   # re-mix quickly so a volume drag is heard live
 
     def _sounds_changed(self):
         self._sync_sound_panel()
@@ -2449,9 +2449,9 @@ class MainWindow(QMainWindow):
         return p
 
     # ================================================================== preview audio
-    def _schedule_audio(self):
+    def _schedule_audio(self, delay: int = 700):
         self.viewer.invalidate_audio()
-        self._audio_timer.start()
+        self._audio_timer.start(delay)
 
     def _render_audio(self):
         if not self.project.clips:
@@ -2464,7 +2464,10 @@ class MainWindow(QMainWindow):
         ver = self._audio_version
         proj = self._clone_project()
         use_proxies = self.project.settings.use_proxies
-        path = str(cache_dir("tmp") / f"preview_audio_{ver % 4}.wav")
+        # never the file the viewer has open: Windows can't replace it, and the new mix would be lost
+        loaded = os.path.normcase(os.path.abspath(self.viewer._audio_path or ""))
+        path = next(p for k in range(4) if os.path.normcase(
+            p := str(cache_dir("tmp") / f"preview_audio_{(ver + k) % 4}.wav")) != loaded)
 
         def work():
             try:
@@ -2477,17 +2480,12 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_audio_ready(self, ver: int, path: str):
-        if ver != self._audio_version:
-            return
-        if self.viewer.playing:
-            self._audio_pending = path
-        else:
-            self.viewer.set_audio(path)
+        if ver == self._audio_version:
+            self.viewer.set_audio(path)   # also while playing: sound edits are heard right away
 
     def _on_play_state(self, playing: bool):
-        if not playing and self._audio_pending:
-            self.viewer.set_audio(self._audio_pending)
-            self._audio_pending = None
+        if playing:
+            self.sfx_panel.stop_preview()
 
     # ================================================================== misc
     def show_shortcuts(self):

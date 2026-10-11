@@ -261,6 +261,9 @@ class Viewer(QWidget):
         self.audio_out = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio_out)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
+        self._audio_resume = False     # new mix loaded during playback: start it at the clock time
+        self._audio_check = 0.0        # next time _sync_audio looks at the audio player
 
         st = self.style()
         self.btn_start = QPushButton(st.standardIcon(QStyle.SP_MediaSkipBackward), "")
@@ -373,7 +376,7 @@ class Viewer(QWidget):
         self.project = project
         self.drop_decoders()
         self.t = 0.0
-        self.audio_valid = False
+        self.set_audio(None)
         self.refresh()
 
     def drop_decoders(self):
@@ -407,11 +410,19 @@ class Viewer(QWidget):
         self.refresh()
 
     def set_audio(self, path: Optional[str]):
-        if self.playing:
-            return
+        """Use a new preview mix. During playback it takes over at the current time (live sound edits)."""
         self._audio_path = path
         self.audio_valid = bool(path) and os.path.exists(path)
+        self._audio_resume = self.playing and self._play_clock is not None and self.audio_valid
         self.player.setSource(QUrl.fromLocalFile(path) if self.audio_valid else QUrl())
+
+    def _on_media_status(self, status):
+        if not self._audio_resume or status not in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            return
+        self._audio_resume = False
+        if self.playing and self._play_clock is not None:
+            self.player.setPosition(int((self._play_t0 + time.perf_counter() - self._play_clock) * 1000))
+            self.player.play()
 
     def invalidate_audio(self):
         self.audio_valid = False
@@ -451,6 +462,7 @@ class Viewer(QWidget):
         if not self.playing:
             return
         self.playing = False
+        self._audio_resume = False
         self.timer.stop()
         self.engine.stop_playback()
         self.player.pause()
@@ -478,6 +490,7 @@ class Viewer(QWidget):
         """(Re)start reading ahead from self.t; the clock and audio start once frames are buffered."""
         self._play_t0 = self.t
         self._play_clock = None
+        self._audio_resume = False
         self.player.pause()
         self._play_shots = self._shots()
         self.engine.start_playback(self._play_shots, self._look(), self._play_t0, None,
@@ -491,10 +504,9 @@ class Viewer(QWidget):
                 return
             self._play_clock = time.perf_counter()
             self.engine.set_clock(self._play_clock)
-            if self.audio_valid:
-                self.player.setPosition(int(self._play_t0 * 1000))
-                self.player.play()
+            self._audio_check = 0.0
         t = self._play_t0 + (time.perf_counter() - self._play_clock)
+        self._sync_audio(t)
         if t >= self.project.duration:
             self.t = max(0.0, self.project.duration - 1e-3)
             self.stop()
@@ -509,6 +521,25 @@ class Viewer(QWidget):
         self.t = t
         self.lbl_time.setText(f"{fmt_time(self.t, fps)} / {fmt_time(self.project.duration, fps)}")
         self.time_changed.emit(self.t)
+
+    def _sync_audio(self, t: float):
+        """Keep the preview mix playing in step with the clock. Also restarts it after an edit during
+        playback paused it, even when the new mix isn't ready yet (the previous one plays meanwhile)."""
+        now = time.perf_counter()
+        if now < self._audio_check or self._audio_resume or self.player.source().isEmpty():
+            return
+        self._audio_check = now + 0.5
+        if self.player.mediaStatus() not in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia,
+                                             QMediaPlayer.BufferingMedia, QMediaPlayer.EndOfMedia):
+            return
+        dur = self.player.duration() / 1000.0
+        if dur > 0 and t >= dur - 0.1:
+            return
+        if self.player.playbackState() != QMediaPlayer.PlayingState:
+            self.player.setPosition(int(t * 1000))
+            self.player.play()
+        elif abs(self.player.position() / 1000.0 - t) > 0.3:
+            self.player.setPosition(int(t * 1000))
 
     def preview_size(self) -> tuple[int, int]:
         s = self.project.settings
