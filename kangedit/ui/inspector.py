@@ -6,7 +6,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
+                               QLabel, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
@@ -31,28 +31,45 @@ class ParamSlider(QWidget):
         self.spin.setSingleStep(step)
         self.spin.setSuffix(suffix)
         self.spin.setFixedWidth(74)
+        self.btn_reset = QToolButton()
+        self.btn_reset.setText("↺")
+        self.btn_reset.setToolTip(f"Reset to {default:g}{suffix}")
+        self.btn_reset.setAutoRaise(True)
+        self.btn_reset.setFixedWidth(22)
+        self.btn_reset.clicked.connect(self.reset)
         self.slider.valueChanged.connect(self._from_slider)
         self.spin.valueChanged.connect(self._from_spin)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
         lay.addWidget(self.slider, 1)
         lay.addWidget(self.spin)
+        lay.addWidget(self.btn_reset)
         self.set_value(default)
 
+    def reset(self):
+        if abs(self.value() - self.default) > 1e-9:
+            self.set_value(self.default, emit=True)
+
     def mouseDoubleClickEvent(self, _):
-        self.set_value(self.default, emit=True)
+        self.reset()
+
+    def _sync_reset(self):
+        self.btn_reset.setEnabled(abs(self.spin.value() - self.default) > 1e-9)
 
     def _from_slider(self, v):
         val = v / self.scale
         self.spin.blockSignals(True)
         self.spin.setValue(val)
         self.spin.blockSignals(False)
+        self._sync_reset()
         self.changed.emit(val)
 
     def _from_spin(self, val):
         self.slider.blockSignals(True)
         self.slider.setValue(int(round(val * self.scale)))
         self.slider.blockSignals(False)
+        self._sync_reset()
         self.changed.emit(val)
 
     def set_value(self, val: float, emit: bool = False):
@@ -62,6 +79,7 @@ class ParamSlider(QWidget):
         self.spin.setValue(val)
         for w in (self.slider, self.spin):
             w.blockSignals(False)
+        self._sync_reset()
         if emit:
             self.changed.emit(val)
 

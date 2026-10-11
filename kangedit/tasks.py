@@ -12,6 +12,8 @@ from PySide6.QtCore import QObject, Signal
 
 from .ffmpeg import Cancelled
 
+CANCEL_GRACE = 0.5   # seconds a cancelled task gets to stop before the queue moves on
+
 TaskFn = Callable[[Callable[[float, str], None], threading.Event], Any]
 
 
@@ -74,17 +76,39 @@ class TaskQueue(QObject):
             task = self._q.get()
             if task is None:
                 return
-            self._cancel.clear()
+            # Each task gets its own event: a cancelled task that is still unwinding in the background keeps
+            # seeing it set, while the next task starts with a clear one.
+            cancel = self._cancel = threading.Event()
             self.current = task.name
             self.started.emit(task.name)
-            try:
-                res = task.fn(lambda p, m="": self.progress.emit(float(p), m or task.name), self._cancel)
-                self._done.emit(task, res)
-            except Cancelled:
+            out: dict = {}
+
+            def run(task=task, cancel=cancel, out=out):
+                try:
+                    out["res"] = task.fn(lambda p, m="": None if cancel.is_set() else
+                                         self.progress.emit(float(p), m or task.name), cancel)
+                except Cancelled:
+                    out["cancelled"] = True
+                except Exception as e:  # noqa: BLE001
+                    traceback.print_exc()
+                    out["error"] = f"{e}"
+
+            # The task runs in its own thread so a cancel is answered at once, even while the task is stuck in
+            # a call that cannot be interrupted (native code, a subprocess); it then finishes or bails out on
+            # its own, and its result is dropped.
+            worker = threading.Thread(target=run, daemon=True, name=f"task: {task.name}")
+            worker.start()
+            while worker.is_alive():
+                worker.join(0.1)
+                if cancel.is_set():
+                    worker.join(CANCEL_GRACE)
+                    break
+            if cancel.is_set() or out.get("cancelled"):
                 self._error.emit(task, "")
-            except Exception as e:  # noqa: BLE001
-                traceback.print_exc()
-                self._error.emit(task, f"{e}")
+            elif "error" in out:
+                self._error.emit(task, out["error"])
+            else:
+                self._done.emit(task, out.get("res"))
 
     def _finish(self):
         with self._lock:

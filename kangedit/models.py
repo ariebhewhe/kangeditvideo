@@ -78,7 +78,7 @@ class TimelineClip:
     transition: str = ""
     transition_dur: float = 0.5
     audio_split: float = 0.0
-    label: str = ""                # "opening" | "closing" when auto edit placed it as a bookend
+    label: str = ""                # "opening" | "closing" bookend, or "hook", when auto edit placed it
     id: str = field(default_factory=new_id)
 
     @property
@@ -155,9 +155,24 @@ class ProjectSettings:
     whisper_language: str = ""     # "" = auto detect
     captions: CaptionStyle = field(default_factory=CaptionStyle)
     video_format: str = "short"    # short | long | custom (auto-edit preset)
+    # Fade from / to black and silence at the start / end of the timeline (seconds, 0 = off).
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    fade_picture: bool = True
+    fade_sound: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def fades(self, duration: float, sound: bool = False) -> tuple[float, float]:
+        """(fade in, fade out) lengths for the picture (or the sound), shortened to fit the timeline."""
+        if not (self.fade_sound if sound else self.fade_picture) or duration <= 0:
+            return 0.0, 0.0
+        fi, fo = max(0.0, self.fade_in), max(0.0, self.fade_out)
+        if fi + fo > duration:
+            k = duration / (fi + fo)
+            fi, fo = fi * k, fo * k
+        return fi, fo
 
     @staticmethod
     def from_dict(d: dict) -> "ProjectSettings":

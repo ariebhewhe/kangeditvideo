@@ -69,10 +69,19 @@ def test_log_menu_lists_dji_profiles_after_dlog():
 
 
 def test_lut_only_profile_falls_back_to_its_curve(lut_library):
-    assert effective_profile("dlogm") == "dlog"
+    assert effective_profile("dlogm") == "dlogm_approx"
+    assert effective_profile("dlog2") == "dlog"
     assert missing_lut("dlogm")
     assert "approximated" in profile_label("dlogm")
     assert needs_color(Grade(), "dlogm")
+
+
+def test_dlogm_approximation_is_milder_than_dlog():
+    # D-Log M carries more contrast and colour than D-Log: decoding it as D-Log made it far too vivid.
+    px = np.array([[0.55, 0.40, 0.48]], np.float32)
+    chroma = lambda a: float(a.max() - a.min())  # noqa: E731
+    assert chroma(apply_grade(px, Grade(), "dlogm_approx")) < 0.8 * chroma(apply_grade(px, Grade(), "dlog"))
+    assert "dlogm_approx" not in [k for k, _ in LOG_CHOICES]
 
 
 def test_lut_only_profile_uses_official_lut_once_imported(lut_library):

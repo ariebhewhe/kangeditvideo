@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, 
 from .. import APP_NAME, camera, version_string
 from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
-from ..autoedit import AutoEditSettings, apply_edit_style, select
+from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, select
 from .. import sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, edit_caption, listen, project_layout, transcribe, write_srt
@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self.tasks = TaskQueue()
         self.last_auto = self._load_auto_settings()
         self._auto_ids: list[str] = []     # footage the last auto edit used (for regenerate)
+        self._tried_hooks: list[TimelineClip] = []   # hooks "New hook" already showed (not offered again)
         self._progress_text = ""
         self._last_ckpt: tuple = ("", 0.0)
         self._audio_version = 0
@@ -165,6 +166,8 @@ class MainWindow(QMainWindow):
                               "Ctrl+Shift+=", "Rebuild the automatic edit about a quarter longer than the timeline"))
         m.addAction(self._act("Regenerate auto edit at length…", lambda: self.regenerate_auto_edit(None), None,
                               "Rebuild the automatic edit with the same settings at a length you choose"))
+        m.addAction(self._act("Find a new hook clip", self.new_hook, "H",
+                              "Replace the opening hook with another strong moment not used in the edit"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -257,6 +260,11 @@ class MainWindow(QMainWindow):
             rb.setToolTip(tip + " (same settings and footage)")
             rb.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
             tb.addWidget(rb)
+        hb = QPushButton("🎣 New hook")
+        hb.setToolTip("Replace the opening hook with another strong moment not used in the edit (H). "
+                      "Click again for the next one; Undo brings the previous back.")
+        hb.clicked.connect(self.new_hook)
+        tb.addWidget(hb)
         tb.addSeparator()
         tb.addAction(self.a_proxies)
         self.chk_proxy = QCheckBox("Use proxies")
@@ -333,6 +341,7 @@ class MainWindow(QMainWindow):
         self.tl.caption_clicked.connect(lambda i: (self.right_tabs.setCurrentWidget(self.caps_panel),
                                                    self.caps_panel.select(i)))
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
+        self.timeline.fades_changed.connect(self._fades_changed)
         self.timeline.btn_delete.clicked.connect(lambda: self.clip_action("delete", self.tl.selected))
 
         self.bin.import_requested.connect(self.import_dialog)
@@ -370,6 +379,13 @@ class MainWindow(QMainWindow):
         self.caps_panel.chk_show.blockSignals(True)
         self.caps_panel.chk_show.setChecked(s.captions.enabled)
         self.caps_panel.chk_show.blockSignals(False)
+        self.timeline.sync_fades()
+
+    def _fades_changed(self):
+        self.project.dirty = True
+        self.viewer.refresh()
+        self._schedule_audio()
+        self._update_title()
 
     def _project_controls_changed(self):
         s = self.project.settings
@@ -770,7 +786,7 @@ class MainWindow(QMainWindow):
 
         def job(progress, cancel):
             progress(0.3, "Analyzing footage…")
-            analyses = {fid: load_or_analyze(f, use_gpu=use_gpu) for fid, f in footage.items()}
+            analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
             order = story_order(footage, ids)
             intro = outro = None
             notes: list[str] = []
@@ -801,6 +817,7 @@ class MainWindow(QMainWindow):
                                                         "or a smaller gap.")
                 return
             self.project_checkpoint()
+            self._tried_hooks = []
             if s.replace_timeline:
                 self.project.clips = clips
             else:
@@ -821,6 +838,51 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(msg + (" · " + " · ".join(notes) if notes else ""))
 
         self.tasks.submit(name, job, done, self._task_error("Auto edit"))
+
+    def new_hook(self):
+        """Put a different strong moment at the start as the hook: replaces the clip labelled "hook" (or the
+        first clip of a hook-first edit), otherwise inserts one before everything."""
+        clips = self.project.clips
+        ids = [fid for fid in (self._auto_ids or list(self.project.footage))
+               if fid in self.project.footage and fid in self.analyses]
+        if not ids:
+            QMessageBox.information(self, APP_NAME, "Analyze some footage first (or run ✨ Auto Edit).")
+            return
+        idx = next((k for k, c in enumerate(clips) if c.label == "hook"), None)
+        if idx is None and clips and self.last_auto.order == "hook" and clips[0].label != "opening":
+            idx = 0
+        old = clips[idx] if idx is not None else None
+        s = self.last_auto
+        length = old.duration if old else (s.clip_max if s.video_format != "long" else min(s.clip_max, 6.0))
+        footage = {fid: self.project.footage[fid] for fid in ids}
+        analyses = {fid: self.analyses[fid] for fid in ids}
+        if old is not None and not any(_same_moment(old, t) for t in self._tried_hooks):
+            self._tried_hooks.append(TimelineClip.from_dict(old.to_dict()))
+        hook = find_hook(footage, analyses, s, length, list(clips) + self._tried_hooks)
+        if hook is None and self._tried_hooks:
+            # Every strong moment has been shown once: start the round again (still avoiding the timeline).
+            self._tried_hooks = [TimelineClip.from_dict(old.to_dict())] if old else []
+            hook = find_hook(footage, analyses, s, length, list(clips) + self._tried_hooks)
+        if hook is None:
+            self.lbl_status.setText("No other hook moment found (every strong moment is already in the edit).")
+            return
+        self._tried_hooks.append(TimelineClip.from_dict(hook.to_dict()))
+        self.project_checkpoint()
+        if old is not None:
+            # Keep the clip's look and audio settings; only the moment changes.
+            old.footage_id, old.src_in, old.src_out, old.score = hook.footage_id, hook.src_in, hook.src_out, hook.score
+            old.label = "hook"
+        else:
+            clips.insert(0, hook)
+            if len(clips) > 1:
+                clips[1].transition, clips[1].audio_split = "", 0.0
+        self._after_structure_change()
+        self.tl.selected = (old or hook).id
+        self.tl.update()
+        self.inspector.set_clip(self.selected_clip())
+        self.viewer.seek(0)
+        f = self.project.footage[hook.footage_id]
+        self.lbl_status.setText(f"New hook: {f.name} at {hook.src_in:.1f} s (score {hook.score * 100:.0f})")
 
     def _best_for(self, fid: str, duration: Optional[float] = None, existing=None) -> Optional[TimelineClip]:
         a = self.analyses.get(fid)
@@ -1727,3 +1789,7 @@ class MainWindow(QMainWindow):
         self._audio_cancel.set()
         self.viewer.shutdown()
         e.accept()
+
+
+def _same_moment(a: TimelineClip, b: TimelineClip) -> bool:
+    return a.footage_id == b.footage_id and a.src_in < b.src_out and b.src_in < a.src_out

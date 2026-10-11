@@ -4,12 +4,15 @@ Scores every analysis sample, slides candidate windows over each footage and gre
 picks the best ones under these rules:
   * a footage may be used several times, but its segments never overlap and keep at
     least `min_gap` seconds of source time between them;
-  * visually near-identical segments of the same footage are rejected (no repeats);
-  * repeated use of a footage is progressively penalised so all footage gets a chance.
+  * visually near-identical segments close together in the same footage are rejected (no repeats);
+    further apart they are distinct moments of a long take and only lose a little;
+  * each footage gets a share of the clips that grows with its length (a long recording gives several
+    moments); uses beyond that share are progressively penalised so all footage gets a chance.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -25,6 +28,8 @@ STYLES = {
     "action":   dict(sharp=.15, color=.10, act=.35, audio=.20, face=.05, expo=.15, shake=.20),
     "people":   dict(sharp=.15, color=.05, act=.05, audio=.25, face=.35, expo=.15, shake=.35),
     "scenic":   dict(sharp=.30, color=.30, act=.00, audio=.00, face=.05, expo=.20, shake=.50),
+    # Not offered as a style: what makes a strong opening hook (movement, sound, faces, still sharp).
+    "hook":     dict(sharp=.15, color=.10, act=.30, audio=.20, face=.25, expo=.10, shake=.30),
 }
 STYLE_LABELS = {
     "balanced": "Balanced",
@@ -40,6 +45,11 @@ TRANSITION_MODES = {
 }
 TRANSITION_STYLES = {k: v[0] for k, v in TRANSITIONS.items()} | {"mixed": "Mixed (varies)"}
 _MIXED = ["dissolve", "slide", "zoom", "dip_black", "wipe"]
+
+REPEAT_WINDOW = 10.0    # s (at least; 2 x min_gap when larger): look-alike segments closer than this in one
+                        # footage count as repeats
+FAR_REPEAT_PENALTY = 0.08   # look-alike but further apart: a small penalty only
+OVER_SHARE_PENALTY = 0.12   # per use beyond the footage's share
 
 ORDERS = {
     "hook": "Hook first (best clip, then chronological)",
@@ -257,22 +267,33 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     cands = {i: _candidates(i, analyses[i], scores[i], project_footage[i].duration, s) for i in ids}
     picked: list[tuple[str, float, float, float]] = []   # fid, in, out, score
     picked_embed: dict[str, list[np.ndarray]] = {i: [] for i in ids}
+    picked_mid: dict[str, list[float]] = {i: [] for i in ids}
     uses = {i: 0 for i in ids}
     total = 0.0
+    # Clips each footage should give, in proportion to its length.
+    durs = {i: project_footage[i].duration for i in ids}
+    n_clips = s.target_duration / max(0.1, (s.clip_min + s.clip_max) / 2)
+    share = {i: n_clips * durs[i] / max(1e-6, sum(durs.values())) for i in ids}
 
     def block(fid: str, a_in: float, a_out: float, emb: np.ndarray):
         c = cands[fid]
         t = analyses[fid].times
         c.valid &= ~((t < a_out + s.min_gap) & (t + c.length > a_in - s.min_gap))
         picked_embed[fid].append(emb)
+        picked_mid[fid].append((a_in + a_out) / 2)
 
     def effective(fid: str) -> np.ndarray:
         c = cands[fid]
         sc = np.where(c.valid, c.score, -np.inf)
         if picked_embed[fid]:
-            sims = c.embed @ np.stack(picked_embed[fid]).T
-            sc = np.where(sims.max(axis=1) > s.similarity, -np.inf, sc)
-        return sc - 0.12 * uses[fid]
+            sims = c.embed @ np.stack(picked_embed[fid]).T                      # (n, picked)
+            mid = analyses[fid].times + c.length / 2
+            window = max(REPEAT_WINDOW, 2 * s.min_gap)
+            near = np.abs(mid[:, None] - np.asarray(picked_mid[fid])[None, :]) < window
+            alike = sims > s.similarity
+            sc = np.where((alike & near).any(axis=1), -np.inf, sc)
+            sc = sc - FAR_REPEAT_PENALTY * (alike & ~near).any(axis=1)
+        return sc - OVER_SHARE_PENALTY * max(0.0, uses[fid] + 1 - share[fid])
 
     def take(fid: str, eff: np.ndarray) -> bool:
         nonlocal total
@@ -333,4 +354,22 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
         ordered = [hook] + [p for p in chrono if p is not hook]
     else:
         ordered = chrono
-    return [TimelineClip(footage_id=f, src_in=a, src_out=b, score=sc) for f, a, b, sc in ordered]
+    clips = [TimelineClip(footage_id=f, src_in=a, src_out=b, score=sc) for f, a, b, sc in ordered]
+    if s.order == "hook" and clips:
+        clips[0].label = "hook"
+    return clips
+
+
+def find_hook(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
+              length: float, avoid: list[TimelineClip]) -> Optional[TimelineClip]:
+    """A strong opening moment (movement, sound, faces) of about `length` seconds that overlaps none of
+    the `avoid` clips (the timeline and hooks already tried)."""
+    hs = copy.copy(s)
+    hs.style = "hook"
+    hs.target_duration = length
+    hs.clip_min = hs.clip_max = length
+    hs.use_every_footage = False
+    hs.max_uses = 0
+    hs.order = "hook"
+    clips = select(project_footage, analyses, hs, existing=avoid)
+    return clips[0] if clips else None

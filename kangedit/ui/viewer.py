@@ -354,7 +354,9 @@ class Viewer(QWidget):
         s = self.project.settings
         tw, th = self.preview_size()
         color = self.adjust_mode == "on" or (self.adjust_mode == "playback" and not self.playing)
-        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT, color)
+        end = self.project.duration
+        fi, fo = s.fades(end)
+        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT, color, fi, fo, end)
 
     def _shot(self, clip, start: float, index: Optional[int] = None) -> Optional[Shot]:
         f = self.project.footage.get(clip.footage_id)

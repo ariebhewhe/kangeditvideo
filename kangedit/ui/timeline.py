@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QButtonGroup, QHBoxLayout, QLabel, QMenu, QScrollBar, QSlider, QToolButton,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QScrollBar, QSlider, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import sfx
@@ -242,6 +242,7 @@ class TimelineView(QWidget):
                 continue
             self._paint_clip(p, c, r)
         self._paint_edits(p)
+        self._paint_fades(p)
 
         for i, cap in enumerate(self.captions):
             x0, x1 = self.t_to_x(cap.start), self.t_to_x(cap.end)
@@ -265,6 +266,28 @@ class TimelineView(QWidget):
             x = self.t_to_x(starts[d["drop"]])
             p.setPen(QPen(QColor("#ffd34d"), 3))
             p.drawLine(QPointF(x, TRACK_Y - 4), QPointF(x, TRACK_Y + TRACK_H + 4))
+
+    def _paint_fades(self, p: QPainter):
+        """Fade in / out at the ends of the timeline: a shaded ramp over the picture and / or the sound."""
+        st = self.project.settings
+        dur = self.project.duration
+        if not self.project.clips:
+            return
+        wy = TRACK_Y + TRACK_H - WAVE_H
+        bands = []
+        if st.fades(dur) != (0.0, 0.0):
+            bands.append((TRACK_Y, wy, st.fades(dur)))
+        if st.fades(dur, sound=True) != (0.0, 0.0):
+            bands.append((wy, TRACK_Y + TRACK_H, st.fades(dur, sound=True)))
+        p.setPen(QPen(QColor(255, 255, 255, 200), 1))
+        p.setBrush(QColor(0, 0, 0, 140))
+        for top, bot, (fi, fo) in bands:
+            if fi > 0:
+                x0, x1 = self.t_to_x(0.0), self.t_to_x(fi)
+                p.drawPolygon(QPolygonF([QPointF(x0, top), QPointF(x1, top), QPointF(x0, bot)]))
+            if fo > 0:
+                x0, x1 = self.t_to_x(dur - fo), self.t_to_x(dur)
+                p.drawPolygon(QPolygonF([QPointF(x0, top), QPointF(x1, top), QPointF(x1, bot)]))
 
     def _paint_edits(self, p: QPainter):
         """Transitions (bow tie over the cut) and J/L split edits (badge where the sound cuts)."""
@@ -790,6 +813,8 @@ class TimelineView(QWidget):
 class TimelinePanel(QWidget):
     """Timeline view + mode buttons, zoom controls and scrollbar."""
 
+    fades_changed = Signal()   # the fade controls edited project.settings
+
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self.view = TimelineView(project)
@@ -808,6 +833,11 @@ class TimelinePanel(QWidget):
         self.btn_move.toggled.connect(lambda on: setattr(self.view, "mode", "move" if on else "slip"))
         self.btn_split = QToolButton(text="✂ Split")
         self.btn_delete = QToolButton(text="🗑 Delete")
+        self.btn_fade = QToolButton(text="◐ Fade")
+        self.btn_fade.setToolTip("Fade the picture and / or sound in from black at the start of the timeline "
+                                 "and out at its end")
+        self.btn_fade.setPopupMode(QToolButton.InstantPopup)
+        self.btn_fade.setMenu(self._fade_menu())
         self.btn_fit = QToolButton(text="Fit")
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(2, 400)
@@ -820,7 +850,7 @@ class TimelinePanel(QWidget):
 
         top = QHBoxLayout()
         top.setContentsMargins(4, 2, 4, 2)
-        for w in (self.btn_move, self.btn_slip, self.btn_split, self.btn_delete):
+        for w in (self.btn_move, self.btn_slip, self.btn_split, self.btn_delete, self.btn_fade):
             top.addWidget(w)
         top.addSpacing(12)
         top.addWidget(self.lbl, 1)
@@ -833,6 +863,56 @@ class TimelinePanel(QWidget):
         lay.addLayout(top)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.scroll)
+
+    def _fade_menu(self) -> QMenu:
+        m = QMenu(self)
+        box = QWidget()
+        f = QFormLayout(box)
+        f.setContentsMargins(10, 8, 10, 8)
+        self.sp_fade_in, self.sp_fade_out = (QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" s",
+                                                            specialValueText="Off") for _ in range(2))
+        for sp in (self.sp_fade_in, self.sp_fade_out):
+            sp.setRange(0.0, 10.0)
+            sp.valueChanged.connect(self._fades_edited)
+        self.chk_fade_picture = QCheckBox("Picture (from / to black)")
+        self.chk_fade_sound = QCheckBox("Sound (from / to silence)")
+        for chk in (self.chk_fade_picture, self.chk_fade_sound):
+            chk.toggled.connect(self._fades_edited)
+        f.addRow("Fade in at start", self.sp_fade_in)
+        f.addRow("Fade out at end", self.sp_fade_out)
+        f.addRow(self.chk_fade_picture)
+        f.addRow(self.chk_fade_sound)
+        act = QWidgetAction(m)
+        act.setDefaultWidget(box)
+        m.addAction(act)
+        return m
+
+    def sync_fades(self):
+        """Show the project's fade settings."""
+        s = self.view.project.settings
+        ws = (self.sp_fade_in, self.sp_fade_out, self.chk_fade_picture, self.chk_fade_sound)
+        for w in ws:
+            w.blockSignals(True)
+        self.sp_fade_in.setValue(s.fade_in)
+        self.sp_fade_out.setValue(s.fade_out)
+        self.chk_fade_picture.setChecked(s.fade_picture)
+        self.chk_fade_sound.setChecked(s.fade_sound)
+        for w in ws:
+            w.blockSignals(False)
+        self._fade_label()
+
+    def _fades_edited(self):
+        s = self.view.project.settings
+        s.fade_in, s.fade_out = self.sp_fade_in.value(), self.sp_fade_out.value()
+        s.fade_picture, s.fade_sound = self.chk_fade_picture.isChecked(), self.chk_fade_sound.isChecked()
+        self._fade_label()
+        self.view.update()
+        self.fades_changed.emit()
+
+    def _fade_label(self):
+        s = self.view.project.settings
+        on = (s.fade_in > 0 or s.fade_out > 0) and (s.fade_picture or s.fade_sound)
+        self.btn_fade.setText("◐ Fade" + (f" {s.fade_in:g}/{s.fade_out:g} s" if on else ""))
 
     def _on_scroll(self, v):
         if abs(v - self.view.scroll_x) >= 1:

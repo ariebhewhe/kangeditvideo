@@ -76,6 +76,17 @@ class Look:
     height: int
     decode_h: int
     color: bool = True           # False: show the picture as recorded (no log conversion, LUTs or grade)
+    fade_in: float = 0.0         # picture fade from black at the timeline start (seconds)
+    fade_out: float = 0.0        # and to black at its end
+    end: float = 0.0             # timeline length
+
+    def fade_gain(self, t: float) -> float:
+        g = 1.0
+        if self.fade_in > 0:
+            g = min(g, max(0.0, t / self.fade_in))
+        if self.fade_out > 0:
+            g = min(g, max(0.0, (self.end - t) / self.fade_out))
+        return g
 
 
 @dataclass
@@ -246,7 +257,7 @@ class PreviewEngine:
                 layers, mix = self._layer(shot, src_t, look, newer_waiting), None
             if not layers:
                 return
-            out = self._render(layers, mix, look, False)
+            out = self._render(layers, mix, look, False, t if shots else None)
         except Exception as e:  # noqa: BLE001
             self._on_still(Rendered(None, t, f"Cannot decode {shot.footage.name}: {e}", serial))
             return
@@ -275,7 +286,7 @@ class PreviewEngine:
         shot = play["shots"][i]
         look = play["look"]
         layers, mix = self._gather(play["shots"], i, t, look, None)
-        fut = self._pool.submit(self._render, layers, mix, look, True) if layers else None
+        fut = self._pool.submit(self._render, layers, mix, look, True, t) if layers else None
         with self._cv:
             if self._play is not play:
                 if fut is not None:
@@ -352,10 +363,14 @@ class PreviewEngine:
                 return layers, (kind, (t - (cut - half)) / (2 * half))
         return self._layer(shot, shot.src_in + min(max(0.0, t - shot.start), shot.dur), look, interrupt), None
 
-    def _render(self, layers: list, mix: Optional[tuple], look: Look, playing: bool) -> np.ndarray:
-        """Convert, grade and reframe decoded layers (on the render pool during playback)."""
+    def _render(self, layers: list, mix: Optional[tuple], look: Look, playing: bool,
+                t: Optional[float] = None) -> np.ndarray:
+        """Convert, grade and reframe decoded layers (on the render pool during playback). t: the timeline
+        time, for the fade in / out (None when showing a source frame)."""
         imgs = [self._finish(dec.rgb_of(frame), shot, look, playing) for dec, frame, shot in layers]
-        return blend(mix[0], imgs[0], imgs[1], mix[1]) if mix is not None else imgs[0]
+        out = blend(mix[0], imgs[0], imgs[1], mix[1]) if mix is not None else imgs[0]
+        gain = look.fade_gain(t) if t is not None else 1.0
+        return cv2.convertScaleAbs(out, alpha=gain) if gain < 1.0 else out
 
     def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
         fn = self._grader(shot, playing) if look.color else None

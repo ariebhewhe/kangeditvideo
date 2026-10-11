@@ -48,6 +48,8 @@ LANGUAGES = [
     ("tr", "Turkish"), ("vi", "Vietnamese"), ("th", "Thai"), ("ms", "Malay"), ("tl", "Tagalog"),
 ]
 
+LISTEN_TIMEOUT = 180.0   # seconds before listen() gives up on a part of a file
+
 _model_lock = threading.Lock()
 _model = None
 _model_name = None
@@ -81,9 +83,11 @@ def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = N
 
 
 def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
-                     progress=None, cancel: Optional[threading.Event] = None, offset: float = 0.0) -> tuple[list[dict], str]:
+                     progress=None, cancel: Optional[threading.Event] = None, offset: float = 0.0,
+                     quick: bool = False) -> tuple[list[dict], str]:
     """Words [{"s", "e", "w"}] (times + offset) and the detected language, decoded for accuracy:
-    beam search with temperature fallback, voice-activity filtering, and hallucination guards."""
+    beam search with temperature fallback, voice-activity filtering, and hallucination guards.
+    quick decodes greedily without fallback, enough to spot a phrase."""
     model = _get_model(model_name)
     segments, info = model.transcribe(
         audio,
@@ -91,9 +95,9 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
         word_timestamps=True,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
-        beam_size=5,
-        best_of=5,
-        temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        beam_size=1 if quick else 5,
+        best_of=1 if quick else 5,
+        temperature=0.0 if quick else (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
         compression_ratio_threshold=2.4,
         log_prob_threshold=-1.0,
         no_speech_threshold=0.6,
@@ -118,11 +122,33 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
 
 def listen(footage: Footage, start: float, duration: float, model_name: str = "small",
            language: str = "", cancel: Optional[threading.Event] = None) -> list[dict]:
-    """Quick transcript of part of a file (source times), e.g. to spot an opening or closing phrase."""
-    audio = _load_audio_16k(footage.path, start, duration)
-    if audio.size == 0:
-        return []
-    return transcribe_audio(audio, model_name, language, None, cancel, offset=start)[0]
+    """Quick transcript of part of a file (source times), e.g. to spot an opening or closing phrase.
+
+    Whisper runs in a helper thread so cancel takes effect at once even while it is inside native code
+    (model load or a long decode); after LISTEN_TIMEOUT it gives up and returns no words."""
+    out: dict = {}
+
+    def work():
+        try:
+            audio = _load_audio_16k(footage.path, start, duration)
+            out["words"] = transcribe_audio(audio, model_name, language, None, cancel, offset=start,
+                                            quick=True)[0] if audio.size else []
+        except BaseException as e:  # noqa: BLE001
+            out["error"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    waited = 0.0
+    while t.is_alive():
+        t.join(0.1)
+        waited += 0.1
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        if waited > LISTEN_TIMEOUT:
+            return []
+    if "error" in out:
+        raise out["error"]
+    return out.get("words", [])
 
 
 def transcribe(footage: Footage, model_name: str = "large-v3", language: str = "",

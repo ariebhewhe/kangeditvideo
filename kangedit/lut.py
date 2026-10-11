@@ -201,6 +201,7 @@ class OfficialLut:
     hint: str = ""
     exclude: str = ""             # regex: names a pattern matches that belong to another entry
     base: str = ""                # LUT-only profile: the built-in curve used until its LUT is imported
+    group: str = ""               # menu position (a built-in curve) when `base` is a hidden fallback curve
 
     @property
     def menu_label(self) -> str:
@@ -224,7 +225,7 @@ OFFICIAL_LUTS = [
                 (rf"{_DLOG}.*709.*vivid", rf"{_DLOG}.*vivid.*709"), _DJI_HINT, base="dlog"),
     OfficialLut("dlogm", "DJI", "D-Log M → Rec.709", "https://www.dji.com/lut",
                 (rf"{_DLOGM}.*709",), _DJI_HINT + " D-Log M has no published curve: without its LUT, KangEdit "
-                "approximates it with the D-Log curve.", base="dlog"),
+                "approximates it with a gentler D-Log-style curve.", base="dlogm_approx", group="dlog"),
     OfficialLut("dlog2", "DJI", "D-Log2 → Rec.709", "https://www.dji.com/lut",
                 (rf"{_DLOG2}.*709",), _DJI_HINT, r"vivid", base="dlog"),
     OfficialLut("dlog2_vivid", "DJI", "D-Log2 → Rec.709 Vivid", "https://www.dji.com/lut",

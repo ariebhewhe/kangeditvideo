@@ -139,6 +139,14 @@ def _dlog(x):
     return np.where(x <= 0.14, (x - 0.0929) / 6.025, (10.0 ** (3.89616 * x - 2.27752) - 0.0108) / 0.9892)
 
 
+def _dlogm_approx(x):
+    """DJI D-Log M has no published curve. It is a milder log than D-Log (more contrast and colour in the
+    signal), so decoding it as D-Log overshoots both; this gentler pure-log fit (mid grey near 42 %, ten
+    stops per 1.0) is used until the official LUT is imported."""
+    mid, per_stop, toe = 0.42, 0.10, 0.10
+    return np.where(x > toe, 0.18 * 2.0 ** ((x - mid) / per_stop), 0.18 * 2.0 ** ((toe - mid) / per_stop) * x / toe)
+
+
 def _applelog(x):  # IRE domain
     r0, rt, c, b, g, d = -0.05641088, 0.01, 47.28711236, 0.00964052, 0.08550479, 0.69336945
     pt = c * (rt - r0) ** 2
@@ -181,13 +189,19 @@ LOG_PROFILES: dict[str, LogProfile] = {
     "applelog": LogProfile("Apple Log / Rec.2020", _applelog, "ire", "rec2020"),
     "bmdfilm5": LogProfile("Blackmagic Film Gen5 / BMD WG", _bmdfilm5, "ire", "bmdwg5"),
     "hlg": LogProfile("HLG HDR (phones) / Rec.2020", _hlg, "ire", "rec2020"),
+    # Fallbacks for LUT-only profiles (lut.OFFICIAL_LUTS base), not offered in the menu themselves.
+    "dlogm_approx": LogProfile("DJI D-Log M (approximation)", _dlogm_approx, "cv", "rec2020"),
 }
+_HIDDEN_PROFILES = {"dlogm_approx"}
 
 # Built-in curves, each followed by the LUT-only profiles of the same family (DJI D-Log M, D-Log2...).
 LOG_CHOICES = [("none", "None (Rec.709 / standard)")]
 for _k, _p in LOG_PROFILES.items():
+    if _k in _HIDDEN_PROFILES:
+        continue
     LOG_CHOICES.append((_k, _p.label))
-    LOG_CHOICES += [(e.profile, e.menu_label) for e in lutlib.OFFICIAL_LUTS if e.base == _k]
+    LOG_CHOICES += [(e.profile, e.menu_label) for e in lutlib.OFFICIAL_LUTS
+                    if e.base == _k or (e.base in _HIDDEN_PROFILES and e.group == _k)]
 
 
 def is_lut_profile(log_profile: str) -> bool:
@@ -486,5 +500,5 @@ def auto_correct(frames: list[np.ndarray], log_profile: str, tonemap: str = "fil
     p5, p95 = np.percentile(disp, [5, 95])
     spread = float(p95 - p5)
     g.contrast = float(np.clip((0.62 - spread) * 120.0, -25.0, 35.0))
-    g.vibrance = 15.0 if log_profile in LOG_PROFILES else 5.0
+    g.vibrance = 15.0 if log_profile in LOG_PROFILES and log_profile not in _HIDDEN_PROFILES else 5.0
     return g

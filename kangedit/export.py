@@ -92,6 +92,21 @@ def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int) -
     return "amix"
 
 
+def _fade_audio(project: Project, graph: list[str], aout: str) -> str:
+    """Fade the final mix in / out at the timeline's ends (project settings). Returns the output label."""
+    dur = project.duration
+    fi, fo = project.settings.fades(dur, sound=True)
+    if fi <= 0 and fo <= 0:
+        return aout
+    fades = []
+    if fi > 0:
+        fades.append(f"afade=t=in:st=0:d={fi:.4f}")
+    if fo > 0:
+        fades.append(f"afade=t=out:st={max(0.0, dur - fo):.4f}:d={fo:.4f}")
+    graph.append(f"[{aout}]{','.join(fades)}[afaded]")
+    return "afaded"
+
+
 def _join(graph: list[str], plans: list[ClipPlan], fps: float, video: bool) -> None:
     """Join the per-clip streams [v{i}]/[a{i}] into [vcat]/[acat]: transitions overlap neighbours
     (xfade / acrossfade), cuts concatenate. Video and audio are joined separately because split
@@ -158,7 +173,7 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss)))
 
     _join(graph, plans, s.fps, video=True)
-    aout = _mix_sounds(project, inputs, graph, k)
+    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k))
     vout = "vcat"
     caps = build_captions(project, aspect=s.aspect) if s.captions != "none" else []
     cap_layout = caption_layout(project.settings.captions, tw, th, project.settings.video_format)
@@ -166,6 +181,11 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         write_ass(os.path.join(workdir, "captions.ass"), caps, project.settings.captions, tw, th, cap_layout)
         graph.append("[vcat]subtitles=captions.ass[vsub]")
         vout = "vsub"
+    fi, fo = project.settings.fades(project.duration)
+    if fi > 0 or fo > 0:   # after the captions, so they fade with the picture
+        fades = ([f"fade=t=in:st=0:d={fi:.4f}"] if fi > 0 else []) +                 ([f"fade=t=out:st={max(0.0, project.duration - fo):.4f}:d={fo:.4f}"] if fo > 0 else [])
+        graph.append(f"[{vout}]{','.join(fades)}[vfaded]")
+        vout = "vfaded"
     if s.captions in ("srt", "both") and caps:
         write_srt(os.path.splitext(s.output)[0] + ".srt", caps, project.settings.captions, cap_layout)
 
@@ -236,7 +256,7 @@ def render_audio(project: Project, use_proxies: bool, out_wav: str,
         k += n_in
         graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss)))
     _join(graph, plans, fps, video=False)
-    aout = _mix_sounds(project, inputs, graph, k)
+    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k))
     workdir = tempfile.mkdtemp(prefix="audio_", dir=str(cache_dir("tmp")))
     try:
         with open(os.path.join(workdir, "graph.txt"), "w", encoding="utf-8") as fh:
