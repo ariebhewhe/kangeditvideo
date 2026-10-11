@@ -1,0 +1,196 @@
+"""FFmpeg / FFprobe helpers: discovery, probing and running with progress."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import threading
+from collections import deque
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+class Cancelled(Exception):
+    pass
+
+
+class FFmpegError(RuntimeError):
+    pass
+
+
+def ffmpeg_bin() -> Optional[str]:
+    return shutil.which("ffmpeg")
+
+
+def ffprobe_bin() -> Optional[str]:
+    return shutil.which("ffprobe")
+
+
+def popen(args: list[str], **kw) -> subprocess.Popen:
+    return subprocess.Popen(args, creationflags=CREATE_NO_WINDOW, **kw)
+
+
+def run(args: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, cwd=cwd, creationflags=CREATE_NO_WINDOW)
+
+
+@dataclass
+class ProbeInfo:
+    duration: float
+    width: int           # display width (after rotation)
+    height: int          # display height (after rotation)
+    fps: float
+    has_audio: bool
+    codec: str
+    pix_fmt: str
+    bit_depth: int
+    color_space: str
+    color_range: str
+    color_transfer: str
+    color_primaries: str
+    rotation: int        # display-matrix rotation in degrees (counter-clockwise)
+    audio_channels: int
+    creation_time: str
+
+
+def _parse_rate(rate: str) -> float:
+    try:
+        if "/" in rate:
+            n, d = rate.split("/")
+            return float(n) / float(d) if float(d) else 0.0
+        return float(rate)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def probe(path: str) -> ProbeInfo:
+    exe = ffprobe_bin()
+    if not exe:
+        raise FFmpegError("ffprobe was not found on PATH")
+    res = run([exe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path])
+    if res.returncode != 0:
+        raise FFmpegError(res.stderr.decode("utf-8", "replace").strip() or "ffprobe failed")
+    data = json.loads(res.stdout.decode("utf-8", "replace"))
+    streams = data.get("streams", [])
+    v = next((s for s in streams if s.get("codec_type") == "video"
+              and not s.get("disposition", {}).get("attached_pic")), None)
+    if v is None:
+        raise FFmpegError("No video stream found")
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+
+    rotation = 0
+    for sd in v.get("side_data_list", []) or []:
+        if "rotation" in sd:
+            rotation = int(round(float(sd["rotation"])))
+    if not rotation and "rotate" in (v.get("tags") or {}):
+        rotation = -int(v["tags"]["rotate"])  # legacy tag is clockwise
+    rotation %= 360
+
+    w, h = int(v.get("width", 0)), int(v.get("height", 0))
+    if rotation in (90, 270):
+        w, h = h, w
+
+    duration = float(v.get("duration") or data.get("format", {}).get("duration") or 0.0)
+    fps = _parse_rate(v.get("avg_frame_rate", "0/0")) or _parse_rate(v.get("r_frame_rate", "0/0")) or 30.0
+    pix_fmt = v.get("pix_fmt", "")
+    bit_depth = int(v.get("bits_per_raw_sample") or 0)
+    if not bit_depth:
+        bit_depth = 10 if ("10" in pix_fmt) else 12 if "12" in pix_fmt else 8
+    tags = data.get("format", {}).get("tags", {}) or {}
+    return ProbeInfo(
+        duration=duration,
+        width=w,
+        height=h,
+        fps=fps,
+        has_audio=a is not None,
+        codec=v.get("codec_name", ""),
+        pix_fmt=pix_fmt,
+        bit_depth=bit_depth,
+        color_space=v.get("color_space", ""),
+        color_range=v.get("color_range", ""),
+        color_transfer=v.get("color_transfer", ""),
+        color_primaries=v.get("color_primaries", ""),
+        rotation=rotation,
+        audio_channels=int(a.get("channels", 0)) if a else 0,
+        creation_time=tags.get("creation_time", ""),
+    )
+
+
+def ffmpeg_matrix(color_space: str, height: int) -> str:
+    """Matrix name for the scale filter's in_color_matrix."""
+    cs = (color_space or "").lower()
+    if cs in ("bt709",):
+        return "bt709"
+    if cs.startswith("bt2020"):
+        return "bt2020"
+    if cs in ("smpte170m", "bt470bg", "bt601"):
+        return "bt601"
+    return "bt709" if height >= 576 else "bt601"
+
+
+ProgressCb = Callable[[float, str], None]
+
+
+def run_ffmpeg(
+    args: list[str],
+    duration: float,
+    progress: Optional[ProgressCb] = None,
+    cancel: Optional[threading.Event] = None,
+    cwd: Optional[str] = None,
+    label: str = "",
+) -> None:
+    """Run ffmpeg with -progress parsing. `args` excludes the ffmpeg executable."""
+    exe = ffmpeg_bin()
+    if not exe:
+        raise FFmpegError("ffmpeg was not found on PATH")
+    cmd = [exe, "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"] + args
+    proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    err_tail: deque[str] = deque(maxlen=30)
+
+    def _drain():
+        for line in iter(proc.stderr.readline, b""):
+            err_tail.append(line.decode("utf-8", "replace").rstrip())
+
+    t = threading.Thread(target=_drain, daemon=True)
+    t.start()
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            if cancel is not None and cancel.is_set():
+                proc.kill()
+                raise Cancelled()
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                if progress and duration > 0:
+                    progress(min(1.0, us / 1e6 / duration), label)
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        t.join(timeout=2)
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    if proc.returncode != 0:
+        tail = "\n".join(l for l in err_tail if l)
+        raise FFmpegError(f"ffmpeg failed ({proc.returncode}):\n{tail}")
+
+
+def available_encoders() -> set[str]:
+    exe = ffmpeg_bin()
+    if not exe:
+        return set()
+    res = run([exe, "-hide_banner", "-encoders"])
+    out = res.stdout.decode("utf-8", "replace")
+    names = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS":
+            names.add(parts[1])
+    return names
