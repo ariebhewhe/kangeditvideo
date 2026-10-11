@@ -2,7 +2,7 @@
 
 KangEdit is a desktop video editor for Windows, macOS and Linux. It analyzes your footage, picks the best moments and builds a short-form or long-form edit for you. You then fine-tune the edit, color, captions and sound effects, and export.
 
-Everything runs on your own computer. Analysis, speech recognition and rendering work offline. The only network use is the one-time FFmpeg and Whisper model downloads and the optional sound-effect search.
+Everything runs on your own computer. Analysis, speech recognition and rendering work offline. The only network use is the one-time FFmpeg and Whisper model downloads, the optional sound-effect search and the optional background-music download.
 
 ---
 
@@ -42,7 +42,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 |---|---|
 | **Smooth preview** | Playback is a pipeline: one thread only decodes, while a pool of threads converts, grades and reframes, so 4K H.265 keeps up with the frame rate. The next clips are prepared while one plays, and that preparation steps aside whenever playback needs the CPU. Scrubbing never freezes the window. |
 | **Color on / off in the viewer** | The viewer menu below the picture (or *View → Color in viewer*, **Ctrl+Shift+B**) turns the log conversion, LUTs and grading off, always or only while playing, for lighter playback. Export always includes them. |
-| **Timeline** | Drag to reorder, drag edges to trim, **Alt/Shift+drag** to slip. **Ctrl+click** / **Shift+click** / **Ctrl+A** select several clips. Delete, duplicate, auto color, transitions and *Replace with another best moment* work on the whole selection. |
+| **Timeline** | Drag to reorder, drag edges to trim, **Alt/Shift+drag** to slip. **Ctrl+click** / **Shift+click** / **Ctrl+A** select several clips. Delete, duplicate, auto color, transitions and *Other moment* work on the whole selection. **↶ Undo** / **↷ Redo** buttons sit at the left of the timeline toolbar. |
 | **Transitions & split edits** | Per clip, in the Inspector or the right-click menu. Transitions are centered on the cut and use the footage around each clip, so the timeline length and captions don't move. |
 | **Media list views** | The **☰** / **▦** buttons above the Media list switch between the detail view (duration, format, camera, log profile, status) and a thumbnail grid. In the grid, move the mouse across a thumbnail to scrub through the clip; Ctrl+wheel resizes the thumbnails. |
 | **Recent projects** | *File → Open recent* lists the last 10 projects you opened or saved. |
@@ -167,7 +167,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Del | Delete the selected clips (or the selected sound) |
 | Ctrl+D | Duplicate clip |
 | Ctrl+A | Select all clips |
-| R | Replace the clip with another best moment |
+| R | Other moment: swap the clip for the best moment close by (its length follows the new moment) |
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Shift+Z | Fit the timeline |
@@ -202,6 +202,14 @@ The **Sounds** tab searches [MyInstants](https://www.myinstants.com), a large co
 Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*).
 
 > MyInstants sounds are uploaded by its users and may be copyrighted. Make sure you're allowed to use a sound before you publish a video with it.
+
+### Background music (NCS)
+
+At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume. **Open on YouTube** lets you listen first.
+
+NCS music is free to use in videos as long as the description credits it: the credit is copied to the clipboard when you add a track. Music from other YouTube channels needs its owner's permission.
+
+> YouTube only serves media to apps that solve its JavaScript challenge. KangEdit uses [Deno](https://deno.com), Node.js or Bun when one is installed; without one, some downloads may fail.
 
 ---
 

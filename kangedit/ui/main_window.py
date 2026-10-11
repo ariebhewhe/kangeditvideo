@@ -22,7 +22,7 @@ from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan, select
-from .. import reframe, sfx
+from .. import music, reframe, sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         self.last_auto = self._load_auto_settings()
         self._auto_ids: list[str] = []     # footage the last auto edit used (for regenerate)
         self._tried_hooks: list[TimelineClip] = []   # hooks "New hook" already showed (not offered again)
-        self._tried_alts: dict[str, list[TimelineClip]] = {}   # clip id: moments Replace / Auto slip showed
+        self._tried_alts: dict[str, list[TimelineClip]] = {}   # clip id: moments Other moment showed
         self._auto_history: list[list[TimelineClip]] = []      # recent auto edits (new ones pick other moments)
         self._progress_text = ""
         self._last_ckpt: tuple = ("", 0.0)
@@ -189,11 +189,8 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Select all clips", self.tl.select_all, "Ctrl+A"))
         m.addAction(self._act("Delete selected clips / sound", self._delete_selected, "Del"))
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
-        m.addAction(self._act("Replace with another best moment",
-                              lambda: self.clip_action("alt_moment", self.tl.selected), "R"))
-        m.addAction(self._act("Auto slip to the best moment nearby",
-                              lambda: self.clip_action("auto_slip", self.tl.selected), "J",
-                              "Slide which moment the clip shows to the best one close by (keeps its length)"))
+        m.addAction(self._act("Other moment", lambda: self.clip_action("alt_moment", self.tl.selected), "R",
+                              "Swap the clip for the best moment close by; its length follows the new moment"))
         m.addSeparator()
         m.addAction(self._act("Add title at playhead", lambda: self.add_text("title"), "T",
                               "Add an animated title where the playhead is (more templates in the Text tab)"))
@@ -435,6 +432,7 @@ class MainWindow(QMainWindow):
         self.tl.sounds_changed.connect(self._sounds_changed)
         self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
+        self.sfx_panel.add_music.connect(self.add_music)
         self.tl.context_action.connect(self._timeline_action)
         self.tl.text_selected.connect(self._on_text_selected)
         self.tl.texts_changed.connect(lambda: self._texts_changed(panel_fields=True))
@@ -455,7 +453,8 @@ class MainWindow(QMainWindow):
         self.timeline.fades_changed.connect(self._fades_changed)
         self.timeline.btn_delete.clicked.connect(lambda: self.clip_action("delete", self.tl.selected))
         self.timeline.btn_hook.clicked.connect(self.new_hook)
-        self.timeline.btn_auto_slip.clicked.connect(lambda: self.clip_action("auto_slip", self.tl.selected))
+        self.timeline.btn_undo.clicked.connect(self.undo)
+        self.timeline.btn_redo.clicked.connect(self.redo)
         self.timeline.btn_alt.clicked.connect(lambda: self.clip_action("alt_moment", self.tl.selected))
 
         self.bin.import_requested.connect(self.import_dialog)
@@ -542,6 +541,8 @@ class MainWindow(QMainWindow):
     def _update_title(self):
         name = os.path.basename(self.project.path) if self.project.path else "Untitled"
         self.setWindowTitle(f"{name}{' *' if self.project.dirty else ''} — {APP_NAME}")
+        self.timeline.btn_undo.setEnabled(self.project.can_undo)
+        self.timeline.btn_redo.setEnabled(self.project.can_redo)
         self._update_flow()
 
     def _update_flow(self):
@@ -1133,16 +1134,22 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"New hook: {what}")
 
     def _best_for(self, fid: str, duration: Optional[float] = None, existing=None,
-                  relaxed: bool = False) -> Optional[TimelineClip]:
+                  relaxed: bool = False, free_length: bool = False) -> Optional[TimelineClip]:
         """The best moment of a footage that avoids `existing` clips. `relaxed` only rules out overlaps
-        (no gap or look-alike rule), for footage the edit already uses closely."""
+        (no gap or look-alike rule), for footage the edit already uses closely. `free_length`: the moment
+        takes its own best length (within the edit's clip lengths, stretched to include `duration`)
+        instead of exactly `duration`."""
         a = self.analyses.get(fid)
         if a is None:
             return None
         s = copy.copy(self.last_auto)
         d = duration or s.clip_max
-        s.target_duration = d
-        s.clip_min = s.clip_max = d         # same length: the rest of the timeline stays where it is
+        if free_length:
+            s.clip_min, s.clip_max = min(s.clip_min, d), max(s.clip_max, d)
+            s.target_duration = s.clip_max
+        else:
+            s.target_duration = d
+            s.clip_min = s.clip_max = d     # same length: the rest of the timeline stays where it is
         s.use_every_footage = True
         s.max_uses = 0
         if relaxed:
@@ -1154,10 +1161,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _slip_window(x: TimelineClip) -> float:
+        """How far either side of where the clip first was Other moment looks, in seconds."""
         return max(6.0, 2.0 * x.duration)
 
     def _outside_window(self, x: TimelineClip) -> list[TimelineClip]:
-        """Stand-in clips covering the footage outside the auto-slip window around clip x."""
+        """Stand-in clips covering the footage outside the Other moment window around clip x."""
         w = self._slip_window(x)
         dur = self.project.footage[x.footage_id].duration
         lo, hi = max(0.0, x.src_in - w), min(dur, x.src_out + w)
@@ -1170,24 +1178,28 @@ class MainWindow(QMainWindow):
 
     def _slip_moment(self, x: TimelineClip, others: list[TimelineClip],
                      tried: list[TimelineClip]) -> Optional[TimelineClip]:
-        """Auto slip: the best moment of x's length near where the clip first was (tried[0]). The first
-        press may just nudge it; later presses step to the next best nearby moments."""
+        """The best moment near where the clip first was (tried[0]), at that moment's own best length. The
+        first press may just nudge it; later presses step to the next best nearby moments."""
         home = tried[0]
         others = [c for c in others if not _same_moment(c, x)] + self._outside_window(home)
-        best = self._best_for(x.footage_id, x.duration, existing=others, relaxed=True)
-        if best is not None and abs(best.src_in - x.src_in) >= 0.2 and not any(
-                abs(best.src_in - t.src_in) < 0.2 for t in tried):
-            return best
-        alt = self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True)
+
+        def best(avoid: list[TimelineClip]) -> Optional[TimelineClip]:
+            return self._best_for(x.footage_id, home.duration, existing=avoid, relaxed=True, free_length=True)
+
+        b = best(others)
+        if b is not None and abs(b.src_in - x.src_in) >= 0.2 and not any(
+                abs(b.src_in - t.src_in) < 0.2 for t in tried):
+            return b
+        alt = best(others + tried)
         if alt is None and len(tried) > 1:
             del tried[1:]       # every nearby moment was shown: start the round again
-            alt = self._best_for(x.footage_id, x.duration, existing=others + [x], relaxed=True)
+            alt = best(others + [x])
         return alt
 
-    def _replace_moments(self, targets: list[TimelineClip], nearby: bool = False):
-        """Swap each clip for a different moment of its footage. Pressing again keeps offering new moments;
-        once every moment was shown the round starts again. `nearby`: an automatic slip, the best moment
-        within a few seconds of the current one."""
+    def _replace_moments(self, targets: list[TimelineClip]):
+        """Other moment: swap each clip for the best moment close by in its footage; the clip takes that
+        moment's length (the timeline ripples). Pressing again keeps offering new moments; once every
+        nearby moment was shown the round starts again."""
         if not targets:
             self.lbl_status.setText("Select a clip on the timeline to replace it with another moment.")
             return
@@ -1198,26 +1210,16 @@ class MainWindow(QMainWindow):
             return
         changes = []
         for x in targets:
-            tried = self._tried_alts.setdefault(("slip:" if nearby else "") + x.id, [])
-            seen = (lambda t: abs(t.src_in - x.src_in) < 0.05) if nearby else (lambda t: _same_moment(x, t))
-            if not any(seen(t) for t in tried):
+            tried = self._tried_alts.setdefault(x.id, [])
+            if not any(abs(t.src_in - x.src_in) < 0.05 for t in tried):
                 tried.append(TimelineClip.from_dict(x.to_dict()))
             others = [c for c in self.project.clips if c.id != x.id and c.id not in {t.id for t, _ in changes}]
             others += [alt for _, alt in changes]
-            if nearby:
-                alt = self._slip_moment(x, others, tried)
-            else:
-                alt = (self._best_for(x.footage_id, x.duration, existing=others + tried)
-                       or self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True))
-                if alt is None and len(tried) > 1:
-                    # Every moment has been shown: start the round again (still never the current one).
-                    tried[:] = [TimelineClip.from_dict(x.to_dict())]
-                    alt = self._best_for(x.footage_id, x.duration, existing=others + tried, relaxed=True)
+            alt = self._slip_moment(x, others, tried)
             if alt is not None:
                 changes.append((x, alt))
         if not changes:
-            self.lbl_status.setText("No better moment close by." if nearby
-                                    else "No other moment of this length left in this footage.")
+            self.lbl_status.setText("No other moment close by.")
             return
         self.project_checkpoint()
         for x, alt in changes:
@@ -1226,11 +1228,11 @@ class MainWindow(QMainWindow):
         if len(changes) == 1:
             x = changes[0][0]
             self.viewer.seek(self.project.clip_starts()[self.project.index_of(x.id)] + 0.01)
-            verb, key = ("Slipped to", "J") if nearby else ("Replaced with", "R")
-            self.lbl_status.setText(f"{verb} the moment at {fmt_time(x.src_in, frames=False)} "
-                                    f"of {self.project.footage[x.footage_id].name} ({key} again for another)")
+            self.lbl_status.setText(f"Other moment: {fmt_time(x.src_in, frames=False)} of "
+                                    f"{self.project.footage[x.footage_id].name}, {x.duration:.1f} s "
+                                    "(R again for another)")
         else:
-            self.lbl_status.setText(f"{'Slipped' if nearby else 'Replaced'} {len(changes)} clips")
+            self.lbl_status.setText(f"Other moment for {len(changes)} clips")
 
     # ================================================================== bin actions
     def bin_action(self, action: str, ids: list[str]):
@@ -1736,7 +1738,7 @@ class MainWindow(QMainWindow):
             return
         i = self.project.index_of(clip_id) if clip_id else -1
         if i < 0:
-            if action in ("alt_moment", "auto_slip"):
+            if action == "alt_moment":
                 self._replace_moments([])
             return
         c = self.project.clips[i]
@@ -1763,8 +1765,6 @@ class MainWindow(QMainWindow):
             self.split_at_playhead()
         elif action == "alt_moment":
             self._replace_moments(targets)
-        elif action == "auto_slip":
-            self._replace_moments(targets, nearby=True)
         elif action == "face_zoom":
             self._face_zoom(targets)
         elif action == "auto_color":
@@ -1819,6 +1819,26 @@ class MainWindow(QMainWindow):
         self._sounds_changed()
         self.lbl_status.setText(f"Added sound “{added[0].name}” at {fmt_time(added[0].start, frames=False)}"
                                 if len(added) == 1 else f"Added {len(added)} sounds")
+
+    MUSIC_VOLUME = 0.5
+
+    def add_music(self, path: str, title: str, url: str = ""):
+        """Lay a music track under the whole edit from its start (cut to the edit's length), quieter than the
+        clips' own sound, and copy the NCS credit for the video's description to the clipboard."""
+        dur = sfx.duration(path)
+        if dur <= 0:
+            QMessageBox.warning(self, APP_NAME, f"“{title}” is not a readable audio file.")
+            return
+        end = min(dur, self.project.duration) if self.project.duration > 0 else dur
+        x = SoundClip(path, 0.0, 0.0, round(end, 3), self.MUSIC_VOLUME, title)
+        self.project_checkpoint()
+        self.project.sounds.append(x)
+        self.tl.selected_sound = x.id
+        self.tl.refresh()
+        self._sounds_changed()
+        QApplication.clipboard().setText(music.credit(title, url))
+        self.lbl_status.setText(f"Added music “{title}” under the edit ({fmt_time(end, frames=False)}). "
+                                "The NCS credit is on the clipboard: paste it into the video's description.")
 
     def _sounds_changed(self):
         self.project.dirty = True
@@ -2031,9 +2051,9 @@ class MainWindow(QMainWindow):
                      lambda: self.grp_auto),
             TourStep("Swap moments",
                      "<b>🎣 Hook</b> gives the edit a new opening hook (a quick 2-3 clip teaser in long-form).<br>"
-                     "<b>🎯 Auto slip</b> (J) slides the selected clip to the best moment close by, keeping its "
-                     "length.<br><b>🔀 Other moment</b> (R) swaps it for another moment anywhere in its footage. "
-                     "Press again for the next one; <b>Undo</b> brings the previous back.",
+                     "<b>🔀 Other moment</b> (R) swaps the selected clip for the best moment close by in its "
+                     "footage; the clip takes that moment's length. Press again for the next one; "
+                     "<b>↶ Undo</b> brings the previous back.",
                      lambda: self._moment_buttons()),
             TourStep("Preview",
                      "<b>Space</b> plays and pauses. Titles can be <b>dragged here</b> to place them.<br>"
@@ -2082,9 +2102,9 @@ class MainWindow(QMainWindow):
         self._tour.start(start)
 
     def _moment_buttons(self):
-        """The tour's target: the Hook / Auto slip / Other moment buttons above the timeline."""
+        """The tour's target: the Hook / Other moment buttons above the timeline."""
         tp = self.timeline
-        r = tp.btn_hook.geometry().united(tp.btn_auto_slip.geometry()).united(tp.btn_alt.geometry())
+        r = tp.btn_hook.geometry().united(tp.btn_alt.geometry())
         return tp, r.adjusted(-4, -2, 4, 2)
 
     def _delete_selected(self):
@@ -2437,8 +2457,7 @@ class MainWindow(QMainWindow):
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
-            "Ctrl+A — select all clips\nR — replace clip with another best moment\n"
-            "J — auto slip the clip to the best moment nearby\nH — new hook\n"
+            "Ctrl+A — select all clips\nR — other moment for the clip (best one nearby)\nH — new hook\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline\n"

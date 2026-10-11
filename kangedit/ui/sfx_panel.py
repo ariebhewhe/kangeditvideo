@@ -1,4 +1,4 @@
-"""Sounds tab: search MyInstants, preview, and add sound effects to the SFX layer (or from the library)."""
+"""Sounds tab: background music (NCS suggestions or a YouTube link), MyInstants sound effects and the library."""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import os
 import threading
 
 from PySide6.QtCore import QMimeData, QObject, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
-from .. import sfx
+from .. import music, sfx
 from ..config import open_path, sfx_dir
 
 
@@ -18,6 +19,8 @@ class _Bridge(QObject):
     """Results from worker threads, delivered on the UI thread."""
     searched = Signal(object, str, bool)     # sounds, error, appended (next page)
     downloaded = Signal(str, str, str)       # path, name, error
+    music_progress = Signal(float, str)
+    music_done = Signal(object, str)         # music.Downloaded or None, error
 
 
 class _LibraryList(QListWidget):
@@ -30,13 +33,17 @@ class _LibraryList(QListWidget):
 
 
 class SoundPanel(QWidget):
-    add_sound = Signal(str, str)   # library path, name -> add at the playhead
+    add_sound = Signal(str, str)          # library path, name -> add at the playhead
+    add_music = Signal(str, str, str)     # library path, title, video page -> background music for the edit
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._bridge = _Bridge()
         self._bridge.searched.connect(self._on_searched)
         self._bridge.downloaded.connect(self._on_downloaded)
+        self._bridge.music_progress.connect(lambda p, msg: self.lbl_music.setText(f"{msg} {p * 100:.0f}%"))
+        self._bridge.music_done.connect(self._on_music)
+        self._music_busy = False
         self._query, self._page = "", 1
         self._audio = QAudioOutput(self)
         self._player = QMediaPlayer(self)
@@ -44,6 +51,8 @@ class SoundPanel(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
+        lay.addWidget(self._music_box(), 2)
+        lay.addSpacing(6)
         lay.addWidget(QLabel("<b>Find sound effects</b> (MyInstants)", wordWrap=True))
         row = QHBoxLayout()
         self.ed_search = QLineEdit(placeholderText="e.g. vine boom, whoosh, applause, ding…")
@@ -93,6 +102,110 @@ class SoundPanel(QWidget):
         note.setStyleSheet("color: #6f737c; font-size: 11px;")
         lay.addWidget(note)
         self.refresh_library()
+
+    # ------------------------------------------------------------------ music
+    def _music_box(self) -> QGroupBox:
+        box = QGroupBox("Background music (NCS)")
+        v = QVBoxLayout(box)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("For a"))
+        self.cb_mood = QComboBox()
+        self.cb_mood.addItems(list(music.SUGGESTIONS))
+        self.cb_mood.setToolTip("Suggested NoCopyrightSounds tracks for this kind of video")
+        self.cb_mood.currentTextChanged.connect(self._fill_suggestions)
+        row.addWidget(self.cb_mood, 1)
+        v.addLayout(row)
+        self.suggestions = QListWidget()
+        self.suggestions.currentItemChanged.connect(
+            lambda it, _prev: it is not None and self.ed_link.setText(""))
+        self.suggestions.itemDoubleClicked.connect(lambda _it: self._get_music())
+        v.addWidget(self.suggestions, 1)
+        self.ed_link = QLineEdit(placeholderText="…or paste a YouTube link")
+        self.ed_link.setClearButtonEnabled(True)
+        self.ed_link.returnPressed.connect(self._get_music)
+        v.addWidget(self.ed_link)
+        row = QHBoxLayout()
+        self.b_music = QPushButton("♪ Add to timeline")
+        self.b_music.setObjectName("primary")
+        self.b_music.setToolTip("Download the track, extract its sound and lay it under the whole edit "
+                                "(at 50% volume: right-click it on the timeline to change)")
+        self.b_music.clicked.connect(self._get_music)
+        b_yt = QPushButton("Open on YouTube")
+        b_yt.setToolTip("Listen to the track first")
+        b_yt.clicked.connect(self._open_music)
+        row.addWidget(self.b_music, 1)
+        row.addWidget(b_yt)
+        v.addLayout(row)
+        self.lbl_music = QLabel("")
+        self.lbl_music.setStyleSheet("color: #8b909a;")
+        self.lbl_music.setWordWrap(True)
+        v.addWidget(self.lbl_music)
+        note = QLabel("NCS music is free to use when the video's description credits it: the credit is copied "
+                      "to the clipboard when you add a track. Other YouTube music needs its owner's permission.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #6f737c; font-size: 11px;")
+        v.addWidget(note)
+        self._fill_suggestions(self.cb_mood.currentText())
+        return box
+
+    def _fill_suggestions(self, mood: str):
+        self.suggestions.clear()
+        for t in music.SUGGESTIONS.get(mood, []):
+            it = QListWidgetItem(t.name)
+            it.setData(Qt.UserRole, t)
+            self.suggestions.addItem(it)
+
+    def _music_source(self):
+        """The pasted link, else the selected suggestion (a music.Track), else None."""
+        link = self.ed_link.text().strip()
+        if link:
+            return link
+        it = self.suggestions.currentItem()
+        return it.data(Qt.UserRole) if it is not None else None
+
+    def _open_music(self):
+        src = self._music_source()
+        if isinstance(src, music.Track):
+            QDesktopServices.openUrl(QUrl(music.search_url(src)))
+        elif src:
+            QDesktopServices.openUrl(QUrl(src if "://" in src else "https://" + src))
+
+    def _get_music(self):
+        if self._music_busy:
+            return
+        src = self._music_source()
+        if not src:
+            self.lbl_music.setText("Pick a suggested track or paste a YouTube link.")
+            return
+        if isinstance(src, str) and not music.is_youtube_link(src):
+            self.lbl_music.setText("That is not a YouTube link.")
+            return
+        if not music.available():
+            self.lbl_music.setText("Music download needs yt-dlp: run install.py again (or pip install yt-dlp).")
+            return
+        self._music_busy = True
+        self.b_music.setEnabled(False)
+        name = src.name if isinstance(src, music.Track) else src
+        self.lbl_music.setText(f"Looking up “{name}”…")
+
+        def work():
+            try:
+                self._bridge.music_done.emit(music.download(src, self._bridge.music_progress.emit), "")
+            except Exception as e:  # noqa: BLE001 — offline, video unavailable, YouTube changed...
+                msg = str(e).replace("ERROR: ", "")
+                self._bridge.music_done.emit(None, msg.splitlines()[0][:300] if msg else type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_music(self, got, error: str):
+        self._music_busy = False
+        self.b_music.setEnabled(True)
+        if got is None:
+            self.lbl_music.setText(f"Couldn't get the music: {error}")
+            return
+        self.lbl_music.setText(f"Added “{got.title}”")
+        self.refresh_library()
+        self.add_music.emit(got.path, got.title, got.url)
 
     # ------------------------------------------------------------------ online
     def search(self, more: bool = False):

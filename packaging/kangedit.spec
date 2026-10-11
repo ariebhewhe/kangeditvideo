@@ -12,8 +12,10 @@ with open(os.path.join(ROOT, "kangedit", "__init__.py"), encoding="utf-8") as fh
     VERSION = re.search(r'__version__ = "([^"]+)"', fh.read()).group(1)
 
 datas = collect_data_files("faster_whisper")           # Silero VAD model used by transcription
+datas += collect_data_files("yt_dlp_ejs")               # YouTube challenge solver scripts (music download)
 binaries = collect_dynamic_libs("ctranslate2")          # Whisper inference runtime
 hiddenimports = collect_submodules("kangedit")          # UI modules are imported lazily
+hiddenimports += collect_submodules("yt_dlp") + collect_submodules("yt_dlp_ejs")   # extractors load lazily
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],

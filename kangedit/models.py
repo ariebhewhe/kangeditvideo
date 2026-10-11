@@ -323,6 +323,14 @@ class Project:
         self._redo.clear()
         self.dirty = True
 
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
     def undo(self) -> bool:
         if not self._undo:
             return False

@@ -1,4 +1,4 @@
-"""Fade toggles, font list, replace / auto slip, new auto edits, silence, sharpness / halation, full screen."""
+"""Fade toggles, font list, other moment, undo / redo, new auto edits, silence, sharpness / halation, full screen."""
 
 import numpy as np
 import pytest
@@ -52,28 +52,48 @@ def test_font_list_is_a_dropdown_that_keeps_a_missing_font(qapp):
     assert cb.currentText() == "No Such Font 123"
 
 
-def test_replace_gives_a_new_moment_each_time(window):
-    clip = _project_with_clip(window)
+def test_other_moment_gives_a_new_nearby_moment_each_time(window):
+    clip = _project_with_clip(window, start=12.0)
+    home = window._slip_window(clip)
     seen = {round(clip.src_in, 2)}
-    for _ in range(3):
+    for k in range(4):
+        before = clip.src_in
         window.clip_action("alt_moment", clip.id)
-        assert round(clip.src_in, 2) not in seen
+        assert abs(clip.src_in - before) >= 0.2           # never the moment it already shows
+        if k < 2:
+            assert round(clip.src_in, 2) not in seen      # new moments until the nearby ones run out
         seen.add(round(clip.src_in, 2))
-        assert abs(clip.duration - 2.0) < 1e-6
+        assert 12.0 - home - 1e-6 <= clip.src_in <= 14.0 + home
 
 
-def test_replace_without_selection_explains(window):
+def test_other_moment_length_follows_the_moment(window):
+    window.last_auto.clip_min, window.last_auto.clip_max = 1.0, 4.0
+    clip = _project_with_clip(window, start=12.0)
+    for _ in range(4):
+        window.clip_action("alt_moment", clip.id)
+        assert 1.0 - 1e-6 <= clip.duration <= 4.0 + 1e-6
+        assert window.project.duration == pytest.approx(clip.duration)
+
+
+def test_other_moment_without_selection_explains(window):
     window.tl.selected = ""
     window.clip_action("alt_moment", "")
     assert "Select a clip" in window.lbl_status.text()
 
 
-def test_auto_slip_stays_near_the_clip(window):
+def test_undo_redo_buttons(window):
     clip = _project_with_clip(window, start=12.0)
-    for _ in range(3):
-        window.clip_action("auto_slip", clip.id)
-        assert abs(clip.duration - 2.0) < 1e-6
-        assert 12.0 - window._slip_window(clip) - 1e-6 <= clip.src_in <= 14.0 + window._slip_window(clip)
+    tp = window.timeline
+    window._update_title()
+    assert not tp.btn_undo.isEnabled() and not tp.btn_redo.isEnabled()
+    before = clip.src_in
+    window.clip_action("alt_moment", clip.id)
+    assert tp.btn_undo.isEnabled() and not tp.btn_redo.isEnabled()
+    tp.btn_undo.click()
+    assert window.project.clips[0].src_in == before
+    assert tp.btn_redo.isEnabled()
+    tp.btn_redo.click()
+    assert window.project.clips[0].src_in != before
 
 
 def test_new_auto_edit_prefers_other_moments():

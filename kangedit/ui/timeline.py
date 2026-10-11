@@ -997,8 +997,7 @@ class TimelineView(QWidget):
                   ("duplicate", f"Duplicate{many}"), ("auto_color", f"Auto color{many}"),
                   ("reset_color", f"Reset color{many}"),
                   ("copy_grade", "Copy this clip's grade to the selected clips" if n > 1 else "Copy grade to all clips"),
-                  ("alt_moment", f"Replace{many} with another best moment"),
-                  ("auto_slip", f"Auto slip{many} to the best moment nearby"),
+                  ("alt_moment", f"Other moment{many}	R"),
                   ("face_zoom", f"Zoom{many} to face"),
                   (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
@@ -1040,6 +1039,12 @@ class TimelinePanel(QWidget):
         self.scroll.valueChanged.connect(self._on_scroll)
         self.view.view_changed.connect(self._sync_scroll)
 
+        self.btn_undo = QToolButton(text="↶ Undo")
+        self.btn_undo.setToolTip("Undo the last change (Ctrl+Z)")
+        self.btn_redo = QToolButton(text="↷ Redo")
+        self.btn_redo.setToolTip("Redo the change you undid (Ctrl+Shift+Z or Ctrl+Y)")
+        for b in (self.btn_undo, self.btn_redo):
+            b.setEnabled(False)
         self.btn_move = QToolButton(text="↔ Move", checkable=True, checked=True)
         self.btn_slip = QToolButton(text="⇋ Slip", checkable=True)
         self.btn_move.setToolTip("Drag clips to reorder them. Drag clip edges to trim.")
@@ -1059,11 +1064,9 @@ class TimelinePanel(QWidget):
         self.btn_hook = QToolButton(text="🎣 Hook")
         self.btn_hook.setToolTip("Replace the first clip (the hook) with another strong moment not used in the "
                                  "edit (H). Click again for the next one; Undo brings the previous back.")
-        self.btn_auto_slip = QToolButton(text="🎯 Auto slip")
-        self.btn_auto_slip.setToolTip("Slip the selected clip to the best moment close by in its footage, keeping "
-                                      "its length and place (J). Click again for the next best nearby.")
         self.btn_alt = QToolButton(text="🔀 Other moment")
-        self.btn_alt.setToolTip("Replace the selected clip with another best moment anywhere in its footage (R)")
+        self.btn_alt.setToolTip("Swap the selected clip for the best moment close by in its footage (R). Its length "
+                                "follows the new moment. Click again for the next one; Undo brings the previous back.")
         self.btn_fit = QToolButton(text="Fit")
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(2, 400)
@@ -1076,12 +1079,17 @@ class TimelinePanel(QWidget):
 
         top = QHBoxLayout()
         top.setContentsMargins(4, 2, 4, 2)
+        top.addWidget(self.btn_undo)
+        top.addWidget(self.btn_redo)
+        sep = QLabel("|")
+        sep.setStyleSheet("color: #45484f;")
+        top.addWidget(sep)
         for w in (self.btn_move, self.btn_slip, self.btn_split, self.btn_delete, self.btn_fade):
             top.addWidget(w)
         sep = QLabel("|")
         sep.setStyleSheet("color: #45484f;")
         top.addWidget(sep)
-        for w in (self.btn_hook, self.btn_auto_slip, self.btn_alt):
+        for w in (self.btn_hook, self.btn_alt):
             top.addWidget(w)
         top.addSpacing(12)
         top.addWidget(self.lbl, 1)
