@@ -122,6 +122,22 @@ def suggest_duration(video_format: str, total: float) -> Optional[float]:
     return None
 
 
+def natural_length(a: Analysis, sc: np.ndarray, dur: float, start: float, lo: float, hi: float,
+                   limit: Optional[float] = None) -> float:
+    """How long the moment starting at `start` lasts: while the footage stays better than its median score,
+    ending at the next scene cut, the footage's end or `limit` (source time), at least `lo` and at most `hi`."""
+    t = a.times
+    k = int(np.clip(np.searchsorted(t, start), 0, len(t) - 1))
+    thr = float(np.median(sc)) if sc.size else 0.0
+    j = k
+    while j < len(sc) and t[j] - start < hi and (t[j] - start < lo or sc[j] >= thr):
+        j += 1
+    end = float(t[j]) if j < len(t) else dur
+    cuts = [c for c in np.asarray(a.cuts, dtype=float) if c > start + 0.05]
+    end = min(end, start + hi, dur, min(cuts, default=dur), dur if limit is None else limit)
+    return round(max(0.0, end - start), 3)
+
+
 def _loud(a: Optional[Analysis], t0: float, t1: float) -> bool:
     """Speech / sound present in [t0, t1] (source time), relative to the footage's own level."""
     if a is None or a.wave.size < 2:

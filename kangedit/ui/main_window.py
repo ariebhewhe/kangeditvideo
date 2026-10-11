@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, 
 from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
-from ..autoedit import AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan, select
+from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
+                        natural_length, score_samples, select)
 from .. import music, reframe, sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
@@ -1189,12 +1190,26 @@ class MainWindow(QMainWindow):
         b = best(others)
         if b is not None and abs(b.src_in - x.src_in) >= 0.2 and not any(
                 abs(b.src_in - t.src_in) < 0.2 for t in tried):
-            return b
+            return self._fit_length(b, home.duration, others)
         alt = best(others + tried)
         if alt is None and len(tried) > 1:
             del tried[1:]       # every nearby moment was shown: start the round again
             alt = best(others + [x])
-        return alt
+        return None if alt is None else self._fit_length(alt, home.duration, others)
+
+    def _fit_length(self, m: TimelineClip, duration: float, others: list[TimelineClip]) -> TimelineClip:
+        """Give moment m its natural length (see autoedit.natural_length), within the edit's clip lengths
+        (stretched to include `duration`) and without running into a later clip of the same footage."""
+        fid = m.footage_id
+        a, f = self.analyses[fid], self.project.footage[fid]
+        sc = score_samples({fid: a}, {fid: f}, self.last_auto.style)[fid]
+        lo, hi = min(self.last_auto.clip_min, duration), max(self.last_auto.clip_max, duration)
+        limit = min((c.src_in for c in others if c.footage_id == fid and c.src_in > m.src_in + 0.05),
+                    default=f.duration)
+        length = natural_length(a, sc, f.duration, m.src_in, lo, hi, limit)
+        if length > 0.2:
+            m.src_out = m.src_in + length
+        return m
 
     def _replace_moments(self, targets: list[TimelineClip]):
         """Other moment: swap each clip for the best moment close by in its footage; the clip takes that

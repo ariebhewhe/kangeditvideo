@@ -75,6 +75,16 @@ def test_other_moment_length_follows_the_moment(window):
         assert window.project.duration == pytest.approx(clip.duration)
 
 
+def test_other_moment_length_changes_on_every_press(window):
+    window.last_auto.clip_min, window.last_auto.clip_max = 1.0, 6.0
+    clip = _project_with_clip(window, start=12.0)
+    lengths = set()
+    for _ in range(5):
+        window.clip_action("alt_moment", clip.id)
+        lengths.add(round(clip.duration, 2))
+    assert len(lengths) >= 3          # each moment keeps its own length, not the first one's
+
+
 def test_other_moment_without_selection_explains(window):
     window.tl.selected = ""
     window.clip_action("alt_moment", "")
