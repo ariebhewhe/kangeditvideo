@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         tabs.setTabToolTip(2, "Animated titles and text")
         tabs.setTabToolTip(3, "Sound effects")
         self.right_tabs = tabs
-        for panel in (self.inspector, self.caps_panel, self.text_panel, self.sfx_panel):
+        for panel in (self.inspector, self.caps_panel, self.text_panel, self.sfx_panel, self.viewer):
             compact_combos(panel)
         d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")

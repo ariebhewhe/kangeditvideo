@@ -61,6 +61,10 @@ class TextPanel(QScrollArea):
 
         self.editor = QGroupBox("Selected title")
         f = QFormLayout(self.editor)
+        # The hint wraps here instead of being the box's title, which can't wrap and would widen the panel.
+        self.lbl_hint = QLabel("")
+        self.lbl_hint.setWordWrap(True)
+        f.addRow(self.lbl_hint)
         self.ed_text = QPlainTextEdit()
         self.ed_text.setMaximumHeight(64)
         self.ed_text.setPlaceholderText("Type the text (Enter for a new line)")
@@ -215,9 +219,9 @@ class TextPanel(QScrollArea):
     def _load(self):
         tc = self.text
         self.editor.setEnabled(tc is not None)
-        self.editor.setTitle("Selected title" if tc else
-                             "Selected title (select one on the timeline or above)" if self.project.texts else
-                             "Add a title above, then change its font, size and style here")
+        self.lbl_hint.setText("" if tc else "Select a title on the timeline or above." if self.project.texts else
+                              "Add a title above, then change its font, size and style here.")
+        self.lbl_hint.setVisible(tc is None)
         if tc is None:
             return
         for w in self._fields:
