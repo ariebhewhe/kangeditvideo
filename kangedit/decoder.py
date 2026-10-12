@@ -8,8 +8,21 @@ from typing import Callable, Optional
 
 import av
 import numpy as np
+from av.video.reformatter import VideoReformatter
 
 from .models import Footage
+
+
+_local = threading.local()
+
+
+def _reformatter() -> VideoReformatter:
+    """This thread's scaler. frame.reformat() keeps one per frame, and two threads converting the same
+    frame (a still shown twice, both sides of a transition) would share it: a crash on PyAV 17."""
+    r = getattr(_local, "reformatter", None)
+    if r is None:
+        r = _local.reformatter = VideoReformatter()
+    return r
 
 
 def _colorspace(cs: str, height: int) -> str:
@@ -74,9 +87,9 @@ class FrameDecoder:
         """Convert a frame from raw_at to RGB. Thread-safe: playback converts on several threads."""
         rng = frame.color_range
         src_range = "JPEG" if rng == 2 else "MPEG"
-        f = frame.reformat(width=self.out_w, height=self.out_h, format="rgb24",
-                           src_colorspace=self.colorspace, src_color_range=src_range,
-                           dst_color_range="JPEG", interpolation="BILINEAR")
+        f = _reformatter().reformat(frame, width=self.out_w, height=self.out_h, format="rgb24",
+                                    src_colorspace=self.colorspace, src_color_range=src_range,
+                                    dst_color_range="JPEG", interpolation="BILINEAR")
         img = f.to_ndarray()
         if self.rotation:
             img = np.ascontiguousarray(np.rot90(img, self.rotation // 90))
