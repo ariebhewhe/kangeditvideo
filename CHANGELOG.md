@@ -1,13 +1,13 @@
 # Changelog
 
 All notable changes to KangEdit are listed here. Versions follow [semantic versioning](https://semver.org).
-The Release workflow uses a version's section as the opening of its GitHub release notes.
+Note changes under [Unreleased]; a release (a pull request from `main` into `stable`) renames it to the new version.
 
 ## [Unreleased]
 
 ## [0.1.0] - 2026-10-12
 
-First public release, with packaged builds for Windows x64, macOS (Apple Silicon) and Linux x64.
+First public release.
 
 ### Automatic editing
 - Best-moment analysis (sharpness, motion and shake, exposure, colorfulness, faces, loudness, scene cuts) on several CPU lanes plus the GPU video decoder.
@@ -36,6 +36,3 @@ First public release, with packaged builds for Windows x64, macOS (Apple Silicon
 
 ### App
 - App and tray icons, crash and error logging, *Help → About* with version and build.
-
-[Unreleased]: https://github.com/kloworizer/kangedit/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/kloworizer/kangedit/releases/tag/v0.1.0

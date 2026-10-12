@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import kangedit
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,3 +49,25 @@ def test_changelog_section():
     assert changelog.section("1.0.0", text) == "- A"
     assert changelog.section("9.9.9", text) == ""
 
+
+
+def test_release_check(monkeypatch, capsys):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import release_check
+    finally:
+        sys.path.pop(0)
+    monkeypatch.setattr(release_check.bump_version, "current", lambda: (0, 2, 0))
+    monkeypatch.setattr(release_check.changelog, "section", lambda version, text: "- notes")
+    monkeypatch.setattr(release_check, "base_version", lambda ref: (0, 1, 0))
+    release_check.main([])
+    assert capsys.readouterr().out.strip() == "0.2.0"
+    monkeypatch.setattr(release_check, "base_version", lambda ref: None)   # stable doesn't exist yet
+    release_check.main([])
+    monkeypatch.setattr(release_check, "base_version", lambda ref: (0, 2, 0))
+    with pytest.raises(SystemExit, match="must be newer"):
+        release_check.main([])
+    monkeypatch.setattr(release_check, "base_version", lambda ref: (0, 1, 0))
+    monkeypatch.setattr(release_check.changelog, "section", lambda version, text: "")
+    with pytest.raises(SystemExit, match="no section"):
+        release_check.main([])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print one version's section of CHANGELOG.md (used as the GitHub release notes).
+"""Print one version's section of CHANGELOG.md (release_check.py requires one for each release).
 
     python scripts/changelog.py 1.2.3     the body under "## [1.2.3] ..." (empty if there is none)
 """
