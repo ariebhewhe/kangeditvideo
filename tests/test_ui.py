@@ -75,12 +75,6 @@ def test_panels_stay_docked(window):
 def test_refine_tabs_scroll_and_fit_a_small_display(qapp):
     from PySide6.QtWidgets import QScrollArea
     from kangedit.ui.main_window import MainWindow
-    # Offscreen Qt has no system font on Windows and falls back to a much larger one; measure with a 12 px font
-    # (Segoe UI 9 pt at 100 % scaling) so every platform checks the same layout.
-    font = qapp.font()
-    small = qapp.font()
-    small.setPixelSize(12)
-    qapp.setFont(small)
     window = MainWindow()
     try:
         tabs = window.right_tabs
@@ -99,7 +93,6 @@ def test_refine_tabs_scroll_and_fit_a_small_display(qapp):
     finally:
         window.project.dirty = False
         window.close()
-        qapp.setFont(font)
 
 
 def test_system_info_report():

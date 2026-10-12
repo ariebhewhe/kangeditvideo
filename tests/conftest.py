@@ -15,7 +15,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 @pytest.fixture(scope="session")
 def qapp():
     from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
+    from kangedit.ui.theme import STYLE
+    app = QApplication.instance() or QApplication([])
+    app.setStyle("Fusion")   # as the app does (kangedit/app.py): sizes match on every platform
+    app.setStyleSheet(STYLE)
+    return app
 
 
 @pytest.fixture
