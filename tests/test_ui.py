@@ -82,7 +82,11 @@ def test_refine_tabs_scroll_and_fit_a_small_display(window, qapp):
     qapp.processEvents()
     # A 1440x900 display minus the taskbar: the window must fit, with room left to resize the panels.
     hint = window.minimumSizeHint()
-    assert hint.width() <= 1400 and hint.height() <= 820, hint
+    parts = {"media": window.d_bin, "refine": window.d_right, "viewer": window.viewer, "timeline": window.timeline,
+             "media list": window.bin, "inspector": window.inspector.widget(), "text": window.text_panel.widget(),
+             "captions": window.caps_panel, "sounds": window.sfx_panel}
+    widths = {k: max(w.minimumSizeHint().width(), w.minimumWidth()) for k, w in parts.items()}
+    assert hint.width() <= 1400 and hint.height() <= 820, f"{hint}: {widths}"
 
 
 def test_system_info_report():
