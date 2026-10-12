@@ -9,7 +9,11 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+import numpy as np
+
 from .color import Grade
+
+LOOP_CROSSFADE = 2.0   # seconds of crossfade between the repeats of a looping sound
 
 
 def new_id() -> str:
@@ -175,6 +179,9 @@ class SoundClip:
     fade_in: float = 0.0           # seconds
     fade_out: float = 0.0
     duck: bool = False             # music: turned down automatically while the clips have speech / sound
+    # Looping (fit to timeline): > 0 repeats the source from src_in for this many seconds, again and again with
+    # a LOOP_CROSSFADE between repeats, for as long as the clip lasts (src_out may then run past the file's end).
+    loop: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -192,6 +199,27 @@ class SoundClip:
     @property
     def end(self) -> float:
         return self.start + self.duration
+
+    @property
+    def looping(self) -> bool:
+        return self.loop > LOOP_CROSSFADE * 2 and self.duration > self.loop + 1e-3
+
+    def loop_step(self) -> float:
+        """Timeline seconds between the starts of two repeats of a looping sound."""
+        return self.loop - LOOP_CROSSFADE
+
+    def repeats(self) -> int:
+        """How many times the source plays (1 unless looping)."""
+        if not self.looping:
+            return 1
+        return int(np.ceil((self.duration - self.loop) / self.loop_step() - 1e-9)) + 1
+
+    def source_time(self, t: np.ndarray) -> np.ndarray:
+        """Source time heard at clip time t (seconds from the clip's start; for drawing its waveform)."""
+        if not self.looping:
+            return self.src_in + t
+        step = self.loop_step()
+        return self.src_in + np.mod(t, step)
 
     def to_dict(self) -> dict:
         return asdict(self)

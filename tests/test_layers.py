@@ -267,3 +267,31 @@ def test_rotate_and_duck_actions(window, tmp_path):
     window._sound_action("sound_duck:1", p.sounds[0].id)
     assert p.sounds[0].duck
     assert os.path.basename(p.sounds[0].path) == "m.wav"
+
+
+# ----------------------------------------------------------------------------- zoom to face
+def test_face_detector_model_loads():
+    from kangedit import faces
+    assert os.path.exists(faces.MODEL) and faces._yunet() is not False   # works on OpenCV 4.8+ and 5
+    assert faces.detect(np.zeros((90, 160, 3), np.uint8)) == []
+
+
+def test_main_face_is_the_one_seen_most(monkeypatch):
+    from kangedit import faces
+    person = (0.3, 0.4, 0.1, 0.2, 0.9)
+    passer = (0.8, 0.5, 0.3, 0.5, 0.95)          # bigger, but in one frame only
+    seen = iter([[person], [passer, (0.31, 0.41, 0.1, 0.22, 0.8)], [(0.29, 0.39, 0.1, 0.18, 0.9)], []])
+    monkeypatch.setattr(faces, "detect", lambda img: next(seen))
+    cx, cy, h = faces.main_face([None] * 4)
+    assert (cx, cy, h) == pytest.approx((0.3, 0.4, 0.2))
+    monkeypatch.setattr(faces, "detect", lambda img: [])
+    assert reframe.find_face([np.zeros((4, 4, 3), np.uint8)]) is None
+
+
+def test_looping_sound_renders_as_one_crossfaded_clip(tmp_path):
+    music = tmp_path / "m.wav"
+    music.write_bytes(b"")
+    [y] = sfx.fit_to_timeline(SoundClip(str(music), 0.0, 0.0, 5.0), 5.0, 14.0)
+    p, _, _ = _project(tmp_path, sounds=[y])
+    graph = _graph(tmp_path, p)
+    assert y.repeats() == 4 and "asplit=4" in graph and graph.count("acrossfade=d=2.0000:c1=qsin") == 3

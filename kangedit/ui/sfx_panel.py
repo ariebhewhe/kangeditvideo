@@ -151,8 +151,8 @@ class SoundPanel(QWidget):
             v.addLayout(row)
             self.fades[which] = sl
         self.b_fit = QPushButton("⇔ Fit to timeline")
-        self.b_fit.setToolTip("Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
-                              "cut it with a fade out if it is longer")
+        self.b_fit.setToolTip("Cover the whole timeline with this one sound: it loops with crossfades if it is "
+                              "shorter, and is cut with a fade out if it is longer")
         self.b_fit.clicked.connect(self.fit_requested.emit)
         v.addWidget(self.b_fit)
         self.chk_duck = QCheckBox("Auto ducking: lower it while the clips have sound")

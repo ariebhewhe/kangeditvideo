@@ -18,7 +18,7 @@ from .edits import ClipPlan, plan
 from .fonts import copy_family
 from .titles import write_titles_ass
 from .ffmpeg import FFmpegError, ProgressCb, ffmpeg_matrix, hw_encoder, hw_encoder_args, hw_encoder_label, run_ffmpeg
-from .models import Footage, OverlayClip, Project
+from .models import LOOP_CROSSFADE, Footage, OverlayClip, Project
 
 CODECS = {
     "h264": ("H.264 (MP4) - most compatible", ".mp4"),
@@ -110,12 +110,26 @@ def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int, e
         return base
     plain, ducked = [], []
     for j, x in enumerate(sounds):
-        inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.duration:.4f}", "-i", x.path]
         fi, fo = x.fades()
         fi, fo = max(fi, 0.005), max(fo, min(0.02, x.duration / 4))   # at least a click-free edge
         delay = int(round(max(0.0, x.start) * 1000))
-        # quarter-sine fades: crossfading copies of a sound (fit to timeline) keep an even loudness
-        graph.append(f"[{k + j}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        src = f"[{k + j}:a]"
+        if x.looping:
+            # One read of the loop, repeated: each repeat crossfades into the next (quarter-sine, even loudness).
+            n = x.repeats()
+            inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.loop:.4f}", "-i", x.path]
+            graph.append(f"{src}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                         f"asplit={n}" + "".join(f"[lp{j}_{r}]" for r in range(n)))
+            cur = f"lp{j}_0"
+            for r in range(1, n):
+                graph.append(f"[{cur}][lp{j}_{r}]acrossfade=d={LOOP_CROSSFADE:.4f}:c1=qsin:c2=qsin[lpx{j}_{r}]")
+                cur = f"lpx{j}_{r}"
+            graph.append(f"[{cur}]atrim=duration={x.duration:.4f}[lpj{j}]")
+            src = f"[lpj{j}]"
+        else:
+            inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.duration:.4f}", "-i", x.path]
+        # quarter-sine fades: crossfading copies of a sound keep an even loudness
+        graph.append(f"{src}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                      f"volume={x.volume:.3f},afade=t=in:d={fi:.4f}{_curve(fi)},"
                      f"afade=t=out:st={max(0.0, x.duration - fo):.4f}:d={fo:.4f}{_curve(fo)},"
                      f"adelay=delays={delay}:all=1[sfx{j}]")

@@ -832,7 +832,7 @@ class TimelineView(QWidget):
             if env is not None and r.width() > 6:
                 xs = np.arange(max(r.left(), 0), min(r.right(), self.width()), 2.0)
                 if xs.size > 1:
-                    ts = x.src_in + (xs - r.left()) / self.pps
+                    ts = x.source_time((xs - r.left()) / self.pps)
                     amp = env[np.clip((ts * sfx.ENVELOPE_RATE).astype(int), 0, env.size - 1)] * min(1.0, x.volume)
                     mid, hh = r.center().y(), (r.height() / 2 - 1) * amp
                     poly = QPolygonF([QPointF(a, mid - h) for a, h in zip(xs, hh)] +
@@ -841,9 +841,18 @@ class TimelineView(QWidget):
                     p.setBrush(QColor(255, 220, 180, 110))
                     p.drawPolygon(poly)
             self._paint_sound_fades(p, x, r)
+            if x.looping:   # where each repeat crossfades into the next
+                p.setPen(QPen(QColor(255, 244, 234, 150), 1, Qt.DashLine))
+                for n in range(1, x.repeats()):
+                    sx = r.left() + n * x.loop_step() * self.pps
+                    if 0 <= sx <= self.width():
+                        p.drawLine(QPointF(sx, r.top() + 2), QPointF(sx, r.bottom() - 2))
             if r.width() > 24:
                 p.setPen(QColor("#fff4ea"))
-                label = ("⇩ " if x.duck else "") + (x.name or os.path.splitext(os.path.basename(x.path))[0])
+                label = ("⇩ " if x.duck else "") + ("🔁 " if x.looping else "") + \
+                    (x.name or os.path.splitext(os.path.basename(x.path))[0])
+                if x.looping:
+                    label += f"  ×{x.repeats()}"
                 if abs(x.volume - 1.0) > 0.01:
                     label += f"  {x.volume * 100:.0f}%"
                 p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
@@ -1073,7 +1082,7 @@ class TimelineView(QWidget):
         if x.path not in self._sound_max:
             self._sound_max[x.path] = sfx.duration(x.path) or x.src_out
         self._drag = {"kind": part, "sound": x.id, "x0": pos.x(), "start0": x.start, "in0": x.src_in,
-                      "out0": x.src_out, "active": False}
+                      "out0": x.src_out, "loop0": x.loop, "active": False}
         return True
 
     def _sound_move(self, pos, d: dict):
@@ -1100,6 +1109,10 @@ class TimelineView(QWidget):
             new_in = max(new_in, d["in0"] - d["start0"])          # the sound can't start before 0
             x.src_in = new_in
             x.start = d["start0"] + (new_in - d["in0"])
+            if x.loop > 0:   # the repeated part can't run past the end of the file
+                x.loop = max(0.0, min(d.get("loop0", x.loop), self._sound_max.get(x.path, 1e9) - new_in))
+        elif x.looping:   # a looping sound can be made as long as wanted (it keeps repeating)
+            x.src_out = max(d["out0"] + dt, d["in0"] + x.loop + 0.05)
         else:
             x.src_out = max(min(self._sound_max.get(x.path, d["out0"]), d["out0"] + dt), d["in0"] + 0.05)
         self.update()
@@ -1108,8 +1121,8 @@ class TimelineView(QWidget):
         m = QMenu(self)
         for key, label, tip in (("sound_to_playhead", "Move to playhead", ""), ("sound_preview", "Preview", ""),
                                 ("sound_fit", "Fit to timeline",
-                                 "Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
-                                 "cut it with a fade out if it is longer")):
+                                 "Cover the whole timeline with this one sound: it loops with crossfades if it is "
+                                 "shorter, and is cut with a fade out if it is longer")):
             a = QAction(label, m)
             a.setToolTip(tip)
             a.triggered.connect(lambda _=False, k=key: self.context_action.emit(k, sound_id))

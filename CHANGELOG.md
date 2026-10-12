@@ -22,8 +22,17 @@ and the Release workflow uses that section as the GitHub release notes.
   tab or its right-click menu, with a project-wide *Duck by* amount).
 - The Media list shows which footage the edit uses (**In edit** column, green ✓ on the thumbnails); footage can
   be dragged onto the timeline.
+- *Fit to timeline* makes one sound clip that loops (with crossfades between repeats) instead of several
+  overlapping copies on two rows; a 🔁 ×N label and dashed lines show the repeats, and it can be made longer
+  by dragging its end.
 - Updates from GitHub: *Help → Check for updates…*, and a daily check at startup. Packaged builds download,
   verify and install the new release and restart; source copies update their files; git checkouts `git pull`.
+
+### Fixed
+- Zoom to face finds faces far more often: it now uses OpenCV's YuNet face detector (faces turned away, tilted,
+  small, blurred, dark or in flat log footage), looks at 9 frames at 720p instead of 5 at 480p, follows the
+  clip's rotation, and picks the face seen in the most frames. With OpenCV 5 (what a new install gets) the old
+  detector was missing entirely, so no face was ever found; the best-moment face score had the same problem.
 
 ## [0.2.1] - 2026-10-12
 

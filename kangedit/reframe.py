@@ -173,23 +173,10 @@ FACE_SIZES = {"medium": 0.22, "close": 0.34, "extreme": 0.5}   # face height as 
 
 
 def find_face(frames: list[np.ndarray]) -> Optional[tuple[float, float, float]]:
-    """The main face over a few RGB frames of a clip: (centre x, centre y, height), as parts of the frame.
-    Uses the biggest face of each frame and the median over frames (steadier than one frame)."""
-    from .analysis import _faces
-    cascade = _faces()
-    if cascade is False:
-        return None
-    found = []
-    for img in frames:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        h, w = gray.shape
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(max(16, h // 30),) * 2)
-        if len(faces):
-            x, y, fw, fh = max(faces, key=lambda r: r[2] * r[3])
-            found.append(((x + fw / 2) / w, (y + fh / 2) / h, fh / h))
-    if not found:
-        return None
-    return tuple(float(v) for v in np.median(np.asarray(found), axis=0))
+    """The main face over a few RGB frames of a clip: (centre x, centre y, height), as parts of the frame
+    (see faces.main_face)."""
+    from .faces import main_face
+    return main_face(frames)
 
 
 def face_framing(face: tuple[float, float, float], sw: int, sh: int, tw: int, th: int, mode: str,

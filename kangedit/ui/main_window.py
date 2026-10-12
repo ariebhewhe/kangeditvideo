@@ -57,6 +57,7 @@ from .viewer import ADJUST_MODES, Viewer
 
 log = logging.getLogger(__name__)
 
+FACE_SAMPLES = 9           # frames of a clip searched for its main face (Zoom to face)
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 
 
@@ -2090,8 +2091,9 @@ class MainWindow(QMainWindow):
         self.tl.refresh()
         self._sounds_changed()
         label = x.name or os.path.basename(x.path)
-        self.lbl_status.setText(f"“{label}” fits the timeline: repeated {len(copies)}× with crossfades"
-                                if len(copies) > 1 else f"“{label}” fits the timeline, with a fade out at the end")
+        y = copies[0]
+        self.lbl_status.setText(f"“{label}” fits the timeline: it loops {y.repeats()}× with crossfades, on one row"
+                                if y.looping else f"“{label}” fits the timeline, with a fade out at the end")
 
     # ================================================================== video layers (overlays)
     def _whole_clip(self, fid: str) -> TimelineClip:
@@ -2616,8 +2618,8 @@ class MainWindow(QMainWindow):
         """Zoom each clip in on its main face (in the background); applied in one undo step."""
         st = self.project.settings
         tw, th = frame_size(st.aspect, st.resolution)
-        jobs = [(TimelineClip(c.footage_id, c.src_in, c.src_out, id=c.id), self.project.footage[c.footage_id])
-                for c in clips if c.footage_id in self.project.footage]
+        jobs = [(TimelineClip(c.footage_id, c.src_in, c.src_out, rotation=c.rotation, id=c.id),
+                 self.project.footage[c.footage_id]) for c in clips if c.footage_id in self.project.footage]
         if not jobs:
             return
         use_proxies, mode = st.use_proxies, st.fit_mode
@@ -2631,9 +2633,13 @@ class MainWindow(QMainWindow):
                     if cancel.is_set():
                         raise Cancelled()
                     progress(k / len(jobs), f"Finding faces: {k + 1}/{len(jobs)}")
-                    dec = pool.get(f, use_proxies, 480)
-                    frames = [img.copy() for i in range(5)
-                              if (img := dec.frame_at(c.src_in + c.duration * (i + 0.5) / 5)) is not None]
+                    # 720p keeps small faces in wide shots findable; the clip's quarter turns are applied
+                    # first so the face is found (and framed) the way the clip shows it.
+                    dec = pool.get(f, use_proxies, 720)
+                    quarters = reframe.split_rotation(c.rotation)[0]
+                    frames = [reframe.rotate_quarters(img.copy(), quarters) for i in range(FACE_SAMPLES)
+                              if (img := dec.frame_at(c.src_in + c.duration * (i + 0.5) / FACE_SAMPLES))
+                              is not None]
                     face = reframe.find_face(frames)
                     if face is not None:
                         h, w = frames[0].shape[:2]

@@ -216,7 +216,7 @@ The **Sounds** tab searches [MyInstants](https://www.myinstants.com), a large co
 - The **Library** list holds every sound you added or imported. Drag one onto the timeline, or add it at the playhead.
 - **Import…** adds your own audio files (MP3, WAV, OGG, M4A, FLAC…). You can also drop audio files straight onto the timeline.
 
-Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*), each with its own fade in and fade out (right-click → *Fade in* / *Fade out*, or the sliders in the **Sounds** tab). *Fit to timeline* lays a sound over the whole edit: a shorter sound is repeated with 2-second crossfades, a longer one is cut to the edit's length with a fade out.
+Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*), each with its own fade in and fade out (right-click → *Fade in* / *Fade out*, or the sliders in the **Sounds** tab). *Fit to timeline* lays a sound over the whole edit as one clip: a shorter sound loops with 2-second crossfades between repeats (dashed lines on the clip), a longer one is cut to the edit's length with a fade out.
 
 > MyInstants sounds are uploaded by its users and may be copyrighted. Make sure you're allowed to use a sound before you publish a video with it.
 
@@ -349,6 +349,7 @@ kangedit/
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
   images.py             still images and animated GIFs as footage
+  faces.py              face detection (YuNet model in assets/) for Zoom to face and best-moment scoring
   updater.py            update check and install from the GitHub releases
   export.py             FFmpeg filtergraph rendering (+ preview audio mix)
   preview.py            background preview engine: decode thread + render pool, read-ahead, pre-roll, transitions
@@ -366,5 +367,7 @@ kangedit/
 ## Third-party software
 
 KangEdit is written in Python and uses [PySide6 / Qt](https://www.qt.io/qt-for-python), [NumPy](https://numpy.org), [OpenCV](https://opencv.org), [PyAV](https://pyav.org) and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (OpenAI Whisper models via CTranslate2).
+
+Face detection uses the [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) model by Shiqi Yu et al. (MIT licence), included as `kangedit/assets/face_detection_yunet_2023mar.onnx`.
 
 FFmpeg isn't included in this repository. When needed, setup downloads static GPL builds from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (Windows, Linux) or [Martin Riedl's build server](https://ffmpeg.martin-riedl.de/) (macOS). Those builds are covered by FFmpeg's own license.
