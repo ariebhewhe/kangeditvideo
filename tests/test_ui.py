@@ -72,21 +72,34 @@ def test_panels_stay_docked(window):
         assert not {window.d_bin.toggleViewAction(), window.d_right.toggleViewAction()} & set(menu.actions())
 
 
-def test_refine_tabs_scroll_and_fit_a_small_display(window, qapp):
+def test_refine_tabs_scroll_and_fit_a_small_display(qapp):
     from PySide6.QtWidgets import QScrollArea
-    tabs = window.right_tabs
-    assert all(isinstance(tabs.widget(i), QScrollArea) for i in range(tabs.count()))
-    window.show_refine(window.sfx_panel)
-    assert tabs.currentWidget().widget() is window.sfx_panel
-    window.show()
-    qapp.processEvents()
-    # A 1440x900 display minus the taskbar: the window must fit, with room left to resize the panels.
-    hint = window.minimumSizeHint()
-    parts = {"media": window.d_bin, "refine": window.d_right, "viewer": window.viewer, "timeline": window.timeline,
-             "media list": window.bin, "inspector": window.inspector.widget(), "text": window.text_panel.widget(),
-             "captions": window.caps_panel, "sounds": window.sfx_panel}
-    widths = {k: max(w.minimumSizeHint().width(), w.minimumWidth()) for k, w in parts.items()}
-    assert hint.width() <= 1400 and hint.height() <= 820, f"{hint}: {widths}"
+    from kangedit.ui.main_window import MainWindow
+    # Offscreen Qt has no system font on Windows and falls back to a much larger one; measure with a 12 px font
+    # (Segoe UI 9 pt at 100 % scaling) so every platform checks the same layout.
+    font = qapp.font()
+    small = qapp.font()
+    small.setPixelSize(12)
+    qapp.setFont(small)
+    window = MainWindow()
+    try:
+        tabs = window.right_tabs
+        assert all(isinstance(tabs.widget(i), QScrollArea) for i in range(tabs.count()))
+        window.show_refine(window.sfx_panel)
+        assert tabs.currentWidget().widget() is window.sfx_panel
+        window.show()
+        qapp.processEvents()
+        # A 1440x900 display minus the taskbar: the window must fit, with room left to resize the panels.
+        hint = window.minimumSizeHint()
+        parts = {"media": window.d_bin, "refine": window.d_right, "viewer": window.viewer,
+                 "timeline": window.timeline, "media list": window.bin, "inspector": window.inspector.widget(),
+                 "text": window.text_panel.widget(), "captions": window.caps_panel, "sounds": window.sfx_panel}
+        widths = {k: max(w.minimumSizeHint().width(), w.minimumWidth()) for k, w in parts.items()}
+        assert hint.width() <= 1400 and hint.height() <= 820, f"{hint}: {widths}"
+    finally:
+        window.project.dirty = False
+        window.close()
+        qapp.setFont(font)
 
 
 def test_system_info_report():
