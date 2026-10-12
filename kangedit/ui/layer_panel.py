@@ -11,6 +11,28 @@ from PySide6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGridLayout, QGroupB
 from ..models import OverlayClip, Project
 from .inspector import ParamSlider, wrap_angle
 
+LAYER_HELP = (
+    "The lanes <b>V2, V3…</b> above the main track show pictures on top of the edit: picture in picture, "
+    "a logo, B-roll, a second camera angle.<br><br>"
+    "<b>Add</b><br>"
+    "• Drag footage or an image from <b>Media</b> onto a layer (onto the main track it becomes a clip there)<br>"
+    "• Or right-click footage in Media → <i>Add on a video layer at the playhead</i>, or right-click an empty "
+    "layer → <i>Add the selected media here</i><br>"
+    "• Several cameras of the same moments: <b>✨ Auto Edit → Multicam</b> syncs them by their sound and lays "
+    "them out for you<br><br>"
+    "<b>Place</b><br>"
+    "• Drag the clip in the <b>viewer</b> to move it, mouse wheel over it to resize it<br>"
+    "• Here: corner presets, position, size, rotation, opacity, fades and the clip's own volume; "
+    "<b>Crop X / Y</b> for clips cropped to fill a box<br><br>"
+    "<b>Time</b><br>"
+    "• On the timeline, drag the clip to move it (up / down: another layer), drag its edges to trim<br>"
+    "• Higher layers are in front; right-click a layer for more layers, a clip for fades, rotation, split, "
+    "duplicate and multicam layouts"
+)
+
+TIPS = ("Drag it in the viewer to move it · wheel over it to resize · on the timeline drag it up / down to "
+        "change layer · right-click it for more")
+
 # Position presets: (x, y, scale) of the overlay's centre and size.
 PLACEMENTS = {
     "full": (0.5, 0.5, 1.0),
@@ -42,11 +64,15 @@ class LayerPanel(QScrollArea):
         self.lbl_title.setStyleSheet("font-weight: 600; font-size: 13px;")
         self.lbl_title.setWordWrap(True)
         lay.addWidget(self.lbl_title)
-        self.lbl_hint = QLabel("Drag footage or an image from Media onto a video layer (V2, V3…) above the main "
-                               "track, then click it to place it here. Drag it in the viewer to move it.")
+        self.lbl_hint = QLabel(LAYER_HELP)
         self.lbl_hint.setWordWrap(True)
-        self.lbl_hint.setStyleSheet("color: #8b909a;")
+        self.lbl_hint.setTextFormat(Qt.RichText)
+        self.lbl_hint.setStyleSheet("color: #aeb3bd;")
         lay.addWidget(self.lbl_hint)
+        self.lbl_tips = QLabel(TIPS)
+        self.lbl_tips.setWordWrap(True)
+        self.lbl_tips.setStyleSheet("color: #8b909a; font-size: 11px;")
+        lay.addWidget(self.lbl_tips)
 
         self.body = QWidget()
         v = QVBoxLayout(self.body)
@@ -152,8 +178,9 @@ class LayerPanel(QScrollArea):
         self.clip = clip
         self.body.setVisible(clip is not None)
         self.lbl_hint.setVisible(clip is None)
+        self.lbl_tips.setVisible(clip is not None)
         if clip is None:
-            self.lbl_title.setText("No layer clip selected")
+            self.lbl_title.setText("Video layers")
             return
         f = self.project.footage.get(clip.footage_id)
         self.lbl_title.setText(f"{f.name if f else '?'} on layer V{clip.track + 2}"

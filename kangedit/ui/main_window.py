@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
@@ -50,7 +50,7 @@ from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
 from .text_panel import TextPanel
 from .theme import compact_combos, fmt_time
-from .timeline import MAX_LAYERS, TimelinePanel
+from .timeline import MAX_LAYERS, OV_Y, TimelinePanel
 from .tour import TourOverlay, TourStep
 from .tray import Tray
 from .platform_overlay import PLATFORM_OVERLAYS
@@ -146,8 +146,9 @@ class MainWindow(QMainWindow):
         tabs.add(self.text_panel, "🔤 Text")
         tabs.add(self.sfx_panel, "🔊 Sounds")
         tabs.setTabToolTip(0, "Colour, log conversion, reframe, rotation, volume and transition of the selected clip")
-        tabs.setTabToolTip(1, "Position, size, rotation, opacity and fades of the clip selected on a video layer "
-                              "(picture in picture, logos, images on top)")
+        tabs.setTabToolTip(1, "Video layers: position, size, crop, rotation, opacity, fades and volume of the clip "
+                              "selected on a layer above the main track (picture in picture, logos, images, "
+                              "multicam angles), and how to add one")
         tabs.setTabToolTip(2, "Generate, edit, style and delete captions")
         tabs.setTabToolTip(3, "Animated titles and text")
         tabs.setTabToolTip(4, "Sound effects, music and auto ducking")
@@ -2658,14 +2659,23 @@ class MainWindow(QMainWindow):
                      "Drag clips to reorder, drag their edges to trim, <b>Alt-drag</b> to slide which moment "
                      "a clip shows.",
                      lambda: self.timeline),
+            TourStep("Video layers",
+                     "The lanes <b>V2, V3…</b> above the main track lay pictures <b>on top</b> of the edit: picture "
+                     "in picture, a logo, B-roll, a second camera.<br>Drag footage or an image from <b>Media</b> "
+                     "onto a layer, then drag it in the <b>viewer</b> to place it (mouse wheel resizes). The "
+                     "<b>🧩 Layer</b> tab sets size, crop, rotation, opacity and fades.<br>Filmed with two "
+                     "cameras? <b>✨ Auto Edit → Multicam</b> syncs them by their sound and lays them out "
+                     "(picture in picture, talking cam, stacked, side by side…).",
+                     lambda: (tl, QRect(0, OV_Y, tl.width(), tl.ov_h))),
             TourStep("Right-click anything",
                      "Every part of the timeline has its own menu: <b>clips</b> (transitions, J/L cuts, another "
-                     "moment), <b>empty space</b> (add a title or a sound), <b>captions</b> (edit, delete) and "
+                     "moment, rotate), <b>layer clips</b> (position, fades, layer, multicam layout), <b>empty "
+                     "space</b> (add a title, a sound or a video layer), <b>captions</b> (edit, delete) and "
                      "<b>titles</b> (animations, position).",
                      lambda: (tl, tl.rect().adjusted(0, 24, 0, 0))),
             TourStep("3. Refine",
-                     "Fine-tune here: <b>🎨 Clip</b> colour & reframe, <b>💬 Captions</b>, <b>🔤 Text</b> for "
-                     "animated titles, and <b>🔊 Sounds</b>. The <b>3. Refine</b> buttons in the toolbar jump "
+                     "Fine-tune here: <b>🎨 Clip</b> colour & reframe, <b>🧩 Layer</b> for clips on the video "
+                     "layers, <b>💬 Captions</b>, <b>🔤 Text</b> for animated titles, and <b>🔊 Sounds</b>. The <b>3. Refine</b> buttons in the toolbar jump "
                      "to each tab.<br>Select <b>several clips</b> (Ctrl / Shift+click) and every change here "
                      "applies to all of them. <b>🙂 Zoom to face</b> under Reframe punches in on a reaction; "
                      "<b>Sharpness</b> and <b>Halation</b> sit below Vibrance.",
@@ -3163,8 +3173,13 @@ class MainWindow(QMainWindow):
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
             "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline,\n"
             "auto ducking\n"
-            "Video layers (V2, V3…): drag footage or images from Media onto them; drag the clip in the\n"
-            "viewer to place it, mouse wheel over it to resize\n"
+            "Video layers (V2, V3… above the main track): drag footage or images from Media onto a layer\n"
+            "(or right-click footage → Add on a video layer) · drag the clip in the viewer to place it,\n"
+            "mouse wheel over it to resize · on the timeline drag it to move (up / down: another layer),\n"
+            "its edges to trim · double-click it (or the 🧩 Layer tab) for size, crop, rotation, opacity,\n"
+            "fades, volume · higher layers are in front · right-click an empty layer to add a layer\n"
+            "Multicam: ✨ Auto Edit → Multicam syncs camera angles by sound; Tools → Multicam layout\n"
+            "changes their layout later\n"
             "Lanes: drag a lane's bottom edge to make it taller · Shift+wheel scrolls the lanes up / down"))
 
     def closeEvent(self, e):

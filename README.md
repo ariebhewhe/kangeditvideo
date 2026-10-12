@@ -12,6 +12,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 - [Install and run](#install-and-run)
 - [Quick start](#quick-start)
 - [Keyboard and mouse](#keyboard-and-mouse)
+- [Video layers and multicam](#video-layers-and-multicam)
 - [Sound effects](#sound-effects)
 - [Official camera LUTs](#official-camera-luts)
 - [Where files are stored](#where-files-are-stored)
@@ -207,6 +208,69 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Wheel over the selected layer clip | Resize it |
 
 On macOS, use ⌘ where this table says Ctrl.
+
+---
+
+## Video layers and multicam
+
+The lanes **V2, V3…** above the main track lay pictures on top of the edit: picture in picture, a logo, B-roll,
+an image, a second camera angle. Higher layers are in front of lower ones.
+
+**Add something to a layer**
+
+- Drag footage or an image from the **Media** panel onto a layer. (Dropped on the main track, it becomes a clip
+  there instead, at the nearest cut.)
+- Or right-click footage in Media → *Add on a video layer at the playhead*, or right-click an empty layer →
+  *Add the selected media here*.
+- New videos start as picture in picture in the bottom-right corner, images in the middle at half size. A layer
+  that is busy at that time sends the new clip to the next free layer.
+- More layers: right-click an empty part of a layer → *Add a video layer* (up to 8), or *View → Add a video
+  layer*.
+
+**Place it**
+
+- Drag the clip in the **viewer** to move it (it snaps to the centre lines); the mouse wheel over the selected
+  clip resizes it.
+- The **🧩 Layer** tab (double-click the clip, or select it) has one-click positions (full frame, centre and the
+  four picture-in-picture corners), X / Y, size, rotation (⟲ / ⟳ 90°), opacity, fade in / out, start, length,
+  layer and the clip's own volume.
+- Clips cropped to fill a box (the multicam layouts) also get **Crop X / Y**, to choose which part of the picture
+  fills it.
+
+**Time it**
+
+- On the timeline, drag a layer clip to move it in time, or up / down to another layer; drag its edges to trim.
+  It snaps to the playhead, the cuts and other layer clips.
+- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, fades, layer
+  up / down and *Delete*.
+- A layer clip's sound is mixed in at its own volume (0 % mutes it). PNG transparency is kept.
+
+**Multicam: several cameras of the same moments**
+
+1. Import every camera's files (each needs its own sound).
+2. In **✨ Auto Edit**, tick *Multicam*, and give each file its angle: *Main angle*, *Angle 2*, *Angle 3*,
+   *Angle 4* (KangEdit guesses one angle per camera model).
+3. Pick a **layout**, whose **sound** to use, and whether to keep to moments every angle recorded, then
+   *Create edit*.
+
+The angles are synced by their sound: first by matching where the loudness rises over the whole recordings
+(which works with different microphones and levels), then sample by sample in pieces spread across them, which
+also corrects the slow clock drift between cameras. The main angle is edited as usual and every other angle is
+cut at exactly the same moments on the layers above. The status bar shows each angle's offset; an angle whose
+sound doesn't match is left out with a warning.
+
+| Layout | |
+|---|---|
+| Picture in picture | The main angle fills the frame; the others are small, whole pictures in the corners. |
+| Main video + talking cam | Landscape: a square box in the corner, cropped around the speaker's face. Vertical / square: the main angle on top, the speaker below. |
+| Stacked, top / bottom | A full-width band per angle, each cropped around its subject (for 9:16). |
+| Side by side | A full-height column per angle (for 16:9). |
+| Grid (2 × 2) | Up to four angles. |
+
+The angles stay in sync while you edit: trims, slips, splits, *Other moment*, a new hook and reordering all
+re-time them from the main clip they follow, and positions you changed by hand are kept. *Tools → Multicam
+layout* (or a layer clip's right-click menu) switches to another layout later; the **− / +** auto edit buttons
+regenerate the edit with its angles.
 
 ---
 

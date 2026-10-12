@@ -626,7 +626,8 @@ class TimelineView(QWidget):
         if not self.project.overlays:
             p.setPen(QColor("#4d5058"))
             p.drawText(QRectF(30, self._layer_top(0), self.width() - 38, self.ov_row), Qt.AlignVCenter | Qt.AlignLeft,
-                       "Video layers — drag footage or images here for picture-in-picture, logos and B-roll on top")
+                       "Video layers — drag footage or images here for picture-in-picture, logos and B-roll on top "
+                       "(several cameras: ✨ Auto Edit → Multicam)")
         for c, r in self._overlay_rects():
             if r.right() < 0 or r.left() > self.width():
                 continue
@@ -1300,9 +1301,13 @@ class TimelineView(QWidget):
             if oc is not None:
                 self.setCursor(Qt.SizeHorCursor if opart in ("o_trim_l", "o_trim_r") else Qt.OpenHandCursor)
                 f = self.project.footage.get(oc.footage_id)
-                self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}\n{oc.start:.2f}s, {oc.duration:.2f}s long\n"
-                                "Drag: move (also up / down to another layer) · Edges: trim · "
-                                "Drag it in the viewer to place it · Right-click: more")
+                what = (f" · camera angle {oc.angle}, synced by sound" if oc.angle >= 2 else
+                        " · main angle" if oc.angle == 1 else "")
+                self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}{what}\n"
+                                f"{oc.start:.2f}s, {oc.duration:.2f}s long\n"
+                                "Drag: move (also up / down to another layer) · Edges: trim\n"
+                                "In the viewer: drag to place it, wheel to resize\n"
+                                "Double-click: size, crop, rotation, opacity · Right-click: more")
                 return
             tx, tpart = self._text_hit(pos)
             if tx is not None:

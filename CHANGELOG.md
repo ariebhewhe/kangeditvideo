@@ -33,6 +33,9 @@ and the Release workflow uses that section as the GitHub release notes.
 - *Fit to timeline* makes one sound clip that loops (with crossfades between repeats) instead of several
   overlapping copies on two rows; a 🔁 ×N label and dashed lines show the repeats, and it can be made longer
   by dragging its end.
+- Help for video layers: the **Layer** tab explains how to add, place and time layer clips (and shows quick
+  tips while one is selected), the guided tour has a *Video layers* step, and the README a *Video layers and
+  multicam* section.
 - *View → Reset layout* (Ctrl+Shift+R): panels, the viewer / timeline split, lane heights and tabs back to
   their usual sizes, and the timeline fitted.
 - *Help → About* shows the GitHub repository and a contact address.
