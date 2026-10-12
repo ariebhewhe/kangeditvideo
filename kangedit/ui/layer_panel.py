@@ -87,6 +87,14 @@ class LayerPanel(QScrollArea):
         f.addRow("Y", self.sl_y)
         f.addRow("Size", self.sl_scale)
         f.addRow("Rotation", rot)
+        self.sl_pan_x = ParamSlider(-1, 1, 0, 0.01, 2)
+        self.sl_pan_y = ParamSlider(-1, 1, 0, 0.01, 2)
+        for sl, key in ((self.sl_pan_x, "pan_x"), (self.sl_pan_y, "pan_y")):
+            sl.setToolTip("Which part of the picture fills its box (multicam layouts crop around the face)")
+            sl.changed.connect(lambda val, k=key: self._set(k, val))
+        self.lbl_pan_x, self.lbl_pan_y = QLabel("Crop X"), QLabel("Crop Y")
+        f.addRow(self.lbl_pan_x, self.sl_pan_x)
+        f.addRow(self.lbl_pan_y, self.sl_pan_y)
         v.addWidget(g)
 
         g = QGroupBox("Look && timing")
@@ -148,12 +156,16 @@ class LayerPanel(QScrollArea):
             self.lbl_title.setText("No layer clip selected")
             return
         f = self.project.footage.get(clip.footage_id)
-        self.lbl_title.setText(f"{f.name if f else '?'} on layer V{clip.track + 2}")
+        self.lbl_title.setText(f"{f.name if f else '?'} on layer V{clip.track + 2}"
+                               + (f" · angle {clip.angle}" if clip.angle >= 2 else " · main angle" if clip.angle else ""))
         for sl, val in ((self.sl_x, clip.x * 100), (self.sl_y, clip.y * 100), (self.sl_scale, clip.scale * 100),
                         (self.sl_rot, clip.rotation), (self.sl_opacity, clip.opacity * 100),
                         (self.sl_fade_in, clip.fade_in), (self.sl_fade_out, clip.fade_out),
-                        (self.sl_volume, clip.volume * 100)):
+                        (self.sl_volume, clip.volume * 100), (self.sl_pan_x, clip.pan_x), (self.sl_pan_y, clip.pan_y)):
             sl.set_value(val)
+        boxed = clip.box_w > 0 and clip.box_h > 0
+        for w in (self.sl_pan_x, self.sl_pan_y, self.lbl_pan_x, self.lbl_pan_y):
+            w.setVisible(boxed)
         for sp, val in ((self.sp_start, clip.start), (self.sp_len, clip.duration), (self.sp_layer, clip.track + 2)):
             sp.blockSignals(True)
             sp.setValue(val)

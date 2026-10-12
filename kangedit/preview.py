@@ -416,7 +416,8 @@ class PreviewEngine:
         fn = self._grader(ov, playing) if look.color else None
         if fn is not None:
             rgba = np.dstack([fn(np.ascontiguousarray(rgba[..., :3])), rgba[..., 3]])
-        layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation)
+        layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
+                                      c.pan_x, c.pan_y)
         layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
         reframe.composite(out, layer, c.x * look.width, c.y * look.height, c.alpha_at(t))
 

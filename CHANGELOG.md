@@ -7,6 +7,14 @@ and the Release workflow uses that section as the GitHub release notes.
 ## [Unreleased]
 
 ### Added
+- Multicam in ✨ Auto Edit: give each recording an angle (main, angle 2, 3, 4; guessed from the camera), and the
+  angles are synced by their sound to within a millisecond, clock drift between cameras included. The main
+  angle is edited as usual and every other angle follows on the video layers, cut at the same moments. Layout
+  templates: picture in picture, main video + talking cam (a square box cropped around the speaker's face;
+  main on top and speaker below in vertical video), stacked top / bottom, side by side and a 2 × 2 grid.
+  Choose whose sound is used, and whether to keep to moments every angle recorded. The angles stay in sync
+  after trims, slips, splits, *Other moment* and new hooks; *Tools → Multicam layout* (or a layer clip's
+  right-click menu) switches the layout afterwards. Layer clips can now be cropped to fill a box (Crop X / Y).
 - Images: import JPG, PNG, GIF, BMP, WebP and TIFF. An image on the main track is a 5-second clip that can be
   trimmed to any length; animated GIFs loop; PNG transparency is kept on video layers.
 - Video layers (V2, V3…) above the main track for picture in picture, logos, B-roll and images on top: drag

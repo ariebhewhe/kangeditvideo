@@ -643,7 +643,7 @@ class Viewer(QWidget):
             f = self.project.footage.get(c.footage_id)
             if f is None or not (c.start <= t < c.end) or c.start >= self.project.duration:
                 continue
-            w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale)
+            w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h)
             out.append((c.id, c.x, c.y, w / tw, h / th, c.rotation))
         return out
 

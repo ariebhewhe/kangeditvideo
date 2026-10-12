@@ -36,6 +36,7 @@ class Footage:
     color_transfer: str = ""
     rotation: int = 0
     creation_time: str = ""
+    face: Optional[list] = None    # main face (centre x, y, height as parts of the picture), for framing crops
     log_profile: str = "none"      # built-in camera profile key, "lut:<path>" or "none"
     tonemap: str = "filmic"
     camera: str = ""               # identified camera make/model
@@ -126,6 +127,14 @@ class OverlayClip:
     fade_out: float = 0.0
     volume: float = 1.0            # the overlay video's own sound
     grade: Grade = field(default_factory=Grade)
+    # Box: > 0 crops the picture to fill a box this part of the frame's width / height (times `scale`) instead
+    # of showing it whole; pan_x / pan_y (-1..1) choose which part of the picture fills it.
+    box_w: float = 0.0
+    box_h: float = 0.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+    angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
+    link: str = ""                 # multicam: id of the main-track clip it follows
     id: str = field(default_factory=new_id)
 
     @property
@@ -303,6 +312,8 @@ class ProjectSettings:
     # Auto ducking: sounds marked `duck` (music) drop by this many dB under the clips' own sound.
     duck_db: float = 12.0
     overlay_tracks: int = 1        # video layers shown above the main track
+    # Multicam (see multicam.py): {"angles": {footage id: angle number}, "template": key, "audio": choice}
+    multicam: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

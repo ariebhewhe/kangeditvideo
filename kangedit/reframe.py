@@ -130,18 +130,35 @@ def ffmpeg_tilt(deg: float, fill: str = "black") -> str:
 
 
 # ----------------------------------------------------------------------------- overlay layers
-def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float) -> tuple[int, int]:
-    """Size of an overlay: fitted inside the frame (scale 1), then scaled."""
+def overlay_place(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float = 0.0, box_h: float = 0.0,
+                  pan_x: float = 0.0, pan_y: float = 0.0) -> Placement:
+    """How an overlay picture is scaled and cropped for a tw x th frame: fitted inside the frame and scaled,
+    or (with a box) scaled to fill a box_w x box_h part of the frame (times scale) and cropped to it."""
+    if box_w > 0 and box_h > 0:
+        bw, bh = _even(box_w * scale * tw), _even(box_h * scale * th)
+        return place(sw, sh, bw, bh, "fill", 1.0, pan_x, pan_y)
     s = min(tw / max(1, sw), th / max(1, sh)) * max(0.01, scale)
-    return _even(sw * s), _even(sh * s)
+    w, h = _even(sw * s), _even(sh * s)
+    return Placement(w, h, 0, 0, w, h, 0, 0)
 
 
-def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float) -> np.ndarray:
-    """The overlay picture (RGBA) scaled for a tw x th frame and rotated clockwise on a transparent canvas
-    just big enough for it."""
+def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float = 0.0,
+                 box_h: float = 0.0) -> tuple[int, int]:
+    """Visible size of an overlay in a tw x th frame (see overlay_place)."""
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h)
+    return p.crop_w, p.crop_h
+
+
+def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float, box_w: float = 0.0,
+                  box_h: float = 0.0, pan_x: float = 0.0, pan_y: float = 0.0) -> np.ndarray:
+    """The overlay picture (RGBA) scaled (and cropped to its box) for a tw x th frame and rotated clockwise on
+    a transparent canvas just big enough for it."""
     sh, sw = rgba.shape[:2]
-    w, h = overlay_size(sw, sh, tw, th, scale)
-    img = cv2.resize(rgba, (w, h), interpolation=cv2.INTER_AREA if w < sw else cv2.INTER_LINEAR)
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h, pan_x, pan_y)
+    img = cv2.resize(rgba, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA if p.scaled_w < sw
+                     else cv2.INTER_LINEAR)
+    img = np.ascontiguousarray(img[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w])
+    w, h = p.crop_w, p.crop_h
     if abs(rotation) < 0.01:
         return img
     m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -rotation, 1.0)
@@ -166,6 +183,20 @@ def composite(canvas: np.ndarray, layer: np.ndarray, cx: float, cy: float, alpha
     a = src[..., 3:4].astype(np.float32) * (alpha / 255.0)
     dst = canvas[ay0:ay1, ax0:ax1, :3]
     dst[:] = (src[..., :3].astype(np.float32) * a + dst.astype(np.float32) * (1.0 - a) + 0.5).astype(np.uint8)
+
+
+def pan_for_point(cx: float, cy: float, sw: int, sh: int, tw: int, th: int, box_w: float, box_h: float,
+                  scale: float = 1.0, at_y: float = 0.42) -> tuple[float, float]:
+    """pan_x / pan_y that put the point (cx, cy, parts of the picture) at the middle of a box crop (a face a
+    bit above the middle)."""
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h)
+
+    def offset(centre: float, full: int, win: int, at: float) -> float:
+        if full <= win:
+            return 0.0
+        return float(np.clip(2.0 * (centre * full - at * win) / (full - win) - 1.0, -1.0, 1.0))
+
+    return offset(cx, p.scaled_w, p.crop_w, 0.5), offset(cy, p.scaled_h, p.crop_h, at_y)
 
 
 # ----------------------------------------------------------------------------- zoom to a face

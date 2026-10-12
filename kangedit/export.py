@@ -201,8 +201,11 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                 write_cube(os.path.join(workdir, lut), c.grade, f.log_profile, f.tonemap)
                 matrix = "bt709" if (use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
-            w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale)
-            chain += f"scale={w}:{h}:flags=lanczos,format=rgba,"
+            pl = reframe.overlay_place(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
+            chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
+            if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
+                chain += f"crop={pl.crop_w}:{pl.crop_h}:{pl.crop_x}:{pl.crop_y},"
+            chain += "format=rgba,"
             if abs(c.rotation) >= 0.01:
                 a = math.radians(c.rotation)
                 chain += f"rotate={a:.6f}:ow=rotw({a:.6f}):oh=roth({a:.6f}):c=none,"

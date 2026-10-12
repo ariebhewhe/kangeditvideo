@@ -770,6 +770,11 @@ class TimelineView(QWidget):
             self._menu_action(sub, "Up (in front)", "ov_layer:up", oid)
         if c.track > 0:
             self._menu_action(sub, "Down (behind)", "ov_layer:down", oid)
+        if c.angle:
+            from ..multicam import TEMPLATES
+            sub = m.addMenu("Multicam layout (all angles)")
+            for key, label in TEMPLATES.items():
+                self._menu_action(sub, label, f"multicam_layout:{key}", oid)
         self._menu_action(m, "Settings…\tDouble-click", "ov_edit", oid)
         m.addSeparator()
         self._menu_action(m, "Delete\tDel", "ov_delete", oid)

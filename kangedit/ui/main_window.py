@@ -24,7 +24,8 @@ from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
-from .. import images, music, reframe, sfx, updater
+from .. import images, multicam, music, reframe, sfx, updater
+from ..sync import SyncResult, sync_files
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -277,6 +278,11 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_auto_log)
         m.addAction(self._act("Detect log profile for all footage", lambda: self.detect_log(list(self.project.footage)),
                               None, "Identify the camera of every imported file and choose its log → Rec.709 conversion"))
+        sub = m.addMenu("Multicam layout")
+        sub.setToolTipsVisible(True)
+        for key, label in multicam.TEMPLATES.items():
+            a = sub.addAction(label, lambda k=key: self.multicam_layout(k))
+            a.setToolTip(multicam.TEMPLATE_HINTS[key])
         m.addSeparator()
         self.a_color_all = self._act("Auto color all clips", lambda: self.inspector_request("auto_color_all"))
         m.addAction(self.a_color_all)
@@ -728,6 +734,9 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def refresh_all(self, captions: bool = True):
+        # Synced camera angles follow every change to the main track (no-op without multicam).
+        if multicam.follow(self.project):
+            self._schedule_audio()
         self.bin.analyses = self.analyses
         self.tl.analyses = self.analyses
         self.tl.min_gap = self.last_auto.min_gap
@@ -1156,7 +1165,7 @@ class MainWindow(QMainWindow):
         self.last_auto = s
         for k, v in s.to_dict().items():
             self.qs.setValue(f"auto/{k}", v)
-        self._run_auto_edit(s, ids, dlg.aspect(), fresh=True)
+        self._run_auto_edit(s, ids, dlg.aspect(), fresh=True, multi=dlg.multicam())
 
     def regenerate_auto_edit(self, factor: Optional[float]):
         """Rebuild the automatic edit with the last settings and footage, shorter / longer than the timeline
@@ -1185,12 +1194,22 @@ class MainWindow(QMainWindow):
         s.clip_min = min(s.clip_min, target)
         self.last_auto.target_duration = target
         self.qs.setValue("auto/target_duration", target)
-        self._run_auto_edit(s, ids, None, f"Regenerating the edit at {target:.0f} s")
+        mc = self.project.settings.multicam or {}
+        multi = mc if mc.get("angles") and any(c.angle >= 2 for c in self.project.overlays) else None
+        if multi:
+            ids = [fid for fid, k in mc["angles"].items() if k == 1 and fid in self.project.footage] or ids
+        self._run_auto_edit(s, ids, None, f"Regenerating the edit at {target:.0f} s", multi=multi)
 
     def _run_auto_edit(self, s: AutoEditSettings, ids: list[str], aspect: Optional[str], name: str = "Auto edit",
-                       fresh: bool = False):
-        """`fresh`: a new edit, which prefers moments the timeline and recent auto edits did not show."""
+                       fresh: bool = False, multi: Optional[dict] = None):
+        """`fresh`: a new edit, which prefers moments the timeline and recent auto edits did not show.
+        `multi`: multicam setup (see AutoEditDialog.multicam): `ids` are the main angle's footage; the other
+        angles are synced by sound and laid on the video layers in step with the edit."""
         self._auto_ids = list(ids)
+        mc_angles = {fid: k for fid, k in (multi or {}).get("angles", {}).items() if fid in self.project.footage}
+        mc_known = self._known_syncs(mc_angles) if multi else {}
+        mc_footage = {fid: self.project.footage[fid] for fid in mc_angles}
+        use_proxies = self.project.settings.use_proxies
         self.queue_analysis(ids)
         footage = {fid: self.project.footage[fid] for fid in ids}
         existing = [] if s.replace_timeline else list(self.project.clips)
@@ -1204,6 +1223,11 @@ class MainWindow(QMainWindow):
         lang = self.project.settings.whisper_language
 
         def job(progress, cancel):
+            syncs, faces, blockers = {}, {}, []
+            if multi:
+                syncs, faces = self._multicam_prepare(mc_angles, mc_footage, mc_known, use_proxies, progress, cancel)
+                if multi.get("covered", True):
+                    blockers = multicam.coverage_blockers(mc_footage, mc_angles, syncs)
             progress(0.3, "Analyzing footage…")
             analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
             order = story_order(footage, ids)
@@ -1223,17 +1247,17 @@ class MainWindow(QMainWindow):
                 sel = copy.copy(s)
                 sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
             progress(0.8, "Choosing the best moments…")
-            body = select(footage, analyses, sel, order, existing=existing + [c for c in (intro, outro) if c],
-                          avoid=avoid, seed=seed)
+            body = select(footage, analyses, sel, order,
+                          existing=existing + blockers + [c for c in (intro, outro) if c], avoid=avoid, seed=seed)
             hooks = list(itertools.takewhile(lambda c: c.label == "hook", body))
             body = body[len(hooks):]
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
             apply_edit_style(clips, footage, analyses, s)
-            return analyses, clips, notes
+            return analyses, clips, notes, syncs, faces
 
         def done(res):
-            analyses, clips, notes = res
+            analyses, clips, notes, syncs, faces = res
             self.analyses.update(analyses)
             if not clips:
                 QMessageBox.information(self, APP_NAME, "No suitable moments were found. Try shorter clip lengths "
@@ -1251,6 +1275,10 @@ class MainWindow(QMainWindow):
             if aspect:
                 self.project.settings.aspect = aspect
                 self._sync_project_controls()
+            if multi:
+                notes = self._multicam_place(multi, mc_angles, syncs, faces, clips, s.replace_timeline) + notes
+            elif s.replace_timeline:
+                self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
             self.tl.selected = ""
             self.refresh_all()
             self.tl.fit()
@@ -1263,6 +1291,94 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(msg + (" · " + " · ".join(notes) if notes else ""))
 
         self.tasks.submit(name, job, done, self._task_error("Auto edit"))
+
+    # ================================================================== multicam
+    def _known_syncs(self, angles: dict[str, int]) -> dict[str, tuple[str, SyncResult]]:
+        """Syncs found by an earlier multicam edit that still apply (same main-angle files)."""
+        out = {}
+        for fid, (ref, o, d, conf, ov) in ((self.project.settings.multicam or {}).get("syncs") or {}).items():
+            if angles.get(fid, 0) >= 2 and angles.get(ref) == 1:
+                out[fid] = (ref, SyncResult(o, d, conf, ov))
+        return out
+
+    def _multicam_prepare(self, angles: dict[str, int], footage: dict[str, Footage], known: dict,
+                          use_proxies: bool, progress, cancel) -> tuple[dict, dict]:
+        """(In the background.) Sync every other angle to the main angle by sound, and find each angle's main
+        face (for cropping it into a layout box). Returns ({footage id: (main id, SyncResult)},
+        {footage id: face})."""
+        mains = [fid for fid, k in angles.items() if k == 1]
+        todo = [fid for fid, k in angles.items() if k >= 2 and fid not in known]
+        syncs = dict(known)
+        if todo:
+            by_path = sync_files([footage[f].path for f in mains], [footage[f].path for f in todo],
+                                 lambda p, m: progress(0.25 * p, m), cancel)
+            ref_of = {footage[f].path: f for f in mains}
+            for fid in todo:
+                hit = by_path.get(footage[fid].path)
+                if hit is not None:
+                    syncs[fid] = (ref_of[hit[0]], hit[1])
+        faces = {}
+        pool = DecoderPool(limit=2)
+        try:
+            for k, (fid, f) in enumerate(footage.items()):
+                if cancel.is_set():
+                    raise Cancelled()
+                if f.face is not None:
+                    continue
+                progress(0.25 + 0.05 * k / max(1, len(footage)), "Finding the speakers…")
+                dec = pool.get(f, use_proxies, 480)
+                frames = [img.copy() for i in range(7) if (img := dec.frame_at(f.duration * (i + 0.5) / 7)) is not None]
+                face = reframe.find_face(frames)
+                faces[fid] = list(face) if face is not None else []
+        finally:
+            pool.close()
+        return syncs, faces
+
+    def _multicam_place(self, multi: dict, angles: dict[str, int], syncs: dict, faces: dict,
+                        clips: list[TimelineClip], replace: bool) -> list[str]:
+        """Lay the synced angles over the new clips; returns status notes."""
+        for fid, face in faces.items():
+            if fid in self.project.footage:
+                self.project.footage[fid].face = face
+        if replace:
+            self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
+        new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"))
+        self.project.overlays += new
+        top = max((c.track for c in self.project.overlays), default=0)
+        self.project.settings.overlay_tracks = max(1, top + 1)
+        self.project.settings.multicam = {
+            "angles": dict(angles), "template": multi["template"], "audio": multi.get("audio", "main"),
+            "covered": multi.get("covered", True),
+            "syncs": {fid: [ref, r.offset, r.drift, r.confidence, r.overlap] for fid, (ref, r) in syncs.items()},
+            "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
+        notes = []
+        for fid, k in sorted(angles.items(), key=lambda it: it[1]):
+            if k < 2:
+                continue
+            name = self.project.footage[fid].name
+            if fid in syncs:
+                ref, r = syncs[fid]
+                drift = f", drift {r.drift * 1e6:+.0f} ppm" if abs(r.drift) > 2e-6 else ""
+                notes.append(f"{name} synced to {self.project.footage[ref].name} at {r.offset:+.3f} s{drift}")
+            else:
+                notes.append(f"⚠ {name}: no matching sound found, left out")
+        missing = [self.project.footage[f].name for f, k in angles.items() if k >= 2 and f not in syncs]
+        if missing:
+            QMessageBox.warning(self, APP_NAME, "These angles could not be synced to the main angle by their "
+                                                "sound (no common sound, or no sound at all), so they were left "
+                                                "out:\n\n" + "\n".join(missing))
+        return notes
+
+    def multicam_layout(self, template: str):
+        """Move the synced angles to another layout template."""
+        if not any(c.angle >= 2 for c in self.project.overlays):
+            QMessageBox.information(self, APP_NAME, "There are no synced angles on the timeline yet: turn on "
+                                                    "Multicam in ✨ Auto Edit.")
+            return
+        self.project_checkpoint()
+        n = multicam.relayout(self.project, template)
+        self._overlays_changed()
+        self.lbl_status.setText(f"Multicam layout: {multicam.TEMPLATES[template]} ({n} layer clips)")
 
     def new_hook(self):
         """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
@@ -2433,6 +2549,8 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Select footage or images in the Media panel first.")
             else:
                 self.add_overlays(ids, float(t), int(track))
+        elif key.startswith("multicam_layout:"):
+            self.multicam_layout(key.split(":", 1)[1])
         elif key.startswith("ov_"):
             self._overlay_action(key, payload)
         elif key == "caption_style":
@@ -2608,6 +2726,7 @@ class MainWindow(QMainWindow):
 
     def _inspector_changed(self, kind: str):
         self.project.dirty = True
+        multicam.follow(self.project)      # a main-angle box on a layer shows the clip's grade and trim
         if kind in ("trim",):
             self._on_timeline_edited()
             self.tl.refresh()
