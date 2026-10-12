@@ -42,6 +42,7 @@ from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
 from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
                       ProxyDialog)
+from .flow import FlowBar
 from .inspector import Inspector
 from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
@@ -340,6 +341,8 @@ class MainWindow(QMainWindow):
         tb = self.addToolBar("Main")
         tb.setObjectName("main")
         tb.setMovable(False)
+        # One row when the window is wide enough, more rows when it isn't: nothing hides in a » menu.
+        bar = FlowBar(hspacing=4, vspacing=4)
 
         def arrow():
             lbl = QLabel(" › ")
@@ -358,8 +361,7 @@ class MainWindow(QMainWindow):
         self.btn_import = QPushButton("1. Import")
         self.btn_import.setToolTip("Add your video files (Ctrl+I). You can also drag them onto the Media panel.")
         self.btn_import.clicked.connect(self.import_dialog)
-        tb.addWidget(self.btn_import)
-        tb.addWidget(arrow())
+        bar.add(group(self.btn_import, arrow()))
 
         self.btn_auto = QPushButton("2. ✨ Auto Edit")
         self.btn_auto.setObjectName("primary")
@@ -372,8 +374,7 @@ class MainWindow(QMainWindow):
             b.setToolTip(tip + " (same settings and footage)")
             b.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
         self.grp_auto = group(self.btn_auto, b_short, b_long)
-        tb.addWidget(self.grp_auto)
-        tb.addWidget(arrow())
+        bar.add(group(self.grp_auto, arrow()))
 
         refine = QLabel("3. Refine")
         refine.setStyleSheet("color: #9aa0ab;")
@@ -387,11 +388,11 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, w=tab: self.show_refine(w))
             btns.append(b)
         self.grp_refine = group(*btns)
-        tb.addWidget(self.grp_refine)
+        bar.add(self.grp_refine)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer)
+        bar.add(spacer)
 
         lbl = QLabel("Frame")
         lbl.setStyleSheet("color: #9aa0ab;")
@@ -415,18 +416,17 @@ class MainWindow(QMainWindow):
         self.chk_proxy.setToolTip("Play back from small proxy copies when available (Tools → Generate proxies)")
         self.chk_proxy.toggled.connect(self._toggle_proxies)
         self.grp_frame = group(lbl, self.cb_aspect, self.cb_res, self.cb_fps, self.cb_fit, self.chk_proxy)
-        tb.addWidget(self.grp_frame)
-        tb.addWidget(arrow())
+        bar.add(group(self.grp_frame, arrow()))
 
         self.btn_export = QPushButton("4. ⬆ Export")
         self.btn_export.setObjectName("primary")
         self.btn_export.setToolTip("Render the finished video (Ctrl+E)")
         self.btn_export.clicked.connect(self.export_dialog)
-        tb.addWidget(self.btn_export)
         self.btn_help = QToolButton(text=" ? ")
         self.btn_help.setToolTip("Guided tour (Shift+F1)")
         self.btn_help.clicked.connect(lambda: self.show_tour())
-        tb.addWidget(self.btn_help)
+        bar.add(group(self.btn_export, self.btn_help))
+        tb.addWidget(bar)
 
     def _build_statusbar(self):
         sb = self.statusBar()
