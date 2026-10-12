@@ -82,7 +82,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 ### Ready-made builds
 
-Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** and **Linux (x64)**: no Python needed. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time. `SHA256SUMS.txt` lists the archives' checksums.
+A packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** or **Linux (x64)** needs no Python. Build one from the `stable` branch with `python scripts/build.py` (see [Development and releases](#development-and-releases)), or run the *Build* workflow by hand and download it from the run's artifacts. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time.
 
 ### From source
 
@@ -281,18 +281,24 @@ python main.py --self-test            # every module loads and the main window o
 python scripts/build.py               # packaged build for this platform → dist/KangEdit-<version>-<platform>.zip
 ```
 
-**Versioning.** `kangedit/__init__.py` holds the version (semantic versioning: `MAJOR.MINOR.PATCH`). Release tags are `vMAJOR.MINOR.PATCH` and must match it. `python scripts/bump_version.py patch|minor|major|X.Y.Z` changes it. Packaged builds also show the commit and build date in *Help → About* and `--version`.
+**Branches.** `main` is development: features and fixes go there through pull requests. `stable` holds the latest released version. Use `stable` for a dependable copy, and `main` for the newest changes.
+
+**Versioning.** `kangedit/__init__.py` holds the version (semantic versioning: `MAJOR.MINOR.PATCH`). `python scripts/bump_version.py patch|minor|major|X.Y.Z` changes it. Packaged builds also show the commit and build date in *Help → About* and `--version`.
+
+**Releasing.** A release is a pull request from `main` into `stable`:
+
+1. On `main`, bump the version (`python scripts/bump_version.py minor`), and in `CHANGELOG.md` rename `## [Unreleased]` to the new version (`## [0.2.0] - YYYY-MM-DD`) with a fresh `## [Unreleased]` above it. Commit and merge into `main`.
+2. Open a pull request from `main` into `stable` and merge it once CI passes. Its *release-check* job (`python scripts/release_check.py`) makes sure the version is newer than `stable`'s and has a CHANGELOG section.
+3. Optionally, tag the merge so older versions stay easy to find: `git tag v0.2.0 origin/stable && git push origin v0.2.0`.
+
+Releases aren't built or published automatically. Build a version locally with `python scripts/build.py` on each platform, or with the *Build* workflow.
 
 **GitHub Actions** (`.github/workflows/`):
 
 | Workflow | When | What |
 |---|---|---|
-| **CI** | Every push and pull request | Lint, tests and the self-test on Windows, macOS and Linux with Python 3.10 and 3.12. On `main` it also packages development builds (workflow artifacts, kept 30 days). |
-| **Build** | Called by CI and Release, or by hand | PyInstaller builds for Windows x64, macOS arm64 and Linux x64. Each build runs its own self-test before it is archived. |
-| **Release** | A `v*.*.*` tag is pushed | Checks the tag against the version, tests, builds every platform and publishes a GitHub Release with the archives, `SHA256SUMS.txt` and generated release notes. |
-| **Bump version** | By hand (*Actions → Bump version → Run workflow*) | Bumps the version (patch / minor / major / explicit), commits, tags and runs Release. If `main` is protected, allow GitHub Actions to push to it, or bump locally and push the tag. |
-
-To release by hand instead: `python scripts/bump_version.py minor`, commit, then `git tag v1.1.0 && git push origin main v1.1.0`.
+| **CI** | Every pull request, and pushes to `main` and `stable` | Lint, tests and the self-test on Windows, macOS and Linux with Python 3.10 and 3.12. Pull requests into `stable` also run *release-check*. |
+| **Build** | By hand only (*Actions → Build → Run workflow*) | PyInstaller builds for Windows x64, macOS arm64 and Linux x64, kept as workflow artifacts for 30 days. Each build runs its own self-test before it is archived. |
 
 ---
 
@@ -304,10 +310,11 @@ install.py              cross-platform setup (venv, packages, FFmpeg)
 run.bat / run.sh / run.command   launchers for Windows / macOS + Linux / macOS Finder
 requirements.txt        app packages;  requirements-dev.txt: + test, lint and packaging tools
 pyproject.toml          pytest and ruff settings
-scripts/                build.py (packaged build), bump_version.py (versioning)
+scripts/                build.py (packaged build), bump_version.py (versioning), release_check.py + changelog.py (release PR check)
+CHANGELOG.md            release history
 packaging/              PyInstaller spec
 tests/                  pytest suite
-.github/workflows/      CI, Build, Release, Bump version
+.github/workflows/      CI, Build (manual)
 kangedit/
   app.py                startup (offers the FFmpeg download when it's missing)
   config.py             paths (app folder, cache, user data), constants, open_path()

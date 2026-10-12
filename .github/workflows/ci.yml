@@ -1,9 +1,10 @@
-# Lint and test every push and pull request; package a development build from main.
+# Lint and test every push and pull request. A pull request into stable (a release) must also bump the
+# version past stable's and have a CHANGELOG.md section for it.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, stable]
   pull_request:
   workflow_dispatch:
 
@@ -53,7 +54,15 @@ jobs:
       - name: Self-test (all modules load, main window opens)
         run: python main.py --self-test
 
-  package:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint, test]
-    uses: ./.github/workflows/build.yml
+  release-check:
+    if: github.event_name == 'pull_request' && github.base_ref == 'stable'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Version is newer than stable's and has a CHANGELOG section
+        run: python scripts/release_check.py origin/stable
