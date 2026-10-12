@@ -89,7 +89,13 @@ def test_refine_tabs_scroll_and_fit_a_small_display(qapp):
                  "timeline": window.timeline, "media list": window.bin, "inspector": window.inspector.widget(),
                  "text": window.text_panel.widget(), "captions": window.caps_panel, "sounds": window.sfx_panel}
         widths = {k: max(w.minimumSizeHint().width(), w.minimumWidth()) for k, w in parts.items()}
-        assert hint.width() <= 1400 and hint.height() <= 820, f"{hint}: {widths}"
+        # Measured against a 9 pt UI font at 100 % (the alphabet is ~170 px wide in Segoe UI or DejaVu Sans).
+        # Offscreen Qt on the Windows runners renders text about twice as large, so scale the limit with it.
+        from PySide6.QtGui import QFontMetrics
+        alphabet = QFontMetrics(qapp.font()).horizontalAdvance("abcdefghijklmnopqrstuvwxyz")
+        scale = max(1.0, alphabet / 170)
+        font = f"{qapp.font().family()} {qapp.font().pointSizeF():g} pt, alphabet {alphabet} px"
+        assert hint.width() <= 1400 * scale and hint.height() <= 820 * scale, f"{hint}: {widths}; {font}"
     finally:
         window.project.dirty = False
         window.close()
