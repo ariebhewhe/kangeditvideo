@@ -63,6 +63,7 @@ and the Release workflow uses that section as the GitHub release notes.
   recovered. Graded clips may look slightly different than in 0.2.
 
 ### Fixed
+- Without FFmpeg, analysis and syncing report "FFmpeg was not found" instead of failing with an internal error.
 - With several clips selected (e.g. Ctrl+A), *Import LUT (.cube)…* in the clip's Camera profile or Look list
   applied the imported LUT to one clip only; it now applies to every selected clip. A camera detection that
   finishes after you picked a profile by hand no longer overwrites your choice.
