@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-12
+
 ### License
 - KangEdit now has a license: the MIT License with the Commons Clause (`LICENSE`). It may be used for anything,
   including paid and monetized video work, changed and shared for free, but KangEdit itself may not be sold
