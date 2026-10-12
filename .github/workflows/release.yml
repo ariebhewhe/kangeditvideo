@@ -1,6 +1,6 @@
 # Publish a GitHub Release for a version tag (vX.Y.Z matching kangedit.__version__): test, build every
-# platform, then attach the archives and their SHA-256 checksums. Runs when a tag is pushed, or from the
-# "Bump version" workflow.
+# platform, then attach the archives and their SHA-256 checksums, with the version's CHANGELOG.md section as
+# the release notes. Runs when a tag is pushed, or from the "Bump version" workflow.
 name: Release
 
 on:
@@ -58,6 +58,9 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v5
         with:
           pattern: KangEdit-*
@@ -66,10 +69,15 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum KangEdit-* | tee SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: python scripts/changelog.py "$VERSION" | tee "$RUNNER_TEMP/notes.md"
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
+          # The CHANGELOG section comes first; GitHub's generated notes (merged PRs, contributors) follow it.
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "KangEdit $VERSION" --generate-notes
+            --title "KangEdit $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

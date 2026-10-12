@@ -49,11 +49,11 @@ from .text_panel import TextPanel
 from .theme import compact_combos, fmt_time
 from .timeline import TimelinePanel
 from .tour import TourOverlay, TourStep
-
-log = logging.getLogger(__name__)
 from .tray import Tray
 from .platform_overlay import PLATFORM_OVERLAYS
 from .viewer import ADJUST_MODES, Viewer
+
+log = logging.getLogger(__name__)
 
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 

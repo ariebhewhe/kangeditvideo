@@ -289,10 +289,12 @@ python scripts/build.py               # packaged build for this platform → dis
 |---|---|---|
 | **CI** | Every push and pull request | Lint, tests and the self-test on Windows, macOS and Linux with Python 3.10 and 3.12. On `main` it also packages development builds (workflow artifacts, kept 30 days). |
 | **Build** | Called by CI and Release, or by hand | PyInstaller builds for Windows x64, macOS arm64 and Linux x64. Each build runs its own self-test before it is archived. |
-| **Release** | A `v*.*.*` tag is pushed | Checks the tag against the version, tests, builds every platform and publishes a GitHub Release with the archives, `SHA256SUMS.txt` and generated release notes. |
+| **Release** | A `v*.*.*` tag is pushed | Checks the tag against the version, tests, builds every platform and publishes a GitHub Release with the archives, `SHA256SUMS.txt`, the version's `CHANGELOG.md` section and generated release notes. |
 | **Bump version** | By hand (*Actions → Bump version → Run workflow*) | Bumps the version (patch / minor / major / explicit), commits, tags and runs Release. If `main` is protected, allow GitHub Actions to push to it, or bump locally and push the tag. |
 
-To release by hand instead: `python scripts/bump_version.py minor`, commit, then `git tag v1.1.0 && git push origin main v1.1.0`.
+**Changelog.** Note changes under `## [Unreleased]` in `CHANGELOG.md`. Before a release, rename that heading to the new version (`## [0.2.0] - YYYY-MM-DD`) and add a fresh `## [Unreleased]` above it; the Release workflow uses that section as the release notes.
+
+To release by hand instead: `python scripts/bump_version.py minor`, commit, then `git tag v0.2.0 && git push origin main v0.2.0`.
 
 ---
 
@@ -304,7 +306,8 @@ install.py              cross-platform setup (venv, packages, FFmpeg)
 run.bat / run.sh / run.command   launchers for Windows / macOS + Linux / macOS Finder
 requirements.txt        app packages;  requirements-dev.txt: + test, lint and packaging tools
 pyproject.toml          pytest and ruff settings
-scripts/                build.py (packaged build), bump_version.py (versioning)
+scripts/                build.py (packaged build), bump_version.py (versioning), changelog.py (release notes)
+CHANGELOG.md            release history
 packaging/              PyInstaller spec
 tests/                  pytest suite
 .github/workflows/      CI, Build, Release, Bump version

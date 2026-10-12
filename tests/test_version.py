@@ -33,3 +33,17 @@ def test_bump(tmp_path, monkeypatch):
     assert '__version__ = "1.5.0"' in init.read_text()
     bump_version.main(["major"])
     assert '__version__ = "2.0.0"' in init.read_text()
+
+
+def test_changelog_section():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import changelog
+    finally:
+        sys.path.pop(0)
+    text = ("# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-01-02\n\n### Added\n- B\n\n"
+            "## [1.0.0] - 2026-01-01\n\n- A\n\n[1.1.0]: https://example.com\n")
+    assert changelog.section("v1.1.0", text) == "### Added\n- B"
+    assert changelog.section("1.0.0", text) == "- A"
+    assert changelog.section("9.9.9", text) == ""
+
