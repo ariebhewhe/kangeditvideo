@@ -293,11 +293,18 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         prep = _IMAGE_PREP if f.is_image else ""
         chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}fps={s.fps:.4f}{turn}[v{i}a]"]
         sw, sh = reframe.quarter_dims(f.width, f.height, quarters)
-        chain.append(reframe.ffmpeg_filter(sw, sh, tw, th, s.fit_mode, clip.zoom,
-                                           clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
+        box = reframe.box_rect(tw, th, (clip.box_x, clip.box_y, clip.box_w, clip.box_h)) \
+            if clip.box_w > 0 and clip.box_h > 0 else None
+        if box:   # a box of the frame (multicam layouts), cropped to fill it; padded with black at the end
+            chain.append(reframe.ffmpeg_filter(sw, sh, box[2], box[3], "fill", clip.zoom,
+                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
+        else:
+            chain.append(reframe.ffmpeg_filter(sw, sh, tw, th, s.fit_mode, clip.zoom,
+                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
         post = f"[v{i}b]"
         color = needs_color(clip.grade, f.log_profile)
-        halation = ffmpeg_halation(clip.grade, th, f"v{i}g", f"v{i}h")
+        ph = box[3] if box else th          # picture height: halation and sharpening scale with it
+        halation = ffmpeg_halation(clip.grade, ph, f"v{i}g", f"v{i}h")
         if color or halation:
             matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
             post += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb48le,"
@@ -309,10 +316,11 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
             chain.append(post + f"null[v{i}g]")
             chain += halation
             post = f"[v{i}h]"
-        sharpen = ffmpeg_sharpen(clip.grade, th)
+        sharpen = ffmpeg_sharpen(clip.grade, ph)
         rot = reframe.ffmpeg_tilt(tilt)
+        pad = f"pad={tw}:{th}:{box[0]}:{box[1]}:black," if box else ""
         post += (f"scale=out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
-                 f"{rot + ',' if rot else ''}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
+                 f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
         chain.append(post)
         graph += chain
         graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss)))

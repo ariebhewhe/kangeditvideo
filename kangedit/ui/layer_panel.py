@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..models import OverlayClip, Project
@@ -27,7 +27,10 @@ LAYER_HELP = (
     "<b>Time</b><br>"
     "• On the timeline, drag the clip to move it (up / down: another layer), drag its edges to trim<br>"
     "• Higher layers are in front; right-click a layer for more layers, a clip for fades, rotation, split, "
-    "duplicate and multicam layouts"
+    "duplicate and multicam layouts<br>"
+    "• Multicam angles are <b>🔗 linked</b> to their main clip: dragging an angle slips them all, its edges trim "
+    "them all, R gives them another moment, together. <b>🔗 Link</b> (Ctrl+L) unlinks them to edit one on its "
+    "own, and links it back in sync"
 )
 
 TIPS = ("Drag it in the viewer to move it · wheel over it to resize · on the timeline drag it up / down to "
@@ -159,6 +162,12 @@ class LayerPanel(QScrollArea):
         self.grp_sound = g
         v.addWidget(g)
 
+        self.chk_link = QCheckBox("🔗 Linked to the main clip (kept in sync)")
+        self.chk_link.setToolTip("A multicam camera angle follows the main-track clip it was cut with: trimming, "
+                                 "slipping or Other moment on either keeps every angle in sync. Untick to move "
+                                 "and trim this angle on its own; tick again to put it back in sync (Ctrl+L).")
+        self.chk_link.toggled.connect(lambda on: self._emit("link_toggle"))
+        v.addWidget(self.chk_link)
         b_del = QPushButton("Delete from the layer")
         b_del.clicked.connect(lambda: self._emit("ov_delete"))
         v.addWidget(b_del)
@@ -190,6 +199,10 @@ class LayerPanel(QScrollArea):
                         (self.sl_fade_in, clip.fade_in), (self.sl_fade_out, clip.fade_out),
                         (self.sl_volume, clip.volume * 100), (self.sl_pan_x, clip.pan_x), (self.sl_pan_y, clip.pan_y)):
             sl.set_value(val)
+        self.chk_link.setVisible(bool(clip.link))
+        self.chk_link.blockSignals(True)
+        self.chk_link.setChecked(clip.linked)
+        self.chk_link.blockSignals(False)
         boxed = clip.box_w > 0 and clip.box_h > 0
         for w in (self.sl_pan_x, self.sl_pan_y, self.lbl_pan_x, self.lbl_pan_y):
             w.setVisible(boxed)

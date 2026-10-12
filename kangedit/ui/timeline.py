@@ -653,7 +653,8 @@ class TimelineView(QWidget):
                     p.drawPolygon(QPolygonF(pts))
             if r.width() > 24 and ft is not None:
                 p.setPen(QColor("white"))
-                label = f"{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
+                link = ("🔗 " if c.linked else "⛓ unlinked · ") if c.link else ""
+                label = f"{link}{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
                 if c.opacity < 0.999:
                     label += f"  {c.opacity * 100:.0f}%"
                 p.drawText(QRectF(r.left() + 4, r.top(), r.width() - 8, head), Qt.AlignVCenter | Qt.AlignLeft,
@@ -703,9 +704,26 @@ class TimelineView(QWidget):
         if e.button() == Qt.RightButton:
             self._overlay_menu(e.globalPosition().toPoint(), c)
             return True
+        main = self._linked_main(c)
+        if main is not None:
+            # A synced camera angle is a handle on its multicam group: its edges trim, its body slips the main
+            # clip it follows, and every angle follows that (so they all stay in sync).
+            kind = {"o_trim_l": "trim_l", "o_trim_r": "trim_r"}.get(part, "slip")
+            self._drag = {"kind": kind, "clip": main.id, "x0": pos.x(), "in0": main.src_in, "out0": main.src_out,
+                          "active": False, "drop": None, "mods": Qt.NoModifier, "angle": c.id}
+            return True
         self._drag = {"kind": part, "overlay": c.id, "x0": pos.x(), "start0": c.start, "in0": c.src_in,
                       "out0": c.src_out, "track0": c.track, "active": False}
         return True
+
+    def _linked_main(self, c: OverlayClip):
+        """The main-track clip a synced camera angle follows (None for other layer clips and unlinked angles)."""
+        if not c.link or not c.linked:
+            return None
+        return next((x for x in self.project.clips if x.id == c.link), None)
+
+    def _has_angles(self, clip_id: str) -> bool:
+        return any(o.link == clip_id and o.linked for o in self.project.overlays)
 
     def _overlay_move(self, pos, d: dict):
         c = next((x for x in self.project.overlays if x.id == d["overlay"]), None)
@@ -751,6 +769,9 @@ class TimelineView(QWidget):
         self._menu_action(m, "Move to playhead", "ov_to_playhead", oid)
         self._menu_action(m, "Split at playhead", "ov_split", oid)
         self._menu_action(m, "Duplicate", "ov_duplicate", oid)
+        if c.link:
+            self._menu_action(m, "Unlink from the main clip\tCtrl+L" if c.linked else
+                              "Link to the main clip again (back in sync)\tCtrl+L", "link_toggle", oid)
         sub = m.addMenu("Position && size")
         for key, label in (("full", "Full frame"), ("center", "Centre (half size)"),
                            ("tl", "Picture in picture: top left"), ("tr", "Picture in picture: top right"),
@@ -1301,12 +1322,13 @@ class TimelineView(QWidget):
             if oc is not None:
                 self.setCursor(Qt.SizeHorCursor if opart in ("o_trim_l", "o_trim_r") else Qt.OpenHandCursor)
                 f = self.project.footage.get(oc.footage_id)
-                what = (f" · camera angle {oc.angle}, synced by sound" if oc.angle >= 2 else
-                        " · main angle" if oc.angle == 1 else "")
+                linked = self._linked_main(oc) is not None
+                what = f" · camera angle {oc.angle}, linked to the main clip" if linked else ""
                 self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}{what}\n"
                                 f"{oc.start:.2f}s, {oc.duration:.2f}s long\n"
-                                "Drag: move (also up / down to another layer) · Edges: trim\n"
-                                "In the viewer: drag to place it, wheel to resize\n"
+                                + ("Drag: slip every angle together · Edges: trim every angle · R: other moment\n"
+                                   if linked else "Drag: move (also up / down to another layer) · Edges: trim\n")
+                                + "In the viewer: drag to place it, wheel to resize\n"
                                 "Double-click: size, crop, rotation, opacity · Right-click: more")
                 return
             tx, tpart = self._text_hit(pos)
@@ -1370,17 +1392,21 @@ class TimelineView(QWidget):
             if d["kind"] != "move":
                 self.edit_started.emit()
         dt = dx / self.pps
+        group = self._has_angles(c.id)     # multicam: the viewer keeps showing every angle, in sync
         if d["kind"] == "trim_l":
             c.src_in = self._snap(min(max(0.0, d["in0"] + dt), d["out0"] - MIN_DUR))
-            self.slip_preview.emit(c.id, c.src_in)
+            if not group:
+                self.slip_preview.emit(c.id, c.src_in)
         elif d["kind"] == "trim_r":
             c.src_out = self._snap(max(min(f.duration, d["out0"] + dt), d["in0"] + MIN_DUR))
-            self.slip_preview.emit(c.id, max(c.src_in, c.src_out - 1.0 / max(1.0, f.fps)))
+            if not group:
+                self.slip_preview.emit(c.id, max(c.src_in, c.src_out - 1.0 / max(1.0, f.fps)))
         elif d["kind"] == "slip":
             dur = d["out0"] - d["in0"]
             new_in = self._snap(min(max(0.0, d["in0"] - dt), max(0.0, f.duration - dur)))
             c.src_in, c.src_out = new_in, new_in + dur
-            self.slip_preview.emit(c.id, c.src_in)
+            if not group:
+                self.slip_preview.emit(c.id, c.src_in)
             self.setCursor(Qt.ClosedHandCursor)
         elif d["kind"] == "move":
             t = self.x_to_t(pos.x())
@@ -1429,6 +1455,11 @@ class TimelineView(QWidget):
                 self.edit_finished.emit()
             else:
                 self.seek.emit(self.x_to_t(e.position().x()))
+            self.setCursor(Qt.ArrowCursor)
+            self.refresh()
+            return
+        if d.get("angle") and not d.get("active"):   # a click on a camera angle: it stays selected
+            self.seek.emit(self.x_to_t(e.position().x()))
             self.setCursor(Qt.ArrowCursor)
             self.refresh()
             return
@@ -1499,12 +1530,21 @@ class TimelineView(QWidget):
                   ("reset_color", f"Reset color{many}"),
                   ("copy_grade", "Copy this clip's grade to the selected clips" if n > 1 else "Copy grade to all clips"),
                   ("alt_moment", f"Other moment{many}	R"),
+                  ("link_toggle", None),
                   ("face_zoom", f"Zoom{many} to face"),
                   ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
                   (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
             if key is None:
                 m.addSeparator()
+                continue
+            if key == "link_toggle":
+                angles = [o for o in self.project.overlays if o.link == clip_id and o.angle >= 2]
+                if angles:
+                    on = all(o.linked for o in angles)
+                    self._menu_action(m, ("Unlink its camera angles\tCtrl+L" if on else
+                                          "Link its camera angles again (back in sync)\tCtrl+L"), "link_toggle",
+                                      clip_id)
                 continue
             if key == "transition":
                 sub = m.addMenu(f"Transition into {'these clips' if n > 1 else 'this clip'}")
@@ -1569,6 +1609,11 @@ class TimelinePanel(QWidget):
         self.btn_alt = QToolButton(text="🔀 Other moment")
         self.btn_alt.setToolTip("Swap the selected clip for the best moment close by in its footage (R). Its length "
                                 "follows the new moment. Click again for the next one; Undo brings the previous back.")
+        self.btn_link = QToolButton(text="🔗 Link", checkable=True)
+        self.btn_link.setToolTip("Multicam: the camera angles of the selected clip are linked to it — trimming, "
+                                 "slipping or Other moment on either keeps every angle in sync. Click to unlink "
+                                 "them (edit them on their own), click again to link and re-sync (Ctrl+L).")
+        self.btn_link.setEnabled(False)
         self.btn_fit = QToolButton(text="⇔ Fit")
         self.btn_fit.setToolTip("Zoom so the whole edit fits the timeline's width (Shift+Z)")
         self.btn_zoom_out = QToolButton(text="−")
@@ -1601,7 +1646,7 @@ class TimelinePanel(QWidget):
             return lbl
 
         top.add(self.btn_undo, self.btn_redo, sep(), self.btn_move, self.btn_slip, self.btn_split, self.btn_delete,
-                self.btn_fade, sep(), self.btn_hook, self.btn_alt)
+                self.btn_fade, sep(), self.btn_hook, self.btn_alt, self.btn_link)
         self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # Always room for the clip count and length; the overlap warning after it may be clipped (tooltip).
         self.lbl.setMinimumWidth(self.lbl.fontMetrics().horizontalAdvance("000 clips · 00:00:00") + 8)

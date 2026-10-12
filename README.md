@@ -268,8 +268,15 @@ sound doesn't match is left out with a warning.
 | Side by side | A full-height column per angle (for 16:9). |
 | Grid (2 × 2) | Up to four angles. |
 
-The angles stay in sync while you edit: trims, slips, splits, *Other moment*, a new hook and reordering all
-re-time them from the main clip they follow, and positions you changed by hand are kept. *Tools → Multicam
+Two angles take the main track and one layer, three angles two layers, and so on: in the boxed layouts the main
+angle's clips are shown in their box on the main track itself.
+
+The angles are **linked** to the main clip they were cut with (🔗 on the layer clip). Trims, slips, splits,
+*Other moment*, a new hook and reordering on the main track re-time them, and the angle clips are handles on the
+same group: drag one to slip every angle together, drag its edges to trim them all, press **R** with it
+selected for another moment. Positions you changed by hand are kept. **🔗 Link** in the timeline toolbar
+(Ctrl+L, also in the right-click menus and the Layer tab) unlinks the selected clip's angles, or a selected
+angle, so they can be moved and trimmed on their own; linking them again puts them back in sync. *Tools → Multicam
 layout* (or a layer clip's right-click menu) switches to another layout later; the **− / +** auto edit buttons
 regenerate the edit with its angles.
 

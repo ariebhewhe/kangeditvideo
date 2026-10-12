@@ -66,6 +66,7 @@ class Shot:
     half_in: float = 0.0         # its half-length (seconds), centered on the clip's start
     half_out: float = 0.0        # half-length of the transition out of it (the next shot's trans_in)
     rot: float = 0.0             # rotation, degrees clockwise (see reframe.split_rotation)
+    box: tuple = ()              # (centre x, centre y, width, height) in parts of the frame: shown in that box
 
 
 @dataclass(frozen=True)
@@ -425,10 +426,18 @@ class PreviewEngine:
         fn = self._grader(shot, playing) if look.color else None
         quarters, tilt = reframe.split_rotation(shot.rot)
         img = reframe.rotate_quarters(img, quarters)
-        out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
+        if shot.box:   # a box of the frame, cropped to fill it, black around it
+            bx, by, bw, bh = reframe.box_rect(look.width, look.height, shot.box)
+            out = reframe.render(img, bw, bh, "fill", shot.zoom, shot.ox, shot.oy, fn)
+        else:
+            out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
         if look.color and has_spatial(shot.grade):
             out = apply_spatial(out, shot.grade)
         out = reframe.tilt(out, tilt)
+        if shot.box:
+            canvas = np.zeros((look.height, look.width, 3), np.uint8)
+            canvas[by:by + bh, bx:bx + bw] = out
+            out = canvas
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGRA)   # Qt's native 32-bit layout: cheapest to paint
 
     def _grader(self, shot, playing: bool):

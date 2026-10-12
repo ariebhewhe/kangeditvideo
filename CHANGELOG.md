@@ -21,6 +21,11 @@ and the Release workflow uses that section as the GitHub release notes.
   Choose whose sound is used, and whether to keep to moments every angle recorded. The angles stay in sync
   after trims, slips, splits, *Other moment* and new hooks; *Tools → Multicam layout* (or a layer clip's
   right-click menu) switches the layout afterwards. Layer clips can now be cropped to fill a box (Crop X / Y).
+- Multicam angles are linked to their main clip: dragging an angle slips the whole group, its edges trim it and
+  R (Other moment) works on it, all angles staying in sync, also while dragging. **🔗 Link** (Ctrl+L, in the
+  timeline toolbar, the right-click menus and the Layer tab) unlinks angles to edit them on their own and links
+  them back in sync. N angles take the main track and N - 1 layers: in the boxed layouts the main angle is shown
+  in its box on the main track instead of a copy on a layer.
 - Images: import JPG, PNG, GIF, BMP, WebP and TIFF. An image on the main track is a 5-second clip that can be
   trimmed to any length; animated GIFs loop; PNG transparency is kept on video layers.
 - Video layers (V2, V3…) above the main track for picture in picture, logos, B-roll and images on top: drag

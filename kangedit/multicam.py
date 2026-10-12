@@ -3,8 +3,8 @@
 The main angle's footage is edited as usual on the main track. Every other angle is synced to it (sync.py)
 and laid on the video layers above, cut at exactly the same moments, so each picture shows the same instant.
 A layout template places the angles in the frame: picture in picture, a talking-head box, stacked, side by
-side or a grid. For layouts where the main angle sits in part of the frame it gets a box on a layer too
-(the main track below it then only carries the edit and its sound).
+side or a grid. Where the main angle sits in part of the frame, its clips on the main track are shown in that
+box, so N angles always take the main track and N - 1 layers.
 """
 
 from __future__ import annotations
@@ -122,6 +122,25 @@ def place(c: OverlayClip, f: Footage, slot: Slot, template: str, tw: int, th: in
                                                  c.scale)
 
 
+def place_main(c: TimelineClip, f: Footage, slot: Slot, boxed: bool, tw: int, th: int) -> None:
+    """Put a main-angle clip in its slot: a box of the frame cropped around the face (boxed layouts), or the
+    whole frame (the box and the crop it set are cleared)."""
+    if boxed:
+        c.box_x, c.box_y, c.box_w, c.box_h = slot.x, slot.y, slot.box_w, slot.box_h
+        c.zoom, c.offset_x, c.offset_y = 1.0, 0.0, 0.0
+        if f.face:
+            c.offset_x, c.offset_y = reframe.pan_for_point(f.face[0], f.face[1], f.width, f.height, tw, th,
+                                                           slot.box_w, slot.box_h)
+    elif c.box_w > 0:
+        c.box_x, c.box_y, c.box_w, c.box_h = 0.5, 0.5, 0.0, 0.0
+        c.zoom, c.offset_x, c.offset_y = 1.0, 0.0, 0.0
+
+
+def _copy_box(dst: TimelineClip, src: TimelineClip) -> None:
+    for k in ("box_x", "box_y", "box_w", "box_h", "zoom", "offset_x", "offset_y"):
+        setattr(dst, k, getattr(src, k))
+
+
 def _piece(r: SyncResult, a0: float, a1: float, dur: float) -> Optional[tuple[float, float, float]]:
     """The part of a main-angle source range [a0, a1] another angle covers: (main time where it starts,
     the angle's in point, its out point)."""
@@ -134,16 +153,16 @@ def _piece(r: SyncResult, a0: float, a1: float, dur: float) -> Optional[tuple[fl
 
 def build(project: Project, clips: list[TimelineClip], angles: dict[str, int],
           syncs: dict[str, tuple[str, SyncResult]], template: str, audio: str = "main",
-          set_volume: bool = True) -> list[OverlayClip]:
+          set_volume: bool = True, layout_main: bool = True) -> list[OverlayClip]:
     """The overlays showing the other angles over `clips` (main-angle clips already on the main track), in
-    sync. angles: {footage id: angle number (1 = main)}; syncs: {footage id: (main footage id, SyncResult)}.
-    Sets the main clips' volume for the chosen sound (unless set_volume is False)."""
+    sync: angle k on layer V(k), one layer per extra angle. angles: {footage id: angle number (1 = main)};
+    syncs: {footage id: (main footage id, SyncResult)}. Unless told not to, sets the main clips' volume for
+    the chosen sound and puts them in the layout's place (a box of the frame for the boxed layouts)."""
     st = project.settings
     tw, th = frame_size(st.aspect, st.resolution)
     n = max(angles.values(), default=1)
     lay = slots(template, n, tw, th)
     boxed_main = main_in_box(template, (tw, th))
-    track_of = {k: (k - 1 if boxed_main else k - 2) for k in range(1, n + 1)}
     starts = project.clip_starts()
     out: list[OverlayClip] = []
     sound_angle = int(audio.split(":")[1]) if audio.startswith("angle:") else 1
@@ -156,11 +175,8 @@ def build(project: Project, clips: list[TimelineClip], angles: dict[str, int],
         t0 = starts[i]
         if set_volume:
             c.volume = 1.0 if sound_angle == 1 else 0.0
-        if boxed_main:
-            mc = OverlayClip(c.footage_id, round(t0, 4), c.src_in, c.src_out, track_of[1], angle=1, volume=0.0,
-                             grade=type(c.grade).from_dict(c.grade.to_dict()), link=c.id)
-            place(mc, project.footage[c.footage_id], lay[0], template, tw, th)
-            out.append(mc)
+        if layout_main:
+            place_main(c, project.footage[c.footage_id], lay[0], boxed_main, tw, th)
         for k in range(2, n + 1):
             best = None
             for fid, (ref, r) in syncs.items():
@@ -173,7 +189,7 @@ def build(project: Project, clips: list[TimelineClip], angles: dict[str, int],
                 continue
             fid, (a_start, b_in, b_out) = best
             oc = OverlayClip(fid, round(t0 + (a_start - c.src_in), 4), round(b_in, 4), round(b_out, 4),
-                             max(0, track_of[k]), angle=k, volume=1.0 if sound_angle == k else 0.0, link=c.id)
+                             k - 2, angle=k, volume=1.0 if sound_angle == k else 0.0, link=c.id)
             place(oc, project.footage[fid], lay[k - 1], template, tw, th)
             out.append(oc)
     return out
@@ -193,44 +209,79 @@ _LOOK = ("x", "y", "scale", "box_w", "box_h", "pan_x", "pan_y", "rotation", "opa
 def follow(project: Project) -> bool:
     """Keep the angles in step with the main track after an edit (trim, slip, split, Other moment, a new hook,
     reorder...): every angle clip is re-timed from the main clip it follows; main-angle clips that are new
-    get their angles; angle clips whose main clip is gone go too. An angle clip the user deleted stays
-    deleted, and placements changed by hand are kept. Returns whether anything changed."""
+    get their angles (and the layout's box); angle clips whose main clip is gone go too. An angle clip the
+    user deleted stays deleted, and placements changed by hand are kept. Returns whether anything changed."""
     mc = project.settings.multicam or {}
     angles = {fid: k for fid, k in (mc.get("angles") or {}).items() if fid in project.footage}
     if not angles or not mc.get("syncs"):
         return False
     syncs = stored_syncs(project)
     handled = set(mc.get("clips") or [])
-    linked: dict[tuple[str, int], OverlayClip] = {(c.link, c.angle): c for c in project.overlays if c.link}
+    before = [c.to_dict() for c in project.overlays] + [c.to_dict() for c in project.clips]
+    # Earlier versions showed the main angle's box as a layer clip (angle 1): the main track does it now.
+    project.overlays = [c for c in project.overlays if c.angle != 1]
+    linked: dict[tuple[str, int], OverlayClip] = {(c.link, c.angle): c for c in project.overlays
+                                                  if c.link and c.linked}
+    unlinked = {(c.link, c.angle) for c in project.overlays if c.link and not c.linked}   # left as they are
     like = {c.angle: c for c in project.overlays if c.link}      # an angle's current placement, for new clips
-    before = [c.to_dict() for c in project.overlays]
-    out = [c for c in project.overlays if not c.link]
+    st = project.settings
+    tw, th = frame_size(st.aspect, st.resolution)
+    template = mc.get("template", "pip")
+    boxed = main_in_box(template, (tw, th))
+    boxed_like = next((c for c in project.clips if c.id in handled and c.box_w > 0), None)
+    out = [c for c in project.overlays if not c.link or not c.linked]
     current = []
     for clip in project.clips:
         if angles.get(clip.footage_id) != 1:
             continue
         current.append(clip.id)
-        for oc in build(project, [clip], angles, syncs, mc.get("template", "pip"), mc.get("audio", "main"),
-                        set_volume=False):
+        if boxed and clip.id not in handled and clip.box_w <= 0:     # a new clip joins the layout
+            if boxed_like is not None:
+                _copy_box(clip, boxed_like)
+            else:
+                place_main(clip, project.footage[clip.footage_id],
+                           slots(template, max(angles.values()), tw, th)[0], True, tw, th)
+        for oc in build(project, [clip], angles, syncs, template, mc.get("audio", "main"),
+                        set_volume=False, layout_main=False):
+            if (clip.id, oc.angle) in unlinked:
+                continue
             old = linked.get((clip.id, oc.angle))
             if old is None and clip.id in handled:
                 continue                       # deleted by the user
             src = old if old is not None else like.get(oc.angle)
             if src is not None:
                 for k in _LOOK:
-                    if not (k == "grade" and oc.angle == 1):    # the main angle's box keeps the clip's grade
-                        setattr(oc, k, getattr(src, k))
+                    setattr(oc, k, getattr(src, k))
             if old is not None:
                 oc.id, oc.fade_in, oc.fade_out = old.id, old.fade_in, old.fade_out
             out.append(oc)
     project.overlays = out
     project.settings.multicam = {**mc, "clips": current}
-    return [c.to_dict() for c in project.overlays] != before
+    return [c.to_dict() for c in project.overlays] + [c.to_dict() for c in project.clips] != before
+
+
+def angles_of(project: Project, clip_id: str) -> list[OverlayClip]:
+    """The camera-angle clips (linked or not) that belong to a main-track clip."""
+    return [c for c in project.overlays if c.link == clip_id and c.angle >= 2]
+
+
+def set_linked(project: Project, overlays: list[OverlayClip], on: bool) -> int:
+    """Link (back in sync, re-timed from its main clip) or unlink (edited on its own) camera-angle clips.
+    Returns how many changed."""
+    n = 0
+    for c in overlays:
+        if c.link and c.linked != on:
+            c.linked = on
+            n += 1
+    if on and n:
+        follow(project)
+    return n
 
 
 def relayout(project: Project, template: str) -> int:
-    """Move the multicam overlays to another template (main-angle boxes are added or removed as it needs).
-    Returns how many overlays were placed."""
+    """Move the angles to another template: the main angle's clips take its place on the main track (a box
+    of the frame, or the whole frame) and each other angle its place on its layer. Returns how many angle
+    clips (on the layers) were placed."""
     st = project.settings
     tw, th = frame_size(st.aspect, st.resolution)
     multi = [c for c in project.overlays if c.angle >= 2]
@@ -239,28 +290,18 @@ def relayout(project: Project, template: str) -> int:
     n = max(c.angle for c in multi)
     lay = slots(template, n, tw, th)
     boxed_main = main_in_box(template, (tw, th))
-    keep = [c for c in project.overlays if c.angle == 0]
-    mains = [c for c in project.overlays if c.angle == 1]
-    if boxed_main and not mains:
-        starts = project.clip_starts()
-        main_ids = {fid for fid, k in (st.multicam.get("angles") or {}).items() if k == 1}
-        for c, t0 in zip(project.clips, starts):
-            if c.footage_id in main_ids:
-                mains.append(OverlayClip(c.footage_id, round(t0, 4), c.src_in, c.src_out, 0, angle=1, volume=0.0,
-                                         grade=type(c.grade).from_dict(c.grade.to_dict()), link=c.id))
-    if not boxed_main:
-        mains = []
+    main_ids = {fid for fid, k in (st.multicam.get("angles") or {}).items() if k == 1}
+    mains = [c for c in project.clips if c.footage_id in main_ids]
     for c in mains:
-        c.track = 0
-        place(c, project.footage[c.footage_id], lay[0], template, tw, th)
+        place_main(c, project.footage[c.footage_id], lay[0], boxed_main, tw, th)
     for c in multi:
-        c.track = c.angle - 1 if boxed_main else c.angle - 2
+        c.track = c.angle - 2
         place(c, project.footage[c.footage_id], lay[c.angle - 1], template, tw, th)
-    project.overlays = keep + mains + multi
+    project.overlays = [c for c in project.overlays if c.angle == 0] + multi
     st.multicam = {**st.multicam, "template": template}
     top = max((c.track for c in project.overlays), default=0)
     st.overlay_tracks = max(1, top + 1)
-    return len(mains) + len(multi)
+    return len(multi)
 
 
 def coverage_blockers(project_footage: dict[str, Footage], angles: dict[str, int],

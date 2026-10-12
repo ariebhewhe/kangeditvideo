@@ -81,15 +81,34 @@ def test_angles_cut_at_the_same_moments():
     assert all(c.volume == 1.0 for c in p.clips)
 
 
-def test_stacked_layout_boxes_every_angle_and_crops_to_the_face():
+def test_stacked_layout_two_angles_use_the_main_track_and_one_layer(tmp_path):
     p, main, cam2, angles, syncs = _project("9:16 (Vertical)")
     _store(p, angles, syncs, "stack")
-    mains = [o for o in p.overlays if o.angle == 1]
-    others = [o for o in p.overlays if o.angle == 2]
-    assert len(mains) == 3 and len(others) == 2
-    assert (mains[0].y, mains[0].box_h, others[0].y, others[0].box_h) == (0.25, 0.5, 0.75, 0.5)
-    assert others[0].track > mains[0].track
-    assert others[0].pan_y != 0.0                                 # moved toward the face
+    # 2 angles: the main track (in the top box) and one layer (the bottom box), not a copy of the main angle
+    assert {o.angle for o in p.overlays} == {2} and {o.track for o in p.overlays} == {0}
+    assert all((c.box_x, c.box_y, c.box_w, c.box_h) == (0.5, 0.25, 1.0, 0.5) for c in p.clips)
+    o = p.overlays[0]
+    assert (o.y, o.box_h) == (0.75, 0.5) and o.pan_y != 0.0       # cropped toward the face
+    # the export shows the main clip in its box, black around it
+    for f in p.footage.values():
+        f.path = str(tmp_path / f.name)
+        open(f.path, "wb").close()
+    from kangedit.export import ExportSettings, build_export
+    build_export(p, ExportSettings(str(tmp_path / "o.mp4"), p.settings.aspect, "1080p", 30.0, use_gpu=False),
+                 str(tmp_path))
+    graph = (tmp_path / "graph.txt").read_text()
+    assert "pad=1080:1920:0:0:black" in graph and "scale=1706:960" in graph   # 16:9 filling a 1080x960 box
+
+
+def test_main_box_in_the_preview():
+    from kangedit.preview import Look, Shot, PreviewEngine
+    from kangedit.color import Grade
+    img = np.full((90, 160, 3), 200, np.uint8)
+    f = Footage("x.mp4", 1.0, 160, 90, 30.0, False)
+    shot = Shot(0, 0.0, 1.0, 0.0, f.id, Grade(), "none", "filmic", 1.0, 0.0, 0.0, f, box=(0.5, 0.25, 1.0, 0.5))
+    out = PreviewEngine._finish(PreviewEngine.__new__(PreviewEngine), img, shot,
+                                Look(False, "fill", 108, 192, 192, False), False)
+    assert out.shape == (192, 108, 4) and out[40, 50, 0] == 200 and out[150, 50, 0] == 0
 
 
 def test_audio_from_another_angle():
@@ -123,13 +142,14 @@ def test_angles_follow_trims_splits_and_deletes():
     assert not any(x.link == gone for x in p.overlays)
 
 
-def test_relayout_adds_and_removes_main_boxes():
+def test_relayout_boxes_and_unboxes_the_main_track():
     p, main, cam2, angles, syncs = _project()
     _store(p, angles, syncs, "pip")
-    assert multicam.relayout(p, "side") == 3 + 2
-    assert sum(o.angle == 1 for o in p.overlays) == 3 and p.settings.multicam["template"] == "side"
+    assert multicam.relayout(p, "side") == 2
+    assert all((c.box_x, c.box_w) == (0.25, 0.5) for c in p.clips) and p.settings.multicam["template"] == "side"
+    assert p.settings.overlay_tracks == 1 and not any(o.angle == 1 for o in p.overlays)
     multicam.relayout(p, "talking")                               # landscape: main full frame again
-    assert not any(o.angle == 1 for o in p.overlays)
+    assert all(c.box_w == 0 for c in p.clips)
     box = next(o for o in p.overlays if o.angle == 2)
     w, h = reframe.overlay_size(1080, 1920, 1920, 1080, box.scale, box.box_w, box.box_h)
     assert abs(w - h) <= 2 and box.x + w / 1920 / 2 == pytest.approx(1 - multicam.MARGIN, abs=0.01)
@@ -173,3 +193,116 @@ def test_dialog_multicam_choices(qapp):
     assert d.cb_audio.findData("angle:2") >= 0 and not d.lbl_angles.text()
     d.angle_rows[cam2.id].setCurrentIndex(2)                      # "Angle 3" with no angle 2
     assert d.lbl_angles.text() and isinstance(OverlayClip("x", 0).angle, int)
+
+
+def test_old_main_angle_layer_copies_are_dropped():
+    p, main, cam2, angles, syncs = _project("9:16 (Vertical)")
+    _store(p, angles, syncs, "stack")
+    p.overlays.append(OverlayClip(main.id, 0.0, 30.0, 33.0, 0, angle=1, link=p.clips[0].id))  # an earlier version's
+    assert multicam.follow(p) and not any(o.angle == 1 for o in p.overlays)
+
+
+def test_new_main_clip_joins_the_boxed_layout():
+    p, main, cam2, angles, syncs = _project("9:16 (Vertical)")
+    _store(p, angles, syncs, "stack")
+    p.clips.append(TimelineClip(main.id, 60.0, 62.0))
+    multicam.follow(p)
+    assert (p.clips[-1].box_y, p.clips[-1].box_h) == (0.25, 0.5)
+
+
+# ----------------------------------------------------------------------------- linked editing in the window
+@pytest.fixture
+def window(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    w.resize(1500, 950)
+    yield w
+    w.project.dirty = False
+    w.close()
+
+
+def _drag(view, a, b):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QEvent
+
+    def ev(kind, p, buttons):
+        return QMouseEvent(kind, QPointF(p), QPointF(view.mapToGlobal(p)), Qt.LeftButton, buttons, Qt.NoModifier)
+    view.mousePressEvent(ev(QEvent.MouseButtonPress, a, Qt.LeftButton))
+    for k in range(1, 6):
+        view.mouseMoveEvent(ev(QEvent.MouseMove, a + (b - a) * (k / 5), Qt.LeftButton))
+    view.mouseReleaseEvent(ev(QEvent.MouseButtonRelease, b, Qt.NoButton))
+
+
+def test_angle_clips_are_handles_on_their_group(window, qapp):
+    from PySide6.QtCore import QPointF
+    p, main, cam2, angles, syncs = _project()
+    p.clips = p.clips[:2]
+    _store(p, angles, syncs, "pip")
+    window.set_project(p)
+    window.show()
+    qapp.processEvents()
+    tl = window.tl
+    tl.pps = 50.0
+    tl.refresh()
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    r = next(rr for c, rr in tl._overlay_rects() if c.id == o.id)
+    # body drag 1 s to the left slips the main clip 1 s later, and the angle follows
+    _drag(tl, r.center(), r.center() - QPointF(50, 0))
+    c = p.clips[0]
+    assert c.src_in == pytest.approx(31.0) and c.duration == pytest.approx(3.0)
+    o = next(x for x in p.overlays if x.link == c.id)
+    assert o.src_in == pytest.approx(c.src_in - 20.0) and tl.selected_overlay == o.id
+    # its left edge trims the whole group
+    r = next(rr for cc, rr in tl._overlay_rects() if cc.id == o.id)
+    _drag(tl, QPointF(r.left() + 2, r.center().y()), QPointF(r.left() + 27, r.center().y()))
+    assert c.src_in == pytest.approx(31.5) and c.duration == pytest.approx(2.5)
+    o = next(x for x in p.overlays if x.link == c.id)
+    assert (o.src_in, o.duration) == (pytest.approx(11.5), pytest.approx(2.5))
+    # Other moment (R) with the angle selected works on its main clip
+    assert window._moment_clip() == c.id
+
+
+def test_unlinked_angles_are_left_alone_and_relink_back_in_sync():
+    p, main, cam2, angles, syncs = _project()
+    _store(p, angles, syncs, "pip")
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    assert multicam.set_linked(p, [o], False) == 1
+    o.start, o.src_in = 1.25, 2.0                               # moved on its own
+    p.clips[0].src_in += 1.0
+    multicam.follow(p)
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    assert (o.start, o.src_in, o.linked) == (1.25, 2.0, False)  # not re-timed, not duplicated
+    assert len(multicam.angles_of(p, p.clips[0].id)) == 1
+    multicam.set_linked(p, [o], True)                            # back in sync
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    assert o.linked and o.start == 0.0 and o.src_in == pytest.approx(p.clips[0].src_in - 20.0)
+
+
+def test_link_button_and_unlinked_drag(window, qapp):
+    from PySide6.QtCore import QPointF
+    p, main, cam2, angles, syncs = _project()
+    p.clips = p.clips[:2]
+    _store(p, angles, syncs, "pip")
+    window.set_project(p)
+    window.show()
+    qapp.processEvents()
+    tl, b = window.tl, window.timeline.btn_link
+    tl.selected = p.clips[0].id
+    tl.selection_changed.emit(p.clips[0].id)
+    assert b.isEnabled() and b.isChecked()
+    b.click()                                                    # unlink the clip's angles
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    assert not o.linked and not b.isChecked() and window._moment_clip() == p.clips[0].id
+    tl.pps = 50.0
+    tl.refresh()
+    r = next(rr for c, rr in tl._overlay_rects() if c.id == o.id)
+    _drag(tl, r.center(), r.center() + QPointF(50, 0))           # an unlinked angle moves on its own
+    o = next(x for x in p.overlays if x.id == o.id)
+    assert o.start == pytest.approx(1.0) and p.clips[0].src_in == 30.0
+    tl.select_overlay(o.id)
+    window.toggle_link()                                          # Ctrl+L on the angle: back in sync
+    o = next(x for x in p.overlays if x.link == p.clips[0].id)
+    assert o.linked and o.start == 0.0 and b.isChecked()
+    window.undo()
+    assert not next(x for x in p.overlays if x.link == p.clips[0].id).linked

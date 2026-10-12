@@ -185,6 +185,16 @@ def composite(canvas: np.ndarray, layer: np.ndarray, cx: float, cy: float, alpha
     dst[:] = (src[..., :3].astype(np.float32) * a + dst.astype(np.float32) * (1.0 - a) + 0.5).astype(np.uint8)
 
 
+def box_rect(tw: int, th: int, box: tuple) -> tuple[int, int, int, int]:
+    """(x, y, width, height) in pixels of a (centre x, centre y, width, height) box given in parts of a tw x th
+    frame; even sizes, kept inside the frame."""
+    cx, cy, bw, bh = box
+    w, h = min(tw, _even(bw * tw)), min(th, _even(bh * th))
+    x = int(round(min(max(0.0, cx * tw - w / 2), tw - w)))
+    y = int(round(min(max(0.0, cy * th - h / 2), th - h)))
+    return x, y, w, h
+
+
 def pan_for_point(cx: float, cy: float, sw: int, sh: int, tw: int, th: int, box_w: float, box_h: float,
                   scale: float = 1.0, at_y: float = 0.42) -> tuple[float, float]:
     """pan_x / pan_y that put the point (cx, cy, parts of the picture) at the middle of a box crop (a face a

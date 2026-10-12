@@ -90,6 +90,12 @@ class TimelineClip:
     audio_split: float = 0.0
     label: str = ""                # "opening" | "closing" bookend, or "hook", when auto edit placed it
     rotation: float = 0.0          # degrees clockwise (see reframe.split_rotation)
+    # Box (multicam layouts): box_w > 0 shows the clip in a box_w x box_h part of the frame (centre box_x,
+    # box_y, all parts of the frame), cropped to fill it (zoom / offsets choose the crop), black around it.
+    box_x: float = 0.5
+    box_y: float = 0.5
+    box_w: float = 0.0
+    box_h: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -135,6 +141,7 @@ class OverlayClip:
     pan_y: float = 0.0
     angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
     link: str = ""                 # multicam: id of the main-track clip it follows
+    linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
     id: str = field(default_factory=new_id)
 
     @property

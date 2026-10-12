@@ -240,7 +240,10 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Select all clips", self.tl.select_all, "Ctrl+A"))
         m.addAction(self._act("Delete selected clips / sound", self._delete_selected, "Del"))
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
-        m.addAction(self._act("Other moment", lambda: self.clip_action("alt_moment", self.tl.selected), "R",
+        m.addAction(self._act("Link / unlink camera angles", lambda: self.toggle_link(), "Ctrl+L",
+                              "Multicam: unlink the selected clip's camera angles to edit them on their own, or "
+                              "link them again (back in sync)"))
+        m.addAction(self._act("Other moment", lambda: self.clip_action("alt_moment", self._moment_clip()), "R",
                               "Swap the clip for the best moment close by; its length follows the new moment"))
         m.addSeparator()
         m.addAction(self._act("Add title at playhead", lambda: self.add_text("title"), "T",
@@ -551,7 +554,10 @@ class MainWindow(QMainWindow):
         self.timeline.btn_hook.clicked.connect(self.new_hook)
         self.timeline.btn_undo.clicked.connect(self.undo)
         self.timeline.btn_redo.clicked.connect(self.redo)
-        self.timeline.btn_alt.clicked.connect(lambda: self.clip_action("alt_moment", self.tl.selected))
+        self.timeline.btn_alt.clicked.connect(lambda: self.clip_action("alt_moment", self._moment_clip()))
+        self.timeline.btn_link.clicked.connect(lambda: self.toggle_link())
+        for sig in (self.tl.selection_changed, self.tl.overlay_selected):
+            sig.connect(lambda *_: self._sync_link_button())
 
         self.bin.import_requested.connect(self.import_dialog)
         self.bin.files_dropped.connect(self.import_files)
@@ -754,6 +760,50 @@ class MainWindow(QMainWindow):
         self.viewer.canvas.selected_overlay = self.tl.selected_overlay
         self.text_panel.refresh()
         self._update_title()
+
+    def _link_targets(self, item: str = "") -> list[OverlayClip]:
+        """The camera-angle clips Link / Unlink acts on: those of a given clip or angle, else of the selection
+        (a selected angle, or the selected main clips)."""
+        if item:
+            o = self._overlay(item)
+            return [o] if o is not None and o.link else multicam.angles_of(self.project, item)
+        o = self.selected_overlay()
+        if o is not None:
+            return [o] if o.link else []
+        return [a for cid in self.tl.selected_ids() for a in multicam.angles_of(self.project, cid)]
+
+    def _sync_link_button(self):
+        targets = self._link_targets()
+        b = self.timeline.btn_link
+        b.setEnabled(bool(targets))
+        on = bool(targets) and all(o.linked for o in targets)
+        b.setChecked(on)
+        b.setText("🔗 Linked" if on else "⛓ Unlinked" if targets else "🔗 Link")
+
+    def toggle_link(self, item: str = ""):
+        """Unlink the camera angles (edit them on their own) when they are all linked, else link them again
+        (they are re-timed from their main clip, back in sync)."""
+        targets = self._link_targets(item)
+        if not targets:
+            self.lbl_status.setText("Select a multicam clip or one of its camera angles to link or unlink them.")
+            self._sync_link_button()
+            return
+        on = not all(o.linked for o in targets)
+        self.project_checkpoint()
+        n = multicam.set_linked(self.project, targets, on)
+        self._overlays_changed()
+        self._sync_link_button()
+        self.lbl_status.setText(f"Linked {n} camera angle(s): back in sync with the main clip" if on else
+                                f"Unlinked {n} camera angle(s): they can be moved and trimmed on their own")
+
+    def _moment_clip(self) -> str:
+        """The clip Other moment works on: the selected clip, or the main clip a selected (linked) camera angle
+        follows."""
+        if not self.tl.selected and self.tl.selected_overlay:
+            c = self.selected_overlay()
+            if c is not None and c.link and c.linked and self.project.index_of(c.link) >= 0:
+                return c.link
+        return self.tl.selected
 
     def selected_overlay(self) -> Optional[OverlayClip]:
         oid = self.tl.selected_overlay
@@ -1381,7 +1431,7 @@ class MainWindow(QMainWindow):
         self.project_checkpoint()
         n = multicam.relayout(self.project, template)
         self._overlays_changed()
-        self.lbl_status.setText(f"Multicam layout: {multicam.TEMPLATES[template]} ({n} layer clips)")
+        self.lbl_status.setText(f"Multicam layout: {multicam.TEMPLATES[template]} ({n} camera-angle clips)")
 
     def new_hook(self):
         """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
@@ -2019,6 +2069,8 @@ class MainWindow(QMainWindow):
             self.right_tabs.setCurrentWidget(self.inspector)
 
     def _on_timeline_edited(self):
+        if multicam.follow(self.project):      # the angles follow a trim / slip while it is dragged
+            self.tl.update()
         self.viewer.invalidate_audio()
         self.captions = build_captions(self.project)
         self.tl.captions = self.captions
@@ -2386,6 +2438,9 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _overlay_action(self, action: str, oid: str):
+        if action == "link_toggle":
+            self.toggle_link(oid)
+            return
         c = self._overlay(oid)
         if c is None:
             return
@@ -2552,6 +2607,8 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Select footage or images in the Media panel first.")
             else:
                 self.add_overlays(ids, float(t), int(track))
+        elif key == "link_toggle":
+            self.toggle_link(payload)
         elif key.startswith("multicam_layout:"):
             self.multicam_layout(key.split(":", 1)[1])
         elif key.startswith("ov_"):
@@ -3181,7 +3238,9 @@ class MainWindow(QMainWindow):
             "its edges to trim · double-click it (or the 🧩 Layer tab) for size, crop, rotation, opacity,\n"
             "fades, volume · higher layers are in front · right-click an empty layer to add a layer\n"
             "Multicam: ✨ Auto Edit → Multicam syncs camera angles by sound; Tools → Multicam layout\n"
-            "changes their layout later\n"
+            "changes their layout later · camera angles are linked to their main clip: dragging an angle\n"
+            "slips the group, its edges trim it, R gives it another moment · Ctrl+L (🔗 Link) unlinks /\n"
+            "links them\n"
             "Lanes: drag a lane's bottom edge to make it taller · Shift+wheel scrolls the lanes up / down"))
 
     def closeEvent(self, e):
