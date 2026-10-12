@@ -285,6 +285,8 @@ class Viewer(QWidget):
         self.lbl_time.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet("color: #8b909a;")
+        # Clipped rather than widening the window: a long clip name would otherwise set its minimum width.
+        self.lbl_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.cb_adjust = QComboBox()
         for key, label in ADJUST_MODES:
             self.cb_adjust.addItem(label, key)
@@ -621,6 +623,7 @@ class Viewer(QWidget):
             self.canvas.update()
             return
         self.lbl_info.setText(r.info)
+        self.lbl_info.setToolTip(r.info)
         out = self._frame = r.image  # keep buffer alive for QImage
         self.canvas.image = QImage(out.data, out.shape[1], out.shape[0], out.strides[0], QImage.Format_RGB32)
         self.canvas.caption = None

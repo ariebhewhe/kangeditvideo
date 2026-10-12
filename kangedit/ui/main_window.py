@@ -15,9 +15,9 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QSplitter, QTabWidget, QToolButton, QWidget)
+                               QScrollArea, QSizePolicy, QSplitter, QTabWidget, QToolButton, QWidget)
 
 from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
@@ -56,6 +56,29 @@ from .viewer import ADJUST_MODES, Viewer
 log = logging.getLogger(__name__)
 
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
+
+
+class RefineTabs(QTabWidget):
+    """The Refine panel's tabs. Panels that don't scroll themselves get a scroll area, so a short window can
+    still reach the bottom of every tab instead of the tallest tab setting the window's minimum height."""
+
+    def __init__(self):
+        super().__init__()
+        self._pages: dict[QWidget, QWidget] = {}
+
+    def add(self, panel: QWidget, label: str) -> None:
+        page = panel
+        if not isinstance(panel, QScrollArea):
+            page = QScrollArea()
+            page.setWidget(panel)
+            page.setWidgetResizable(True)
+            page.setFrameShape(QFrame.NoFrame)
+            page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._pages[panel] = page
+        self.addTab(page, label)
+
+    def setCurrentWidget(self, panel: QWidget) -> None:   # noqa: N802 (Qt name) — accepts the panel itself
+        super().setCurrentWidget(self._pages.get(panel, panel))
 
 
 class MainWindow(QMainWindow):
@@ -107,13 +130,13 @@ class MainWindow(QMainWindow):
         d_bin = QDockWidget("Media", self)
         d_bin.setObjectName("media")
         d_bin.setWidget(self.bin)
-        d_bin.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        d_bin.setFeatures(QDockWidget.NoDockWidgetFeatures)   # fixed in place; the border still resizes it
         self.addDockWidget(Qt.LeftDockWidgetArea, d_bin)
-        tabs = QTabWidget()
-        tabs.addTab(self.inspector, "🎨 Clip")
-        tabs.addTab(self.caps_panel, "💬 Captions")
-        tabs.addTab(self.text_panel, "🔤 Text")
-        tabs.addTab(self.sfx_panel, "🔊 Sounds")
+        tabs = RefineTabs()
+        tabs.add(self.inspector, "🎨 Clip")
+        tabs.add(self.caps_panel, "💬 Captions")
+        tabs.add(self.text_panel, "🔤 Text")
+        tabs.add(self.sfx_panel, "🔊 Sounds")
         tabs.setTabToolTip(0, "Colour, log conversion, reframe, volume and transition of the selected clip")
         tabs.setTabToolTip(1, "Generate, edit, style and delete captions")
         tabs.setTabToolTip(2, "Animated titles and text")
@@ -124,7 +147,7 @@ class MainWindow(QMainWindow):
         d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")
         d_right.setWidget(tabs)
-        d_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        d_right.setFeatures(QDockWidget.NoDockWidgetFeatures)
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
         # Wide enough for the widest tab (plus its scroll bar): nothing on the right gets cut off.
         need = max(p.minimumSizeHint().width() for p in (self.inspector.widget(), self.text_panel.widget(),
@@ -296,6 +319,9 @@ class MainWindow(QMainWindow):
                                 "A short walk through the app: import, auto edit, refine and export")
         m.addAction(self.a_tour)
         m.addAction(self._act("Keyboard shortcuts", self.show_shortcuts, "F1"))
+        m.addSeparator()
+        m.addAction(self._act("Copy system info", self.copy_system_info, tip=(
+            "Copy your app version, system, graphics card support and folders, to paste into a bug report")))
         m.addAction(self._act(f"About {APP_NAME}", lambda: QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br>"
                             "Python · PySide6 · FFmpeg · OpenCV · faster-whisper")))
@@ -577,6 +603,30 @@ class MainWindow(QMainWindow):
         else:
             hint = ""
         self.lbl_next.setText(hint)
+
+    def copy_system_info(self):
+        from .. import sysinfo
+        QApplication.setOverrideCursor(Qt.WaitCursor)   # the GPU checks run short test encodes
+        try:
+            text = sysinfo.report()
+        finally:
+            QApplication.restoreOverrideCursor()
+        QApplication.clipboard().setText(text)
+        box = QMessageBox(QMessageBox.Information, "System info copied",
+                          "Your system info is on the clipboard. Paste it into your bug report or message.", parent=self)
+        box.setDetailedText(text)
+        box.exec()
+
+    def createPopupMenu(self):   # noqa: N802 (Qt name)
+        """The right-click menu on toolbars and dock titles, without the entries that would hide the panels."""
+        menu = super().createPopupMenu()
+        if menu is not None:
+            for d in (self.d_bin, self.d_right):
+                menu.removeAction(d.toggleViewAction())
+            if menu.isEmpty():
+                menu.deleteLater()
+                return None
+        return menu
 
     def show_refine(self, panel: QWidget):
         self.d_right.show()

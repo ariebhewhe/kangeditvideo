@@ -61,3 +61,33 @@ def test_viewer_color_modes(window, mode, playing, color):
     finally:
         window.viewer.playing = False
     assert window.a_adjust[mode].isChecked()
+
+
+def test_panels_stay_docked(window):
+    from PySide6.QtWidgets import QDockWidget
+    for dock in (window.d_bin, window.d_right):
+        assert dock.features() == QDockWidget.NoDockWidgetFeatures
+    menu = window.createPopupMenu()
+    if menu is not None:   # the right-click menu can't hide the panels
+        assert not {window.d_bin.toggleViewAction(), window.d_right.toggleViewAction()} & set(menu.actions())
+
+
+def test_refine_tabs_scroll_and_fit_a_small_display(window, qapp):
+    from PySide6.QtWidgets import QScrollArea
+    tabs = window.right_tabs
+    assert all(isinstance(tabs.widget(i), QScrollArea) for i in range(tabs.count()))
+    window.show_refine(window.sfx_panel)
+    assert tabs.currentWidget().widget() is window.sfx_panel
+    window.show()
+    qapp.processEvents()
+    # A 1440x900 display minus the taskbar: the window must fit, with room left to resize the panels.
+    hint = window.minimumSizeHint()
+    assert hint.width() <= 1400 and hint.height() <= 820, hint
+
+
+def test_system_info_report():
+    from kangedit import __version__, sysinfo
+    text = sysinfo.report(gpu=False)
+    assert __version__ in text
+    for key in ("OS:", "Python:", "Qt:", "PySide6:", "numpy:", "Log file:"):
+        assert key in text
