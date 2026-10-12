@@ -31,6 +31,8 @@ CAP_H = 24
 EDGE = 7
 MIN_DUR = 0.25
 MAX_LAYERS = 8
+MIN_PPS, MAX_PPS = 0.05, 400.0    # zoom limits, pixels per second (0.05: an hour fits 180 px)
+FIT_MARGIN = 40                    # pixels left free after the end of the edit (and when fitted)
 # Lane heights in pixels: the main video track, each video layer row and each sound-effect row
 # (the sound lane has two rows so overlapping sounds stay visible). Drag a lane's bottom edge to change it.
 DEFAULT_HEIGHTS = {"video": 84, "layer": 40, "sound": 17}
@@ -209,13 +211,13 @@ class TimelineView(QWidget):
         return max([p.duration] + [x.end for x in p.sounds] + [x.end for x in p.texts] + [x.end for x in p.overlays])
 
     def content_width(self) -> float:
-        return self.content_end() * self.pps + 200
+        return self.content_end() * self.pps + FIT_MARGIN
 
     def fit(self):
         """Zoom so the whole edit (every lane) fills the width."""
         dur = self.content_end()
         if dur > 0:
-            self.pps = max(2.0, min(400.0, (self.width() - 40) / dur))
+            self.pps = max(MIN_PPS, min(MAX_PPS, (self.width() - FIT_MARGIN) / dur))
         self.scroll_x = 0
         self.refresh()
 
@@ -227,7 +229,7 @@ class TimelineView(QWidget):
     def set_zoom(self, pps: float, anchor_x: Optional[float] = None):
         anchor_x = self.width() / 2 if anchor_x is None else anchor_x
         t = self.x_to_t(anchor_x)
-        self.pps = max(2.0, min(400.0, pps))
+        self.pps = max(MIN_PPS, min(MAX_PPS, pps))
         self.scroll_x = max(0.0, t * self.pps - anchor_x)
         self.refresh()
 
@@ -439,8 +441,8 @@ class TimelineView(QWidget):
 
     def _paint_ruler(self, p: QPainter):
         p.fillRect(QRectF(0, 0, self.width(), RULER), QColor("#202227"))
-        steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
-        major = next((s for s in steps if s * self.pps >= 70), 600)
+        steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+        major = next((s for s in steps if s * self.pps >= 70), 3600)
         minor = major / 5
         t0 = self.x_to_t(0)
         t1 = self.x_to_t(self.width())
@@ -1564,7 +1566,7 @@ class TimelinePanel(QWidget):
         self.btn_zoom_in = QToolButton(text="+")
         self.btn_zoom_in.setToolTip("Zoom in (Ctrl+=, or Ctrl+wheel on the timeline)")
         self.zoom = QSlider(Qt.Horizontal)
-        self.zoom.setRange(2, 400)
+        self.zoom.setRange(1, int(MAX_PPS))
         self.zoom.setValue(40)
         self.zoom.setFixedWidth(110)
         self.zoom.setToolTip("Timeline zoom")
@@ -1739,13 +1741,15 @@ class TimelinePanel(QWidget):
     def _sync_scroll(self):
         v = self.view
         maxv = int(max(0.0, v.content_width() - v.width()))
+        # Only shown when there is something to scroll to (not after Fit).
+        self.scroll.setVisible(maxv > 0 or v.scroll_x > 0)
         self.scroll.blockSignals(True)
         self.scroll.setRange(0, maxv)
         self.scroll.setPageStep(max(1, v.width()))
         self.scroll.setValue(int(v.scroll_x))
         self.scroll.blockSignals(False)
         self.zoom.blockSignals(True)
-        self.zoom.setValue(int(v.pps))
+        self.zoom.setValue(max(self.zoom.minimum(), int(round(v.pps))))
         self.zoom.blockSignals(False)
         n = len(v.project.clips)
         bad = len(v._conflicts)

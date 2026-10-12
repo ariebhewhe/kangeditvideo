@@ -295,3 +295,27 @@ def test_looping_sound_renders_as_one_crossfaded_clip(tmp_path):
     p, _, _ = _project(tmp_path, sounds=[y])
     graph = _graph(tmp_path, p)
     assert y.repeats() == 4 and "asplit=4" in graph and graph.count("acrossfade=d=2.0000:c1=qsin") == 3
+
+
+def test_fit_leaves_nothing_to_scroll_and_reset_layout(window, tmp_path, qapp):
+    from kangedit.ui.timeline import DEFAULT_HEIGHTS
+    p, _, _ = _project(tmp_path)
+    p.clips[0].src_out = 3600.0     # an hour: below the old zoom limit
+    os.remove(p.footage[p.clips[0].footage_id].path)   # nothing to analyze (a failed analysis opens a dialog)
+    window.set_project(p)
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+    window.tl.fit()
+    qapp.processEvents()
+    assert window.timeline.scroll.maximum() == 0 and not window.timeline.scroll.isVisible()
+    window.tl.zoom_by(4.0)
+    qapp.processEvents()
+    assert window.timeline.scroll.isVisible()
+    window.tl.set_heights({"video": 200})
+    window.right_tabs.setCurrentIndex(2)
+    window.reset_layout()
+    for _ in range(3):
+        qapp.processEvents()
+    assert window.tl.heights == DEFAULT_HEIGHTS and window.right_tabs.currentIndex() == 0
+    assert window.timeline.scroll.maximum() == 0

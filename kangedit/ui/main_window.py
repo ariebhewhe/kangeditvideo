@@ -24,7 +24,7 @@ from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
-from .. import images, music, reframe, sfx
+from .. import images, music, reframe, sfx, updater
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         split.setStretchFactor(1, 1)
         split.setSizes([560, 280])
         self.setCentralWidget(split)
+        self.split = split
 
         d_bin = QDockWidget("Media", self)
         d_bin.setObjectName("media")
@@ -162,7 +163,8 @@ class MainWindow(QMainWindow):
                                                           self.layer_panel.widget(), self.caps_panel,
                                                           self.sfx_panel)) + 24
         d_right.setMinimumWidth(need)
-        self.resizeDocks([d_bin, d_right], [430, max(370, need)], Qt.Horizontal)
+        self._right_width = max(370, need)
+        self.resizeDocks([d_bin, d_right], [430, self._right_width], Qt.Horizontal)
         self.d_bin, self.d_right = d_bin, d_right
 
         self._build_actions()
@@ -300,6 +302,10 @@ class MainWindow(QMainWindow):
                               "Make the video, layer and sound lanes fill the timeline panel"))
         m.addAction(self._act("Add a video layer", lambda: self._timeline_action("layer_add", ""), None,
                               "One more layer above the main track for picture in picture, logos and images"))
+        m.addAction(self._act("Reset layout", self.reset_layout, "Ctrl+Shift+R",
+                              "Put the panels, the viewer / timeline split and the timeline lanes back to their "
+                              "usual sizes, and fit the timeline"))
+        m.addSeparator()
         m.addAction(self._act("Full screen preview", self.viewer.toggle_fullscreen, "F11",
                               "Play the timeline on the whole screen (Esc to leave)"))
         sub = m.addMenu("Color in viewer")
@@ -352,9 +358,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(self._act("Copy system info", self.copy_system_info, tip=(
             "Copy your app version, system, graphics card support and folders, to paste into a bug report")))
-        m.addAction(self._act(f"About {APP_NAME}", lambda: QMessageBox.about(
-            self, APP_NAME, f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br>"
-                            "Python · PySide6 · FFmpeg · OpenCV · faster-whisper")))
+        m.addAction(self._act(f"About {APP_NAME}", self.show_about))
 
         for key, slot in (("Space", lambda: self.viewer.toggle_play()),
                           ("Left", lambda: self.viewer.step(-1)), ("Right", lambda: self.viewer.step(1)),
@@ -661,6 +665,43 @@ class MainWindow(QMainWindow):
                           "Your system info is on the clipboard. Paste it into your bug report or message.", parent=self)
         box.setDetailedText(text)
         box.exec()
+
+    REPO_URL = f"https://github.com/{updater.REPO}"
+    CONTACT = "esha@angkasa.dev"
+
+    def show_about(self):
+        def link(href: str, text: str) -> str:   # readable on the dark theme
+            return f"<a href='{href}' style='color: #7fb2ff;'>{text}</a>"
+
+        box = QMessageBox(QMessageBox.Information, f"About {APP_NAME}",
+                          f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br><br>"
+                          f"Source, releases and issues:<br>{link(self.REPO_URL, self.REPO_URL)}<br><br>"
+                          f"Contact: {link('mailto:' + self.CONTACT, self.CONTACT)}<br><br>"
+                          "Python · PySide6 · FFmpeg · OpenCV · faster-whisper", parent=self)
+        box.setTextFormat(Qt.RichText)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)   # clickable links, selectable text
+        box.setIconPixmap(self.windowIcon().pixmap(64, 64))
+        box.exec()
+
+    def reset_layout(self):
+        """Panels, the viewer / timeline split, lane heights, tabs and list view back to how they start."""
+        from .timeline import DEFAULT_HEIGHTS
+        if self.viewer.is_fullscreen():
+            self.viewer.toggle_fullscreen()
+        if self.isFullScreen():
+            self.showMaximized()
+        for d in (self.d_bin, self.d_right):
+            d.show()
+        self.resizeDocks([self.d_bin, self.d_right], [430, self._right_width], Qt.Horizontal)
+        total = max(3, sum(self.split.sizes()))
+        self.split.setSizes([total * 2 // 3, total - total * 2 // 3])
+        self.tl.set_heights(DEFAULT_HEIGHTS, emit=True)
+        self.timeline._sync_heights()
+        self.timeline.area.verticalScrollBar().setValue(0)
+        self.right_tabs.setCurrentIndex(0)
+        self.bin.set_view_mode("details")
+        QTimer.singleShot(0, self.tl.fit)      # once the timeline has its new width
+        self.lbl_status.setText("Layout reset")
 
     def createPopupMenu(self):   # noqa: N802 (Qt name)
         """The right-click menu on toolbars and dock titles, without the entries that would hide the panels."""
@@ -2895,7 +2936,6 @@ class MainWindow(QMainWindow):
     def check_updates(self, manual: bool = True):
         """Look for a newer release on GitHub in the background. Automatic checks run at most once a day and say
         nothing unless there is an update."""
-        from .. import updater
         if not manual and time.time() - self.qs.value("update_last_check", 0.0, type=float) < self.UPDATE_CHECK_EVERY:
             return
         self.qs.setValue("update_last_check", time.time())
@@ -2911,7 +2951,6 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_update_checked(self, release, error: str, manual: bool):
-        from .. import updater
         if release is None:
             if manual:
                 QMessageBox.warning(self, APP_NAME, f"Could not check for updates:\n{error}")
@@ -2952,7 +2991,6 @@ class MainWindow(QMainWindow):
             self._install_update(release)
 
     def _install_update(self, release):
-        from .. import updater
         if updater.install_kind() == "git":
             try:
                 out = updater.git_pull()
@@ -2991,6 +3029,7 @@ class MainWindow(QMainWindow):
             "Ctrl+A — select all clips\nR — other moment for the clip (best one nearby)\nH — new hook\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
+            "Ctrl+Shift+R — reset the layout\n"
             "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline · Ctrl+= / Ctrl+− — zoom in / out\n"
             "Ctrl+Shift+B — color adjustments in the viewer on / off\n"
             "Ctrl+wheel on timeline — zoom · on the Media thumbnails — thumbnail size\n\n"

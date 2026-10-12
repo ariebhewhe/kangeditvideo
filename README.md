@@ -64,6 +64,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Official camera LUTs** | Use the makers' own conversion LUTs (DJI D-Log M, Sony, Panasonic, Fujifilm, Nikon, ARRI…) instead of the built-in curves. See [Official camera LUTs](#official-camera-luts). |
 | **LUTs (.cube)** | Import 1D/3D `.cube` LUTs (or the `.zip` they come in) as a log conversion or as a creative look with a strength slider. |
 | **Exposure & color** | Exposure, contrast, highlights, shadows, temperature, tint, saturation, vibrance. **Auto** sets exposure, white balance and contrast. *Auto color all clips* runs in the background with progress and Cancel. Preview and export share the same color math. |
+| **Processing order** | The industry order: ① log curve and gamut to scene-linear Rec.709 (or the conversion LUT, with exposure and white balance applied before it on the log signal) → ② exposure and white balance in linear light → ③ contrast, shadows and highlights in stops around middle grey → ④ saturation and vibrance in linear light → ⑤ output tone map (filmic or clip) → ⑥ creative look LUT (expects Rec.709) at its strength → ⑦ halation and sharpening. |
 
 ### Captions
 
@@ -178,6 +179,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Shift+Z | Fit the timeline |
+| Ctrl+Shift+R | Reset the layout (*View → Reset layout*) |
 | Ctrl+− / Ctrl+= | Zoom the timeline out / in |
 | Ctrl+Shift+A | Auto Edit… |
 | Ctrl+Shift+B | Color adjustments in the viewer on / off |

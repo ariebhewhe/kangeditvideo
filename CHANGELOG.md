@@ -25,10 +25,22 @@ and the Release workflow uses that section as the GitHub release notes.
 - *Fit to timeline* makes one sound clip that loops (with crossfades between repeats) instead of several
   overlapping copies on two rows; a 🔁 ×N label and dashed lines show the repeats, and it can be made longer
   by dragging its end.
+- *View → Reset layout* (Ctrl+Shift+R): panels, the viewer / timeline split, lane heights and tabs back to
+  their usual sizes, and the timeline fitted.
+- *Help → About* shows the GitHub repository and a contact address.
 - Updates from GitHub: *Help → Check for updates…*, and a daily check at startup. Packaged builds download,
   verify and install the new release and restart; source copies update their files; git checkouts `git pull`.
 
+### Changed
+- Color is processed in the order colorists use: log curve and gamut → exposure and white balance (in
+  linear light) → contrast, shadows and highlights (in stops around middle grey) → saturation and vibrance
+  (linear light) → output tone map → creative look LUT → halation and sharpening. With a conversion LUT,
+  exposure and white balance now act on the log signal before the LUT, so highlights the LUT would clip can be
+  recovered. Graded clips may look slightly different than in 0.2.
+
 ### Fixed
+- After *Fit*, the timeline no longer has a horizontal scroll bar (it only shows when there is more to see),
+  and long edits (over ~10 minutes) now fit too.
 - Zoom to face finds faces far more often: it now uses OpenCV's YuNet face detector (faces turned away, tilted,
   small, blurred, dark or in flat log footage), looks at 9 frames at 720p instead of 5 at 480p, follows the
   clip's rotation, and picks the face seen in the most frames. With OpenCV 5 (what a new install gets) the old
