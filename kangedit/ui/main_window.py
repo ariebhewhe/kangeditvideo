@@ -684,6 +684,8 @@ class MainWindow(QMainWindow):
                           f"<b>{APP_NAME} {version_string()}</b><br>Automatic best-moment video editor.<br><br>"
                           f"Source, releases and issues:<br>{link(self.REPO_URL, self.REPO_URL)}<br><br>"
                           f"Contact: {link('mailto:' + self.CONTACT, self.CONTACT)}<br><br>"
+                          "License: MIT with the Commons Clause — free to use, change and share, also for paid "
+                          "video work; KangEdit itself may not be sold.<br><br>"
                           "Python · PySide6 · FFmpeg · OpenCV · faster-whisper", parent=self)
         box.setTextFormat(Qt.RichText)
         box.setTextInteractionFlags(Qt.TextBrowserInteraction)   # clickable links, selectable text

@@ -6,6 +6,12 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### License
+- KangEdit now has a license: the MIT License with the Commons Clause (`LICENSE`). It may be used for anything,
+  including paid and monetized video work, changed and shared for free, but KangEdit itself may not be sold
+  (copies, changed versions, paid products or services built mainly on it). Third-party licenses are listed in
+  `THIRD_PARTY_NOTICES.md`; both files ship with the packaged builds, and *Help → About* summarizes the terms.
+
 ### Added
 - Multicam in ✨ Auto Edit: give each recording an angle (main, angle 2, 3, 4; guessed from the camera), and the
   angles are synced by their sound to within a millisecond, clock drift between cameras included. The main

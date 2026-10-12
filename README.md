@@ -19,6 +19,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 - [Troubleshooting](#troubleshooting)
 - [Development and releases](#development-and-releases)
 - [Project layout](#project-layout)
+- [License](#license)
 - [Third-party software](#third-party-software)
 
 ---
@@ -430,6 +431,22 @@ kangedit/
   ui/                   PySide6 interface: viewer, timeline, media bin, inspector, video layers,
                         captions, sounds, dialogs
 ```
+
+---
+
+## License
+
+KangEdit is free to use, change and share under the [MIT License with the Commons Clause](LICENSE).
+
+| | |
+|---|---|
+| **Allowed** | Using it for anything: personal videos, professional and client work, monetized YouTube / TikTok / Instagram channels, schools, companies. Changing it, and sharing it or your changed version for free (with the license). The videos you make with it are yours. |
+| **Not allowed** | Selling KangEdit: selling copies or a changed version of it, charging for it as part of a product, or offering a paid service (hosting, support, consulting) whose value comes mainly from KangEdit. |
+
+To sell KangEdit or build a paid product or service on it, ask for a separate license: esha@angkasa.dev.
+
+The Commons Clause makes this "source available" rather than open source in the OSI sense. Third-party software
+used by KangEdit keeps its own license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
