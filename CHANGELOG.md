@@ -1,7 +1,8 @@
 # Changelog
 
 All notable changes to KangEdit are listed here. Versions follow [semantic versioning](https://semver.org).
-Note changes under [Unreleased]; a release (a pull request from `main` into `stable`) renames it to the new version.
+Note changes under [Unreleased]; a release (a pull request from `main` into `stable`) renames it to the new version,
+and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
