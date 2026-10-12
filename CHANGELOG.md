@@ -6,6 +6,22 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
+### Added
+- *Help → Copy system info*: app version, OS, CPU, memory, library versions, FFmpeg, GPU decode / encode
+  support, screens and folders, ready to paste into a bug report.
+
+### Changed
+- The window opens maximized on the display the mouse pointer is on.
+- The Media and Refine panels are fixed in place (no more undocking); drag their borders to resize them.
+- The timeline toolbar moves buttons that don't fit into a » menu instead of widening the window.
+
+### Fixed
+- On smaller displays (e.g. 1440×900) the window no longer grows past the screen: every Refine tab
+  scrolls to its bottom and the panels can be resized.
+- Python 3.10 (PyAV 17): a crash when two preview threads converted the same frame.
+
 ## [0.1.0] - 2026-10-12
 
 First public release.

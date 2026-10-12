@@ -61,3 +61,49 @@ def test_viewer_color_modes(window, mode, playing, color):
     finally:
         window.viewer.playing = False
     assert window.a_adjust[mode].isChecked()
+
+
+def test_panels_stay_docked(window):
+    from PySide6.QtWidgets import QDockWidget
+    for dock in (window.d_bin, window.d_right):
+        assert dock.features() == QDockWidget.NoDockWidgetFeatures
+    menu = window.createPopupMenu()
+    if menu is not None:   # the right-click menu can't hide the panels
+        assert not {window.d_bin.toggleViewAction(), window.d_right.toggleViewAction()} & set(menu.actions())
+
+
+def test_refine_tabs_scroll_and_fit_a_small_display(qapp):
+    from PySide6.QtWidgets import QScrollArea
+    from kangedit.ui.main_window import MainWindow
+    window = MainWindow()
+    try:
+        tabs = window.right_tabs
+        assert all(isinstance(tabs.widget(i), QScrollArea) for i in range(tabs.count()))
+        window.show_refine(window.sfx_panel)
+        assert tabs.currentWidget().widget() is window.sfx_panel
+        window.show()
+        qapp.processEvents()
+        # A 1440x900 display minus the taskbar: the window must fit, with room left to resize the panels.
+        hint = window.minimumSizeHint()
+        parts = {"media": window.d_bin, "refine": window.d_right, "viewer": window.viewer,
+                 "timeline": window.timeline, "media list": window.bin, "inspector": window.inspector.widget(),
+                 "text": window.text_panel.widget(), "captions": window.caps_panel, "sounds": window.sfx_panel}
+        widths = {k: max(w.minimumSizeHint().width(), w.minimumWidth()) for k, w in parts.items()}
+        # Measured against a 9 pt UI font at 100 % (the alphabet is ~170 px wide in Segoe UI or DejaVu Sans).
+        # Offscreen Qt on the Windows runners renders text about twice as large, so scale the limit with it.
+        from PySide6.QtGui import QFontMetrics
+        alphabet = QFontMetrics(qapp.font()).horizontalAdvance("abcdefghijklmnopqrstuvwxyz")
+        scale = max(1.0, alphabet / 170)
+        font = f"{qapp.font().family()} {qapp.font().pointSizeF():g} pt, alphabet {alphabet} px"
+        assert hint.width() <= 1400 * scale and hint.height() <= 820 * scale, f"{hint}: {widths}; {font}"
+    finally:
+        window.project.dirty = False
+        window.close()
+
+
+def test_system_info_report():
+    from kangedit import __version__, sysinfo
+    text = sysinfo.report(gpu=False)
+    assert __version__ in text
+    for key in ("OS:", "Python:", "Qt:", "PySide6:", "numpy:", "Log file:"):
+        assert key in text

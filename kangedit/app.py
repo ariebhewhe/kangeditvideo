@@ -61,6 +61,17 @@ def _download_ffmpeg() -> bool:
     return True
 
 
+def show_maximized_on_current_screen(win) -> None:
+    """Open maximized on the display the mouse pointer is on (where the app was started from), not always on
+    the primary one."""
+    from PySide6.QtGui import QCursor, QGuiApplication
+    screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+    if screen is not None:
+        win.setScreen(screen)
+        win.move(screen.availableGeometry().topLeft())   # Windows maximizes on the screen the window is on
+    win.showMaximized()
+
+
 def self_test() -> int:
     """CI / packaging check: every module and native library loads, and the main window builds and closes
     offscreen with throwaway settings (no network, no dialogs). Exit code 0 on success."""
@@ -82,7 +93,7 @@ def self_test() -> int:
         app = QApplication.instance() or QApplication([sys.argv[0]])
         from .ui.main_window import MainWindow
         win = MainWindow()
-        win.show()
+        show_maximized_on_current_screen(win)
         app.processEvents()
         win.project.dirty = False
         win.close()
@@ -131,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .ui.main_window import MainWindow
     win = MainWindow()
-    win.show()
+    show_maximized_on_current_screen(win)
     crashlog.log.info("Main window shown")
     args = [a for a in argv[1:] if not a.startswith("-")]
     if args and args[0].endswith(".kgproj"):

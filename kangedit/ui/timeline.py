@@ -8,8 +8,8 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSlider, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSizePolicy, QSlider, QToolBar,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .. import sfx
 from ..analysis import WAVE_RATE, Analysis
@@ -1148,8 +1148,12 @@ class TimelinePanel(QWidget):
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color: #8b909a;")
 
-        top = QHBoxLayout()
-        top.setContentsMargins(4, 2, 4, 2)
+        # A toolbar rather than a row of buttons: when the window is narrow, the buttons that don't fit go into
+        # its » menu instead of forcing the whole window (and the docks beside it) wider.
+        top = QToolBar()
+        top.setObjectName("timelineBar")
+        top.setStyleSheet("QToolBar#timelineBar { background: transparent; padding: 2px 4px; spacing: 6px; }"
+                          "QToolButton#qt_toolbar_ext_button { padding: 0px; min-width: 18px; }")
         top.addWidget(self.btn_undo)
         top.addWidget(self.btn_redo)
         sep = QLabel("|")
@@ -1162,15 +1166,17 @@ class TimelinePanel(QWidget):
         top.addWidget(sep)
         for w in (self.btn_hook, self.btn_alt):
             top.addWidget(w)
-        top.addSpacing(12)
-        top.addWidget(self.lbl, 1)
+        self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # Always room for the clip count and length; the overlap warning after it may be clipped (tooltip).
+        self.lbl.setMinimumWidth(self.lbl.fontMetrics().horizontalAdvance("000 clips · 00:00:00") + 8)
+        top.addWidget(self.lbl)
         top.addWidget(QLabel("Zoom"))
         top.addWidget(self.zoom)
         top.addWidget(self.btn_fit)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addLayout(top)
+        lay.addWidget(top)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.scroll)
 
@@ -1272,3 +1278,4 @@ class TimelinePanel(QWidget):
         if bad:
             txt += f"  ·  ⚠ {bad} clips overlap / too close to another clip from the same footage"
         self.lbl.setText(txt)
+        self.lbl.setToolTip(txt)   # clipped when the timeline is narrow

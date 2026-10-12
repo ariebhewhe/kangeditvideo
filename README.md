@@ -268,6 +268,7 @@ Earlier versions kept the cache in the user data folder. On the first start afte
 | Export uses the CPU | Your GPU has no H.264/H.265 encoder, its driver is too old, or ProRes is selected. Untick *Encode on the graphics card* to force the CPU. |
 | Captions are slow | Choose `large-v3-turbo` (or `small`) under *Captions → Style…*. |
 | Sound search fails | MyInstants is unreachable from your network. Import audio files instead. |
+| Reporting a problem | *Help → Copy system info* copies your app version, system, library versions, graphics card support and folders. Paste it into your report, along with the log file it names. |
 
 ---
 
