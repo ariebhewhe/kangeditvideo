@@ -1,8 +1,14 @@
 # Packaged builds for Windows, macOS (Apple Silicon) and Linux, uploaded as workflow artifacts.
-# Only started by hand (Actions → Build → Run workflow): releases don't build automatically.
+# Called by Release; can also be started by hand (Actions → Build → Run workflow).
 name: Build
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit, branch or tag to build (default: the triggering ref)"
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       ref:

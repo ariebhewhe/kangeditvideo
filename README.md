@@ -82,7 +82,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 ### Ready-made builds
 
-A packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** or **Linux (x64)** needs no Python. Build one from the `stable` branch with `python scripts/build.py` (see [Development and releases](#development-and-releases)), or run the *Build* workflow by hand and download it from the run's artifacts. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time.
+Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** and **Linux (x64)**: no Python needed. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time. `SHA256SUMS.txt` lists the archives' checksums.
 
 ### From source
 
@@ -289,16 +289,17 @@ python scripts/build.py               # packaged build for this platform → dis
 
 1. On `main`, bump the version (`python scripts/bump_version.py minor`), and in `CHANGELOG.md` rename `## [Unreleased]` to the new version (`## [0.2.0] - YYYY-MM-DD`) with a fresh `## [Unreleased]` above it. Commit and merge into `main`.
 2. Open a pull request from `main` into `stable` and merge it once CI passes. Its *release-check* job (`python scripts/release_check.py`) makes sure the version is newer than `stable`'s and has a CHANGELOG section.
-3. Optionally, tag the merge so older versions stay easy to find: `git tag v0.2.0 origin/stable && git push origin v0.2.0`.
+3. The merge starts the *Release* workflow: it tests, builds every platform and publishes the GitHub Release `v0.2.0` (creating the tag) with the archives, `SHA256SUMS.txt` and the version's CHANGELOG section as the notes.
 
-Releases aren't built or published automatically. Build a version locally with `python scripts/build.py` on each platform, or with the *Build* workflow.
+To build locally instead: `python scripts/build.py` on each platform.
 
 **GitHub Actions** (`.github/workflows/`):
 
 | Workflow | When | What |
 |---|---|---|
 | **CI** | Every pull request, and pushes to `main` and `stable` | Lint, tests and the self-test on Windows, macOS and Linux with Python 3.10 and 3.12. Pull requests into `stable` also run *release-check*. |
-| **Build** | By hand only (*Actions → Build → Run workflow*) | PyInstaller builds for Windows x64, macOS arm64 and Linux x64, kept as workflow artifacts for 30 days. Each build runs its own self-test before it is archived. |
+| **Build** | Called by Release, or by hand (*Actions → Build → Run workflow*) | PyInstaller builds for Windows x64, macOS arm64 and Linux x64, kept as workflow artifacts for 30 days. Each build runs its own self-test before it is archived. |
+| **Release** | Pushes to `stable` (or by hand) | If `stable`'s version has no GitHub Release yet: tests, builds every platform and publishes `vX.Y.Z` with the archives, `SHA256SUMS.txt`, the CHANGELOG section and generated notes. Otherwise does nothing. |
 
 ---
 
@@ -314,7 +315,7 @@ scripts/                build.py (packaged build), bump_version.py (versioning),
 CHANGELOG.md            release history
 packaging/              PyInstaller spec
 tests/                  pytest suite
-.github/workflows/      CI, Build (manual)
+.github/workflows/      CI, Build, Release
 kangedit/
   app.py                startup (offers the FFmpeg download when it's missing)
   config.py             paths (app folder, cache, user data), constants, open_path()
