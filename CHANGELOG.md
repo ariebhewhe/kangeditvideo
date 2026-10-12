@@ -39,6 +39,9 @@ and the Release workflow uses that section as the GitHub release notes.
   recovered. Graded clips may look slightly different than in 0.2.
 
 ### Fixed
+- With several clips selected (e.g. Ctrl+A), *Import LUT (.cube)…* in the clip's Camera profile or Look list
+  applied the imported LUT to one clip only; it now applies to every selected clip. A camera detection that
+  finishes after you picked a profile by hand no longer overwrites your choice.
 - After *Fit*, the timeline no longer has a horizontal scroll bar (it only shows when there is more to see),
   and long edits (over ~10 minutes) now fit too.
 - Zoom to face finds faces far more often: it now uses OpenCV's YuNet face detector (faces turned away, tilted,

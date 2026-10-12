@@ -319,3 +319,41 @@ def test_fit_leaves_nothing_to_scroll_and_reset_layout(window, tmp_path, qapp):
         qapp.processEvents()
     assert window.tl.heights == DEFAULT_HEIGHTS and window.right_tabs.currentIndex() == 0
     assert window.timeline.scroll.maximum() == 0
+
+
+def test_ctrl_a_then_conversion_lut_changes_every_selected_clip(window, qapp, lut_library, tmp_path, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog
+    from kangedit.color import lut_profile
+    from .conftest import write_cube
+    p = Project()
+    fs = [Footage(str(tmp_path / f"{n}.mp4"), 30.0, 1920, 1080, 30.0, True) for n in "abc"]
+    p.footage = {f.id: f for f in fs}
+    p.clips = [TimelineClip(fs[0].id, 0, 3), TimelineClip(fs[1].id, 0, 3), TimelineClip(fs[2].id, 0, 3),
+               TimelineClip(fs[0].id, 5, 8)]
+    window.set_project(p)
+    window.show()
+    tl = window.tl
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, tl._clip_rects()[1][1].center().toPoint())
+    tl.setFocus()
+    QTest.keyClick(tl, Qt.Key_A, Qt.ControlModifier)
+    qapp.processEvents()
+    assert len(tl.selected_ids()) == 4 and len(window.inspector.targets) == 4
+
+    # picked from the list
+    first = write_cube(lut_library / "first.cube")
+    window.inspector.reload_luts()
+    cb = window.inspector.cb_log
+    cb.setCurrentIndex(cb.findData(lut_profile(first)))
+    assert all(f.log_profile == lut_profile(first) for f in p.footage.values())
+
+    # imported from the list's "Import LUT (.cube)…" entry, as a conversion and as a look
+    src = write_cube(tmp_path / "conv.cube", 3)
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([src], ""))
+    window.inspector_request("import_lut_log")
+    conv = [f.log_profile for f in p.footage.values()]
+    assert len(set(conv)) == 1 and conv[0] != lut_profile(first) and conv[0].endswith("conv.cube")
+    window.inspector_request("import_lut_look")
+    looks = {c.grade.look for c in p.clips}
+    assert len(looks) == 1 and looks.pop().endswith(".cube")

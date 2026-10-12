@@ -1553,6 +1553,7 @@ class MainWindow(QMainWindow):
         if not ids:
             return
         footage = {fid: self.project.footage[fid] for fid in ids}
+        before = {fid: f.log_profile for fid, f in footage.items()}   # a choice made meanwhile wins
         thumbs = {fid: list(self.analyses[fid].thumbs) for fid in ids
                   if fid in self.analyses and len(self.analyses[fid].thumbs)}
         use_proxies = self.project.settings.use_proxies
@@ -1595,6 +1596,9 @@ class MainWindow(QMainWindow):
                     lines.append(f"{f.name}: {err}")
                     continue
                 f.camera = label
+                if f.log_profile != before.get(fid):
+                    lines.append(f"{f.name}: kept {profile_label(f.log_profile)} (chosen while detecting)")
+                    continue
                 if profile is not None:
                     f.log_profile = self._official_profile(profile)
                 f.log_note, f.log_pending = (f"Detected {note}" if profile else note), False
@@ -1614,8 +1618,8 @@ class MainWindow(QMainWindow):
 
     # ================================================================== LUTs
     def import_lut(self, target: str, ids: Optional[list[str]] = None):
-        """Import .cube files into the LUT library. target: "library", "log" (conversion for footage `ids` or
-        the selected clip's footage) or "look" (creative LUT on the selected clip)."""
+        """Import .cube files into the LUT library. target: "library", "log" (conversion for footage `ids`, else
+        the footage of every selected clip) or "look" (creative LUT on every selected clip)."""
         paths, _ = QFileDialog.getOpenFileNames(self, "Import LUT", self.qs.value("lut_import_dir", ""),
                                                 "Cube LUT or .zip (*.cube *.zip);;All files (*)")
         if not paths:
@@ -1625,13 +1629,15 @@ class MainWindow(QMainWindow):
             return
         lut = imported[0]
         clip = self.selected_clip()
+        targets = self.inspector.targets if clip is not None else []   # the shown clip and the rest of the selection
         if target == "log":
-            ids = ids or ([clip.footage_id] if clip else [])
+            ids = ids or list(dict.fromkeys(c.footage_id for c in targets))
             if ids:
                 self.set_log_profile(ids, lut_profile(lut))
-        elif target == "look" and clip is not None:
+        elif target == "look" and targets:
             self.project_checkpoint()
-            clip.grade.look = lut
+            for c in targets:
+                c.grade.look = lut
             self.inspector.set_clip(clip)
             self.viewer.refresh()
         self._update_title()
