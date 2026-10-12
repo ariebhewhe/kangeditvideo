@@ -18,7 +18,7 @@ from ..analysis import WAVE_RATE, Analysis
 from ..captions import Caption
 from ..edits import TRANSITIONS, edits
 from ..models import OverlayClip, Project, SoundClip
-from ..speed import RAMPS, SPEED_PRESETS
+from ..speed import RAMPS, SOUND_MODES, SPEED_PRESETS, sound_mode
 from ..speed import label as speed_label
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
 from .flow import FlowBar
@@ -500,8 +500,9 @@ class TimelineView(QWidget):
             x1 = int(min(r.right(), self.width()))
             if x1 > x0:
                 xs = np.arange(x0, x1, 2)
-                ts = np.asarray(c.src_at((xs - r.left()) / self.pps), dtype=np.float64)
-                vals = a.wave[np.clip((ts * WAVE_RATE).astype(int), 0, a.wave.size - 1)] * c.volume
+                ts = np.asarray(c.sound_src_at((xs - r.left()) / self.pps), dtype=np.float64)
+                vol = 0.0 if c.audio_mode == "mute" else c.volume
+                vals = a.wave[np.clip((ts * WAVE_RATE).astype(int), 0, a.wave.size - 1)] * vol
                 mid = wr.center().y()
                 amp = (self.wave_h / 2 - 1) * np.clip(vals, 0, 1)
                 poly = QPolygonF([QPointF(x, mid - h) for x, h in zip(xs, amp)] +
@@ -789,7 +790,7 @@ class TimelineView(QWidget):
         for key, label in (("-90", "⟲ 90° left"), ("90", "⟳ 90° right"), ("0", "Straight (0°)")):
             self._menu_action(sub, label, f"ov_rotate:{key}", oid)
         if not (self.project.footage.get(c.footage_id) and self.project.footage[c.footage_id].is_image):
-            self._speed_menu(m, "ov_", oid, c.speed, c.ramp)
+            self._speed_menu(m, "ov_", oid, c.speed, c.ramp, audio=c.audio_mode)
         for key, label, cur in (("ov_fade_in", "Fade in", c.fade_in), ("ov_fade_out", "Fade out", c.fade_out)):
             sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
             for v in (0.0, 0.25, 0.5, 1.0, 2.0):
@@ -1030,9 +1031,10 @@ class TimelineView(QWidget):
         self.update()
         self.texts_changed.emit()
 
-    def _speed_menu(self, m: QMenu, prefix: str, payload: str, speed: float, ramp: str, many: str = ""):
-        """Speed submenus: constant slow / fast motion and the ramp templates (actions {prefix}speed:<x>,
-        {prefix}speed_custom, {prefix}ramp:<key>)."""
+    def _speed_menu(self, m: QMenu, prefix: str, payload: str, speed: float, ramp: str, many: str = "",
+                    audio: str = "sync"):
+        """Speed submenus: constant slow / fast motion, the ramp templates and what the sound does (actions
+        {prefix}speed:<x>, {prefix}speed_custom, {prefix}ramp:<key>, {prefix}audio:<mode>)."""
         cur = speed_label(speed, ramp)
         sub = m.addMenu(f"Speed{many} ({cur})" if cur else f"Speed{many}")
         for v in SPEED_PRESETS:
@@ -1049,6 +1051,13 @@ class TimelineView(QWidget):
             a = self._menu_action(sub, name, f"{prefix}ramp:{k}", payload)
             a.setCheckable(True)
             a.setChecked(ramp == k)
+            a.setToolTip(desc)
+        sub.setToolTipsVisible(True)
+        sub = m.addMenu("Sound at this speed")
+        for k, (name, desc) in SOUND_MODES.items():
+            a = self._menu_action(sub, name, f"{prefix}audio:{k}", payload)
+            a.setCheckable(True)
+            a.setChecked(sound_mode(audio) == k)
             a.setToolTip(desc)
         sub.setToolTipsVisible(True)
 
@@ -1585,7 +1594,7 @@ class TimelineView(QWidget):
             if key == "speed":
                 c = next((x for x in self.project.clips if x.id == clip_id), None)
                 if c is not None:
-                    self._speed_menu(m, "", clip_id, c.speed, c.ramp, many)
+                    self._speed_menu(m, "", clip_id, c.speed, c.ramp, many, c.audio_mode)
                 continue
             if key == "transition":
                 sub = m.addMenu(f"Transition into {'these clips' if n > 1 else 'this clip'}")

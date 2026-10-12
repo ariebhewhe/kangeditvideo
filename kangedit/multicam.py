@@ -200,7 +200,7 @@ def build(project: Project, clips: list[TimelineClip], angles: dict[str, int],
                     speed, ramp = clamp((b_out - b_in) / max(1e-3, c.time_at(a_end) - t_in)), ""
             oc = OverlayClip(fid, round(t0 + t_in, 4), round(b_in, 4), round(b_out, 4),
                              k - 2, angle=k, volume=1.0 if sound_angle == k else 0.0, link=c.id,
-                             speed=speed, ramp=ramp)
+                             speed=speed, ramp=ramp, audio_mode=c.audio_mode)
             place(oc, project.footage[fid], lay[k - 1], template, tw, th)
             out.append(oc)
     return out

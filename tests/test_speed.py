@@ -147,9 +147,17 @@ def test_normal_speed_graph_is_unchanged(tmp_path):
 def test_audio_chain_single_and_ramp_segments():
     one = _audio_chain("0:a:0", "a0", 2.0, 1.0, 0.0, [(5.0, 6.0, 0.5)], 4.0)
     assert one.startswith("[0:a:0]atrim=start=1.0000") and "atempo=0.500000" in one
-    ramp = _audio_chain("0:a:0", "a0", 2.0, 1.0, 0.0, [(4.0, 4.5, 0.5), (4.5, 6.0, 1.5)], 4.0)
-    assert "asplit=2[a0s0][a0s1]" in ramp and "[a0p0][a0p1]concat=n=2:v=0:a=1[a0r]" in ramp
-    assert ramp.endswith("[a0]")
+    one = _audio_chain("0:a:0", "a0", 2.0, 1.0, 0.0, [(4.0, 4.5, 0.5), (4.5, 6.0, 1.5)], 4.0)
+    assert "atempo@a0t0=tempo=0.500000" in one and "atempo@a0t1" not in one     # 0.5..2x: one stage
+    segs = [(4.0, 4.5, 0.3), (4.5, 6.0, 1.5)]
+    ramp = _audio_chain("0:a:0", "a0", 2.0, 1.0, 0.0, segs, 4.0)              # pitch kept: one stretch
+    assert "atempo@a0t0=tempo=0.547723" in ramp and "atempo@a0t1=tempo=0.547723" in ramp   # 2 stages
+    # stage 1 switches at 0.5 s of source; stage 2 sees that moment 0.5 / 0.548 s into its input
+    assert "asendcmd=c='0.5000 atempo@a0t0 tempo 1.224745'" in ramp
+    assert "asendcmd=c='0.9129 atempo@a0t1 tempo 1.224745'" in ramp and ramp.endswith("[a0]")
+    tape = _audio_chain("0:a:0", "a0", 2.0, 1.0, 0.0, segs, 4.0, keep_pitch=False)   # pitch follows: pieces
+    assert "asplit=2[a0s0][a0s1]" in tape and "[a0p0][a0p1]concat=n=2:v=0:a=1[a0r]" in tape
+    assert "asetrate=14400,aresample=48000" in tape and "asetrate=72000" in tape
 
 
 @pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
@@ -337,3 +345,121 @@ def test_viewer_shows_the_frame_the_speed_map_says(window):
         assert sh.start == pytest.approx(t0) and sh.dur == pytest.approx(c.duration)
         for off in (-0.2, 0.0, c.duration / 3, c.duration):
             assert sh.src_at(off) == pytest.approx(c.src_at(off))
+
+
+# ----------------------------------------------------------------------------- the sound at another speed
+def _chirp_project(tmp_path):
+    """A 4 s clip whose tone rises 100 Hz a second from 200 Hz: its pitch tells which moment is heard."""
+    src = str(tmp_path / "chirp.mp4")
+    try:
+        run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=4",
+             "-f", "lavfi", "-i", "aevalsrc='0.5*sin(2*PI*(200*t+50*t*t))':s=48000:d=4", "-shortest",
+             "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-y", src.replace(".mp4", ".mov")])
+    except Exception as e:   # noqa: BLE001
+        pytest.skip(f"FFmpeg can't make the test clip: {e}")
+    src = src.replace(".mp4", ".mov")
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    p = Project()
+    p.footage = {f.id: f}
+    return p, f
+
+
+def _pitch(wav: str, t: float) -> float:
+    import wave
+    with wave.open(wav) as w:
+        rate, ch = w.getframerate(), w.getnchannels()
+        w.setpos(int(t * rate))
+        x = np.frombuffer(w.readframes(int(0.1 * rate)), dtype="<i2").reshape(-1, ch)[:, 0].astype(np.float64)
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)), 1 << 16))
+    return float(np.argmax(spec) * rate / (1 << 16))
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+@pytest.mark.parametrize("mode", ["sync", "pitch", "normal", "mute"])
+def test_sound_modes_at_half_speed(tmp_path, mode):
+    from kangedit.export import render_audio
+    p, f = _chirp_project(tmp_path)
+    c = TimelineClip(f.id, 1.0, 3.0, speed=0.5, audio_mode=mode)       # 4 s on the timeline
+    p.clips = [c]
+    try:
+        wav = render_audio(p, False, str(tmp_path / "mix.wav"))
+    except FFmpegError as e:
+        pytest.skip(f"needs a newer FFmpeg: {e}")
+    import wave
+    with wave.open(wav) as w:
+        assert w.getnframes() / w.getframerate() == pytest.approx(4.0, abs=0.05)
+        raw = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    if mode == "mute":
+        assert np.abs(raw).max() < 50
+        return
+    for t in (0.5, 1.5, 2.5, 2.85):                # (at normal speed the file ends 3 s in)
+        heard = c.sound_src_at(t + 0.05)           # source moment heard there (middle of the measured 0.1 s)
+        want = 200 + 100 * heard
+        if mode == "pitch":
+            want *= c.speed                        # half speed: an octave down
+        assert _pitch(wav, t) == pytest.approx(want, rel=0.04), (mode, t)
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+def test_ramped_sound_follows_the_picture(tmp_path):
+    from kangedit.export import render_audio
+    p, f = _chirp_project(tmp_path)
+    c = TimelineClip(f.id, 0.5, 3.5, ramp="hero")
+    p.clips = [c]
+    try:
+        wav = render_audio(p, False, str(tmp_path / "mix.wav"))
+    except FFmpegError as e:
+        pytest.skip(f"needs a newer FFmpeg: {e}")
+    # within ~0.05 s of the picture all along (restarting the time-stretch per piece drifted ~0.6 s)
+    for t in np.linspace(0.2, c.duration - 0.25, 12):
+        assert _pitch(wav, t) == pytest.approx(200 + 100 * c.src_at(t + 0.05), rel=0.03), t
+
+
+def test_sound_mode_in_graph_captions_and_menus(tmp_path):
+    p, f = _project(tmp_path)
+    p.clips[0].audio_mode = "pitch"
+    p.clips[2].audio_mode = "normal"
+    build_export(p, ExportSettings(str(tmp_path / "out.mp4"), p.settings.aspect, "1080p", 30.0, use_gpu=False),
+                 str(tmp_path))
+    g = (tmp_path / "graph.txt").read_text(encoding="utf-8")
+    assert "asetrate=24000,aresample=48000" in g             # half speed, pitch an octave down
+    a2 = next(x for x in g.split(";") if x.endswith("[a2]"))
+    assert "atempo" not in a2 and "asetrate" not in a2       # the 2x clip's sound plays at normal speed
+    assert "asendcmd=c='" in g and "atempo@a1t0=tempo=" in g   # the ramp: one continuous time-stretch
+    # captions: a word 1 s after the in point is heard 1 s in at normal speed, 2 s in synced at half speed
+    from kangedit.captions import build_captions
+    f.transcript = [{"w": "hello", "s": 3.0, "e": 3.4}]
+    q = Project()
+    q.footage = {f.id: f}
+    q.clips = [TimelineClip(f.id, 2.0, 6.0, speed=0.5)]
+    assert build_captions(q)[0].start == pytest.approx(2.0, abs=0.01)
+    q.clips[0].audio_mode = "normal"
+    assert build_captions(q)[0].start == pytest.approx(1.0, abs=0.01)
+    q.clips[0].audio_mode = "mute"
+    assert build_captions(q) == []
+    assert speed.stretch(0.5, False) == "asetrate=24000,aresample=48000" and speed.stretch(1.0, False) == ""
+
+
+def test_sound_mode_controls(window):
+    p = window.project
+    a = p.clips[0]
+    window.clip_action("speed:0.5", a.id)
+    window.clip_action("audio:normal", a.id)
+    assert a.audio_mode == "normal" and "Not synced" in window.lbl_status.text()
+    window.tl.selected = a.id
+    window.inspector.set_clip(a)
+    assert window.inspector.cb_sound.currentData() == "normal"
+    window.inspector.cb_sound.setCurrentIndex(window.inspector.cb_sound.findData("pitch"))
+    assert a.audio_mode == "pitch"
+    window.undo()
+    assert window.project.clips[0].audio_mode == "normal"
+    f = next(iter(p.footage.values()))
+    window.add_overlays([f.id], 0.0)
+    o = window.project.overlays[-1]
+    window._timeline_action("ov_audio:mute", o.id)
+    assert o.audio_mode == "mute"
+    window.tl.select_overlay(o.id)
+    assert window.layer_panel.cb_sound.currentData() == "mute"
+    window.layer_panel.cb_sound.setCurrentIndex(window.layer_panel.cb_sound.findData("sync"))
+    assert o.audio_mode == "sync"

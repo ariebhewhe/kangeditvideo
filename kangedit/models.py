@@ -99,6 +99,7 @@ class TimelineClip:
     box_h: float = 0.0
     speed: float = 1.0             # 0.5 = half speed (slow motion), 2 = double (see speed.py)
     ramp: str = ""                 # speed.RAMPS key: speed ramp template along the clip ("" = constant)
+    audio_mode: str = "sync"       # speed.SOUND_MODES key: the sound at another speed (synced, pitch, normal, mute)
     id: str = field(default_factory=new_id)
 
     @property
@@ -121,6 +122,14 @@ class TimelineClip:
     def time_at(self, src: float) -> float:
         """Seconds into the clip (timeline) where source time `src` shows."""
         return self.timemap().time(src - self.src_in)
+
+    def sound_src_at(self, t: float) -> float:
+        """Source time heard `t` seconds into the clip: the picture's, unless the sound plays at normal speed."""
+        return self.src_in + t if self.audio_mode == "normal" else self.src_at(t)
+
+    def sound_time_at(self, src: float) -> float:
+        """Seconds into the clip where the sound of source time `src` is heard."""
+        return src - self.src_in if self.audio_mode == "normal" else self.time_at(src)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -164,6 +173,7 @@ class OverlayClip:
     linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
     speed: float = 1.0             # see TimelineClip.speed
     ramp: str = ""
+    audio_mode: str = "sync"
     id: str = field(default_factory=new_id)
 
     @property
@@ -182,6 +192,9 @@ class OverlayClip:
 
     def time_at(self, src: float) -> float:
         return self.timemap().time(src - self.src_in)
+
+    def sound_src_at(self, t: float) -> float:
+        return self.src_in + t if self.audio_mode == "normal" else self.src_at(t)
 
     @property
     def end(self) -> float:

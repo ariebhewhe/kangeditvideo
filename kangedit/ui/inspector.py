@@ -12,7 +12,7 @@ from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import Project, TimelineClip
-from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
 from ..speed import clamp as clamp_speed
 
 
@@ -211,6 +211,14 @@ class Inspector(QScrollArea):
                                 "above)")
         self.cb_ramp.currentIndexChanged.connect(lambda _: self._set_ramp())
         f.addRow("Ramp", self.cb_ramp)
+        self.cb_sound = QComboBox()
+        for key, (label, desc) in SOUND_MODES.items():
+            self.cb_sound.addItem(label, key)
+            self.cb_sound.setItemData(self.cb_sound.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_sound.setToolTip("What the clip's sound does at another speed: stay in sync with the picture "
+                                 "(pitch kept or following the speed), play at normal speed, or be muted")
+        self.cb_sound.currentIndexChanged.connect(lambda _: self._set_sound())
+        f.addRow("Sound", self.cb_sound)
         self.grp_speed = g
         lay.addWidget(g)
 
@@ -395,6 +403,9 @@ class Inspector(QScrollArea):
         self.cb_ramp.blockSignals(True)
         self.cb_ramp.setCurrentIndex(max(0, self.cb_ramp.findData(clip.ramp if clip.ramp in RAMPS else "")))
         self.cb_ramp.blockSignals(False)
+        self.cb_sound.blockSignals(True)
+        self.cb_sound.setCurrentIndex(max(0, self.cb_sound.findData(sound_mode(clip.audio_mode))))
+        self.cb_sound.blockSignals(False)
         self.sp_speed.set_value(clip.speed)
         self.grp_speed.setEnabled(not f.is_image)
         select_data(self.cb_log, f.log_profile, profile_label(f.log_profile))
@@ -447,6 +458,15 @@ class Inspector(QScrollArea):
             if not self.project.footage[c.footage_id].is_image:
                 c.ramp = self.cb_ramp.currentData() or ""
         self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_sound(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:audio_mode")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.audio_mode = self.cb_sound.currentData() or "sync"
         self.changed.emit("trim")
 
     def _set_edit(self, key: str):

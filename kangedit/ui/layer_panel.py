@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QScrollArea, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..models import OverlayClip, Project
-from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
 from ..speed import clamp as clamp_speed
 from .inspector import ParamSlider, wrap_angle
 
@@ -163,6 +163,12 @@ class LayerPanel(QScrollArea):
             self.cb_ramp.setItemData(self.cb_ramp.count() - 1, desc, Qt.ToolTipRole)
         self.cb_ramp.currentIndexChanged.connect(lambda _: self._set("ramp", self.cb_ramp.currentData() or ""))
         f.addRow("Speed ramp", self.cb_ramp)
+        self.cb_sound = QComboBox()
+        for key, (label, desc) in SOUND_MODES.items():
+            self.cb_sound.addItem(label, key)
+            self.cb_sound.setItemData(self.cb_sound.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_sound.currentIndexChanged.connect(lambda _: self._set("audio_mode", self.cb_sound.currentData()))
+        f.addRow("Sound at speed", self.cb_sound)
         f.addRow("Layer", self.sp_layer)
         v.addWidget(g)
 
@@ -229,7 +235,10 @@ class LayerPanel(QScrollArea):
         self.cb_ramp.blockSignals(True)
         self.cb_ramp.setCurrentIndex(max(0, self.cb_ramp.findData(clip.ramp if clip.ramp in RAMPS else "")))
         self.cb_ramp.blockSignals(False)
-        for w in (self.sl_speed, self.cb_ramp):
+        self.cb_sound.blockSignals(True)
+        self.cb_sound.setCurrentIndex(max(0, self.cb_sound.findData(sound_mode(clip.audio_mode))))
+        self.cb_sound.blockSignals(False)
+        for w in (self.sl_speed, self.cb_ramp, self.cb_sound):
             w.setEnabled(moving)
         sound = f is not None and f.has_audio and not f.is_image
         self.grp_sound.setEnabled(sound)

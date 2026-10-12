@@ -15,11 +15,21 @@ and the Release workflow uses that section as the GitHub release notes.
   the middle, fast out), *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse* and
   *Montage*. A ramp combines with the clip's speed (a 2× *Pulse* is twice as fast throughout). Ramps follow the
   footage frame for frame in the preview and the export, and the sound follows the ramp.
+- Sound at another speed, per clip (right-click → *Speed* → *Sound at this speed*, the Inspector's Speed group
+  or the Layer tab): *Synced, pitch kept* (the default), *Synced, pitch follows speed* (slow motion sounds deeper,
+  fast motion higher, like a tape), *Not synced (normal speed)* (the sound plays at normal speed from the in point,
+  whatever the picture does) or *Muted*. Captions follow the sound.
 - Smooth slow motion in the export: slowed-down parts blend neighbouring frames instead of repeating them (an
   option in the Export dialog, on by default).
 - Speed works with everything else: transitions and J / L cuts use the footage around the clip at its speed,
   captions follow the new timing, the timeline's filmstrip and waveform show the clip as it plays (and its speed in
   the clip header), trims and slips move at the clip's speed, and multicam angles play at their main clip's speed.
+- README: *System requirements* (minimum Windows, macOS and Linux versions for the ready-made builds and from
+  source, and hardware).
+
+### Fixed
+- The macOS build now declares macOS 14 as its minimum (it said 12, but the Qt, onnxruntime and NumPy it bundles
+  need macOS 14), so older Macs get a clear message instead of a crash.
 
 ## [0.3.0] - 2026-10-12
 

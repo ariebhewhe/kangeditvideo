@@ -38,7 +38,7 @@ from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
 from ..models import Footage, OverlayClip, Project, SoundClip, TextClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
-from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
 from ..speed import clamp as clamp_speed
 from ..speed import label as speed_label
 from ..tasks import TaskQueue
@@ -2109,10 +2109,15 @@ class MainWindow(QMainWindow):
                 continue                       # a still has no motion to slow down
             if key == "speed":
                 x.speed = clamp_speed(float(val))
+            elif key == "audio":
+                x.audio_mode = sound_mode(val)
             else:
                 x.ramp = val if val in RAMPS else ""
         self._after_structure_change()
         c = targets[0]
+        if key == "audio":
+            self.lbl_status.setText(f"Sound: {SOUND_MODES[c.audio_mode][0]} — {len(targets)} clip(s)")
+            return
         what = speed_label(c.speed, c.ramp) or "normal speed"
         self.lbl_status.setText(f"Speed: {what} — {len(targets)} clip(s); "
                                 f"{'the ramp' if c.ramp else 'the clip'} now runs {c.duration:.1f} s.")
@@ -2195,7 +2200,7 @@ class MainWindow(QMainWindow):
             self._replace_moments(targets)
         elif action == "face_zoom":
             self._face_zoom(targets)
-        elif action.startswith(("speed:", "ramp:")) or action == "speed_custom":
+        elif action.startswith(("speed:", "ramp:", "audio:")) or action == "speed_custom":
             self.set_speed(targets, action)
         elif action.startswith("rotate:"):
             self.project_checkpoint()
@@ -2525,6 +2530,8 @@ class MainWindow(QMainWindow):
             c.speed = clamp_speed(float(action.split(":", 1)[1]))
         elif action.startswith("ov_ramp:"):
             c.ramp = action.split(":", 1)[1]
+        elif action.startswith("ov_audio:"):
+            c.audio_mode = sound_mode(action.split(":", 1)[1])
         elif action == "ov_speed_custom":
             v = self._ask_speed(c.speed)
             if v is None:
@@ -3279,7 +3286,8 @@ class MainWindow(QMainWindow):
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
             "Speed: right-click a clip → Speed (slow / fast motion, 0.1× to 8×) or Speed ramp (Hero moment,\n"
-            "Bullet time, Slow → fast…), or the Inspector's Speed group · the sound keeps its pitch\n"
+            "Bullet time, Slow → fast…), or the Inspector's Speed group · Sound at this speed: synced\n"
+            "(pitch kept or following the speed), normal speed (not synced) or muted\n"
             "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline,\n"
             "auto ducking\n"
             "Video layers (V2, V3… above the main track): drag footage or images from Media onto a layer\n"

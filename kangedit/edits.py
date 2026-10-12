@@ -98,9 +98,9 @@ def plan(project: Project, fps: float) -> list[ClipPlan]:
         a_pre = pre_f / fps if pre_f else -e_in.split
         a_post = post_f / fps if post_f else e_out.split
         a_dur = max(0.02, nfr / fps + a_pre + a_post)
-        out.append(ClipPlan(start_f, nfr, pre_f, post_f, c.src_at(-pre_f / fps), c.src_at(-a_pre), a_dur,
+        out.append(ClipPlan(start_f, nfr, pre_f, post_f, c.src_at(-pre_f / fps), c.sound_src_at(-a_pre), a_dur,
                             TRANSITIONS[e_in.trans][1] if pre_f else "",
-                            c.src_at((nfr + post_f) / fps), c.src_at(a_dur - a_pre), -a_pre))
+                            c.src_at((nfr + post_f) / fps), c.sound_src_at(a_dur - a_pre), -a_pre))
     return out
 
 

@@ -41,6 +41,16 @@ RAMPS: dict[str, tuple[str, str, list[tuple[float, float]]]] = {
 }
 SAMPLES = 256          # points of the time map along the clip
 
+# What a clip's sound does when its speed changes: key -> (label, description)
+SOUND_MODES: dict[str, tuple[str, str]] = {
+    "sync": ("Synced, pitch kept", "The sound follows the picture's speed and keeps its pitch"),
+    "pitch": ("Synced, pitch follows speed", "The sound follows the picture's speed like a tape: slow motion "
+                                             "sounds deeper, fast motion higher"),
+    "normal": ("Not synced (normal speed)", "The sound plays at normal speed from the clip's in point, "
+                                            "whatever the picture's speed"),
+    "mute": ("Muted", "No sound from this clip"),
+}
+
 
 def clamp(speed: float) -> float:
     return float(min(MAX_SPEED, max(MIN_SPEED, speed)))
@@ -136,6 +146,20 @@ class TimeMap:
 @functools.lru_cache(maxsize=512)
 def timemap(src_len: float, speed: float, ramp: str) -> TimeMap:
     return TimeMap(round(src_len, 6), speed, ramp)
+
+
+def sound_mode(mode: str) -> str:
+    return mode if mode in SOUND_MODES else "sync"
+
+
+def stretch(speed: float, keep_pitch: bool = True) -> str:
+    """Audio filters playing 48 kHz sound at `speed`: time-stretched with its pitch kept (atempo), or resampled
+    so the pitch moves with the speed; "" at normal speed."""
+    if abs(speed - 1.0) < 1e-4:
+        return ""
+    if keep_pitch:
+        return atempo(speed)
+    return f"asetrate={int(round(48000 * speed))},aresample=48000"
 
 
 def atempo(speed: float) -> str:

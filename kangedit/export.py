@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import reframe
-from .speed import atempo
+from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
 from .config import cache_dir, frame_size
@@ -83,24 +83,45 @@ _IMAGE_PREP = "format=rgba,premultiply=inplace=1,"
 
 
 def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.0,
-                 segs: Optional[list] = None, ss: float = 0.0) -> str:
+                 segs: Optional[list] = None, ss: float = 0.0, keep_pitch: bool = True) -> str:
     """The sound of a clip: `dur` seconds from `skip` seconds into the input, or at another speed `segs`
     [(source start, source end, speed)] (source times; the input starts at source time `ss`), time-stretched
-    with its pitch kept."""
+    with its pitch kept, or resampled (pitch moving with the speed) when not keep_pitch."""
     fade = min(0.02, dur / 4)
     fmt = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
     head, src = "", f"[{inp}]"
     if segs and len(segs) == 1:
         s0, _s1, v = segs[0]
         skip = s0 - ss
-        tempo = atempo(v)
+        tempo = stretch(v, keep_pitch)
         fmt += tempo + "," if tempo else ""
+    elif segs and keep_pitch:
+        # A speed ramp, pitch kept: one continuous time-stretch whose tempo changes on the way. Restarting
+        # atempo for every piece would lose a little sound at each restart and drift away from the picture.
+        # Each atempo stage (0.5..2x) gets its own tempo changes (asendcmd), timed on its own input's clock.
+        lo, hi = min(v for *_, v in segs), max(v for *_, v in segs)
+        n = max(1, math.ceil(math.log2(max(hi, 1.0 / lo)) - 1e-9))
+        chain = []
+        for k in range(n):
+            name = f"atempo@{out}t{k}"
+            t, cmds = 0.0, []
+            for i, (s0, s1, v) in enumerate(segs):
+                f = v ** (1.0 / n)
+                if i:
+                    cmds.append(f"{t:.4f} {name} tempo {f:.6f}")
+                t += (s1 - s0) / f ** k          # this stage's input runs at the speed of the stages before it
+            if cmds:
+                chain.append(f"asendcmd=c='{';'.join(cmds)}'")
+            chain.append(f"{name}=tempo={segs[0][2] ** (1.0 / n):.6f}")
+        skip = segs[0][0] - ss
+        fmt += ",".join(chain) + ","
     elif segs:
-        # A speed ramp: pieces of nearly constant speed, each stretched on its own, joined back together.
+        # A speed ramp, pitch following the speed: pieces of nearly constant speed, each resampled on its own
+        # (exact in length), joined back together.
         n = len(segs)
         head = f"[{inp}]{fmt.rstrip(',')},asplit={n}" + "".join(f"[{out}s{k}]" for k in range(n)) + ";"
         for k, (s0, s1, v) in enumerate(segs):
-            tempo = atempo(v)
+            tempo = stretch(v, keep_pitch)
             head += (f"[{out}s{k}]atrim=start={max(0.0, s0 - ss):.4f}:end={max(0.0, s1 - ss):.4f},"
                      f"asetpts=PTS-STARTPTS{',' + tempo if tempo else ''}[{out}p{k}];")
         head += "".join(f"[{out}p{k}]" for k in range(n)) + f"concat=n={n}:v=0:a=1[{out}r];"
@@ -111,12 +132,20 @@ def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.
             f"apad,atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[{out}]")
 
 
-def _speed_segments(clip, cp: ClipPlan) -> Optional[list]:
-    """A clip's audio pieces in source time for its speed (None at normal speed)."""
+def _speed_segments(clip, t0: float, t1: float) -> Optional[list]:
+    """A clip's sound over timeline offsets t0..t1 as pieces in source time for its speed (None when it plays
+    at normal speed: at 1x, or not synced to the picture)."""
     tm = clip.timemap()
-    if tm.normal:
+    if tm.normal or sound_mode(clip.audio_mode) == "normal":
         return None
-    return [(clip.src_in + a, clip.src_in + b, v) for a, b, v in tm.segments(cp.a_t0, cp.a_t0 + cp.a_dur)]
+    return [(clip.src_in + a, clip.src_in + b, v) for a, b, v in tm.segments(t0, t1)]
+
+
+def _clip_audio(ai: str, i: int, clip, cp: ClipPlan, silent: bool, ss: float) -> str:
+    mode = sound_mode(clip.audio_mode)
+    return _audio_chain(ai, f"a{i}", cp.a_dur, 0.0 if mode == "mute" else clip.volume,
+                        0.0 if silent else max(0.0, cp.a_in - ss),
+                        None if silent else _speed_segments(clip, cp.a_t0, cp.a_t0 + cp.a_dur), ss, mode != "pitch")
 
 
 def _curve(fade: float) -> str:
@@ -193,7 +222,8 @@ def _overlay_input(project: Project, c: OverlayClip, use_proxies: bool, fps: flo
         args, ss = _image_input(f, c.src_in, c.duration, fps)
         return args, max(0.0, c.src_in - ss)
     src = f.proxy_path if (use_proxies and f.has_proxy()) else f.path
-    return ["-ss", f"{c.src_in:.4f}", "-t", f"{c.src_dur + 0.25:.4f}", "-i", src], 0.0
+    # (sound at normal speed under slow motion runs on past the out point)
+    return ["-ss", f"{c.src_in:.4f}", "-t", f"{max(c.src_dur, c.duration) + 0.25:.4f}", "-i", src], 0.0
 
 
 def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str], graph: list[str], k: int,
@@ -209,7 +239,7 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                    key=lambda c: c.track)
     for j, c in enumerate(clips):
         f = project.footage[c.footage_id]
-        sound = f.has_audio and not f.is_image and c.volume > 0.001
+        sound = f.has_audio and not f.is_image and c.volume > 0.001 and sound_mode(c.audio_mode) != "mute"
         if video is None and not sound:
             continue
         args, skip = _overlay_input(project, c, use_proxies, fps)
@@ -217,9 +247,8 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
         length = min(c.duration, dur - c.start)
         if sound:
             delay = int(round(max(0.0, c.start) * 1000))
-            tm = c.timemap()
-            segs = None if tm.normal else [(c.src_in + a, c.src_in + b, v) for a, b, v in tm.segments(0.0, length)]
-            graph.append(_audio_chain(f"{k}:a:0", f"ova{j}r", length, c.volume, 0.0, segs, c.src_in))
+            graph.append(_audio_chain(f"{k}:a:0", f"ova{j}r", length, c.volume, 0.0, _speed_segments(c, 0.0, length),
+                                      c.src_in, sound_mode(c.audio_mode) != "pitch"))
             graph.append(f"[ova{j}r]adelay=delays={delay}:all=1[ova{j}]")
             audio.append(f"ova{j}")
         if video is not None:
@@ -360,8 +389,7 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
                  f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
         chain.append(post)
         graph += chain
-        graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss),
-                                  None if silent else _speed_segments(clip, cp), ss))
+        graph.append(_clip_audio(ai, i, clip, cp, silent, ss))
 
     _join(graph, plans, s.fps, video=True)
     k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"))
@@ -458,8 +486,7 @@ def render_audio(project: Project, use_proxies: bool, out_wav: str,
         inputs += args
         ai = f"{k + 1}:a:0" if silent else f"{k}:a:0"
         k += n_in
-        graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss),
-                                  None if silent else _speed_segments(clip, cp), ss))
+        graph.append(_clip_audio(ai, i, clip, cp, silent, ss))
     _join(graph, plans, fps, video=False)
     k, _, ov_audio = _overlays(project, use_proxies, fps, inputs, graph, k)
     aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
