@@ -107,3 +107,27 @@ def test_system_info_report():
     assert __version__ in text
     for key in ("OS:", "Python:", "Qt:", "PySide6:", "numpy:", "Log file:"):
         assert key in text
+
+
+def test_toolbars_wrap_instead_of_hiding_buttons(qapp):
+    """On a small display the toolbar and the timeline's buttons go onto more rows, all visible inside the
+    window (nothing in a » menu)."""
+    from PySide6.QtCore import QRect
+    from kangedit.ui.main_window import MainWindow
+    window = MainWindow()
+    try:
+        window.resize(1340, 740)
+        window.show()
+        for _ in range(5):
+            qapp.processEvents()
+        tl = window.timeline
+        buttons = [window.btn_import, window.btn_auto, window.btn_export, window.btn_help, window.cb_fit,
+                   window.chk_proxy, tl.btn_undo, tl.btn_redo, tl.btn_move, tl.btn_slip, tl.btn_split,
+                   tl.btn_delete, tl.btn_fade, tl.btn_hook, tl.btn_alt, tl.zoom, tl.btn_fit]
+        area = QRect(0, 0, window.width(), window.height())
+        for b in buttons:
+            box = QRect(b.mapTo(window, b.rect().topLeft()), b.size())
+            assert b.isVisible() and area.contains(box), (b.text() if hasattr(b, "text") else b, box, area)
+    finally:
+        window.project.dirty = False
+        window.close()

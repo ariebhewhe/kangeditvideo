@@ -8,8 +8,8 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSizePolicy, QSlider, QToolBar,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSizePolicy, QSlider, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import sfx
 from ..analysis import WAVE_RATE, Analysis
@@ -17,6 +17,7 @@ from ..captions import Caption
 from ..edits import TRANSITIONS, edits
 from ..models import Project, SoundClip
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
+from .flow import FlowBar
 from .theme import CLIP_COLORS, fmt_time
 
 RULER = 24
@@ -1148,31 +1149,29 @@ class TimelinePanel(QWidget):
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color: #8b909a;")
 
-        # A toolbar rather than a row of buttons: when the window is narrow, the buttons that don't fit go into
-        # its » menu instead of forcing the whole window (and the docks beside it) wider.
-        top = QToolBar()
-        top.setObjectName("timelineBar")
-        top.setStyleSheet("QToolBar#timelineBar { background: transparent; padding: 2px 4px; spacing: 6px; }"
-                          "QToolButton#qt_toolbar_ext_button { padding: 0px; min-width: 18px; }")
-        top.addWidget(self.btn_undo)
-        top.addWidget(self.btn_redo)
-        sep = QLabel("|")
-        sep.setStyleSheet("color: #45484f;")
-        top.addWidget(sep)
-        for w in (self.btn_move, self.btn_slip, self.btn_split, self.btn_delete, self.btn_fade):
-            top.addWidget(w)
-        sep = QLabel("|")
-        sep.setStyleSheet("color: #45484f;")
-        top.addWidget(sep)
-        for w in (self.btn_hook, self.btn_alt):
-            top.addWidget(w)
+        # Wraps onto a second row when the timeline is narrow, instead of hiding buttons or widening the window.
+        top = FlowBar(hspacing=6, vspacing=2)
+        top.flow.setContentsMargins(4, 2, 4, 2)
+
+        def sep():
+            lbl = QLabel("|")
+            lbl.setStyleSheet("color: #45484f;")
+            return lbl
+
+        top.add(self.btn_undo, self.btn_redo, sep(), self.btn_move, self.btn_slip, self.btn_split, self.btn_delete,
+                self.btn_fade, sep(), self.btn_hook, self.btn_alt)
         self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # Always room for the clip count and length; the overlap warning after it may be clipped (tooltip).
         self.lbl.setMinimumWidth(self.lbl.fontMetrics().horizontalAdvance("000 clips · 00:00:00") + 8)
-        top.addWidget(self.lbl)
-        top.addWidget(QLabel("Zoom"))
-        top.addWidget(self.zoom)
-        top.addWidget(self.btn_fit)
+        top.add(self.lbl)
+        zoom = QWidget()
+        row = QHBoxLayout(zoom)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(QLabel("Zoom"))
+        row.addWidget(self.zoom)
+        row.addWidget(self.btn_fit)
+        top.add(zoom)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)

@@ -6,6 +6,12 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-12
+
+### Fixed
+- On smaller displays, the toolbar and the timeline's buttons wrap onto a second row instead of hiding in
+  a » menu (which could not be clicked): Export, Hook, Other moment, Zoom and Fit are always visible.
+
 ## [0.2.0] - 2026-10-12
 
 ### Added
