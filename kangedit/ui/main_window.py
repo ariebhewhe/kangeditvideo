@@ -24,7 +24,7 @@ from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
-from .. import music, reframe, sfx
+from .. import images, music, reframe, sfx
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -35,7 +35,7 @@ from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDE
                       open_path, set_cache_root, settings, sfx_dir)
 from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
-from ..models import Footage, Project, SoundClip, TextClip, TimelineClip, new_id
+from ..models import Footage, OverlayClip, Project, SoundClip, TextClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
 from ..tasks import TaskQueue
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
@@ -43,12 +43,13 @@ from .captions_panel import CaptionsPanel
 from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
                       ProxyDialog)
 from .flow import FlowBar
-from .inspector import Inspector
+from .inspector import Inspector, wrap_angle
+from .layer_panel import PLACEMENTS, LayerPanel
 from .media_bin import MediaBin
 from .sfx_panel import SoundPanel
 from .text_panel import TextPanel
 from .theme import compact_combos, fmt_time
-from .timeline import TimelinePanel
+from .timeline import MAX_LAYERS, TimelinePanel
 from .tour import TourOverlay, TourStep
 from .tray import Tray
 from .platform_overlay import PLATFORM_OVERLAYS
@@ -84,6 +85,7 @@ class RefineTabs(QTabWidget):
 
 class MainWindow(QMainWindow):
     audio_ready = Signal(int, str)
+    update_checked = Signal(object, str, bool)   # updater.Release or None, error, asked by the user
     analysis_ready = Signal(str, object)   # footage id, Analysis (from worker threads)
 
     def __init__(self):
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
         self.caps_panel = CaptionsPanel()
         self.sfx_panel = SoundPanel()
         self.text_panel = TextPanel(self.project)
+        self.layer_panel = LayerPanel(self.project)
         self._exported = False
         self._tour: Optional[TourOverlay] = None
 
@@ -135,15 +138,18 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, d_bin)
         tabs = RefineTabs()
         tabs.add(self.inspector, "🎨 Clip")
+        tabs.add(self.layer_panel, "🧩 Layer")
         tabs.add(self.caps_panel, "💬 Captions")
         tabs.add(self.text_panel, "🔤 Text")
         tabs.add(self.sfx_panel, "🔊 Sounds")
-        tabs.setTabToolTip(0, "Colour, log conversion, reframe, volume and transition of the selected clip")
-        tabs.setTabToolTip(1, "Generate, edit, style and delete captions")
-        tabs.setTabToolTip(2, "Animated titles and text")
-        tabs.setTabToolTip(3, "Sound effects")
+        tabs.setTabToolTip(0, "Colour, log conversion, reframe, rotation, volume and transition of the selected clip")
+        tabs.setTabToolTip(1, "Position, size, rotation, opacity and fades of the clip selected on a video layer "
+                              "(picture in picture, logos, images on top)")
+        tabs.setTabToolTip(2, "Generate, edit, style and delete captions")
+        tabs.setTabToolTip(3, "Animated titles and text")
+        tabs.setTabToolTip(4, "Sound effects, music and auto ducking")
         self.right_tabs = tabs
-        for panel in (self.inspector, self.caps_panel, self.text_panel, self.sfx_panel, self.viewer):
+        for panel in (self.inspector, self.layer_panel, self.caps_panel, self.text_panel, self.sfx_panel, self.viewer):
             compact_combos(panel)
         d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")
@@ -152,7 +158,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
         # Wide enough for the widest tab (plus its scroll bar): nothing on the right gets cut off.
         need = max(p.minimumSizeHint().width() for p in (self.inspector.widget(), self.text_panel.widget(),
-                                                          self.caps_panel, self.sfx_panel)) + 24
+                                                          self.layer_panel.widget(), self.caps_panel,
+                                                          self.sfx_panel)) + 24
         d_right.setMinimumWidth(need)
         self.resizeDocks([d_bin, d_right], [430, max(370, need)], Qt.Horizontal)
         self.d_bin, self.d_right = d_bin, d_right
@@ -175,6 +182,13 @@ class MainWindow(QMainWindow):
         self._autosave_timer.start()
         QTimer.singleShot(600, self._offer_recovery)
         QTimer.singleShot(900, self._first_run_tour)
+        heights = self.qs.value("timeline_heights", None)
+        if isinstance(heights, dict):
+            self.tl.set_heights(heights)
+            self.timeline._sync_heights()
+        self._updater = None
+        if self.a_auto_update.isChecked() and not os.environ.get("KANGEDIT_SETTINGS_DIR"):
+            QTimer.singleShot(4000, lambda: self.check_updates(manual=False))
 
     # ================================================================== construction
     def _act(self, text, slot, shortcut=None, tip=None) -> QAction:
@@ -206,7 +220,7 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Restore a backup…", self.restore_backup, None,
                               "Open an earlier version of this project from its automatic backups"))
         m.addSeparator()
-        self.a_import = self._act("Import footage…", self.import_dialog, "Ctrl+I")
+        self.a_import = self._act("Import footage && images…", self.import_dialog, "Ctrl+I")
         m.addAction(self.a_import)
         self.a_export = self._act("Export video…", self.export_dialog, "Ctrl+E")
         m.addAction(self.a_export)
@@ -278,7 +292,13 @@ class MainWindow(QMainWindow):
                               "Choose where proxies and analysis are stored, and clear them"))
 
         m = mb.addMenu("&View")
-        m.addAction(self._act("Fit timeline", self.tl.fit, "Shift+Z"))
+        m.addAction(self._act("Fit timeline", self.tl.fit, "Shift+Z", "Zoom so the whole edit fits the timeline"))
+        m.addAction(self._act("Zoom timeline in", lambda: self.tl.zoom_by(1.5), "Ctrl+="))
+        m.addAction(self._act("Zoom timeline out", lambda: self.tl.zoom_by(1 / 1.5), "Ctrl+-"))
+        m.addAction(self._act("Fit timeline lanes to the panel height", self._fit_lane_heights, None,
+                              "Make the video, layer and sound lanes fill the timeline panel"))
+        m.addAction(self._act("Add a video layer", lambda: self._timeline_action("layer_add", ""), None,
+                              "One more layer above the main track for picture in picture, logos and images"))
         m.addAction(self._act("Full screen preview", self.viewer.toggle_fullscreen, "F11",
                               "Play the timeline on the whole screen (Esc to leave)"))
         sub = m.addMenu("Color in viewer")
@@ -320,6 +340,14 @@ class MainWindow(QMainWindow):
                                 "A short walk through the app: import, auto edit, refine and export")
         m.addAction(self.a_tour)
         m.addAction(self._act("Keyboard shortcuts", self.show_shortcuts, "F1"))
+        m.addSeparator()
+        self.a_check_updates = self._act("Check for updates…", lambda: self.check_updates(manual=True), None,
+                                         "Look for a newer KangEdit on GitHub and install it")
+        m.addAction(self.a_check_updates)
+        self.a_auto_update = QAction("Check for updates at startup", self, checkable=True)
+        self.a_auto_update.setChecked(self.qs.value("update_check", True, type=bool))
+        self.a_auto_update.toggled.connect(lambda v: self.qs.setValue("update_check", v))
+        m.addAction(self.a_auto_update)
         m.addSeparator()
         m.addAction(self._act("Copy system info", self.copy_system_info, tip=(
             "Copy your app version, system, graphics card support and folders, to paste into a bug report")))
@@ -476,6 +504,16 @@ class MainWindow(QMainWindow):
         for sig in (self.tl.sound_selected, self.tl.text_selected, self.tl.selection_changed):
             sig.connect(lambda *_: self._sync_sound_panel())
         self.tl.context_action.connect(self._timeline_action)
+        self.tl.overlay_selected.connect(self._on_overlay_selected)
+        self.tl.overlays_changed.connect(self._overlay_moved)
+        self.tl.footage_dropped.connect(self._footage_dropped)
+        self.tl.heights_changed.connect(lambda h: self.qs.setValue("timeline_heights", h))
+        self.layer_panel.before_change.connect(self.project_checkpoint)
+        self.layer_panel.changed.connect(self._layer_edited)
+        self.layer_panel.request.connect(self._overlay_action)
+        self.sfx_panel.duck_changed.connect(
+            lambda on: self.tl.selected_sound and self._sound_action(f"sound_duck:{int(on)}", self.tl.selected_sound))
+        self.sfx_panel.duck_depth_changed.connect(self._duck_depth)
         self.tl.text_selected.connect(self._on_text_selected)
         self.tl.texts_changed.connect(lambda: self._texts_changed(panel_fields=True))
         cv = self.viewer.canvas
@@ -484,6 +522,10 @@ class MainWindow(QMainWindow):
         cv.text_released.connect(lambda tid, moved: moved and self._texts_changed(panel_fields=True))
         cv.text_activated.connect(lambda tid: self._text_action("text_edit", tid))
         cv.context_menu.connect(self._viewer_menu)
+        cv.overlay_pressed.connect(lambda oid: self.tl.select_overlay(oid) if oid != self.tl.selected_overlay else None)
+        cv.overlay_dragged.connect(self._overlay_dragged)
+        cv.overlay_released.connect(lambda oid, moved: moved and self._overlays_changed())
+        cv.overlay_scaled.connect(self._overlay_scaled)
         self.text_panel.add_requested.connect(self.add_text)
         self.text_panel.selected.connect(lambda tid: self.tl.select_text(tid) if tid != self.tl.selected_text else None)
         self.text_panel.before_change.connect(self.project_checkpoint)
@@ -519,6 +561,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.toggled.connect(self._toggle_captions)
 
         self.audio_ready.connect(self._on_audio_ready)
+        self.update_checked.connect(self._on_update_checked)
         self.analysis_ready.connect(self._on_analysis_ready)
 
     # ================================================================== project state
@@ -538,6 +581,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.chk_show.setChecked(s.captions.enabled)
         self.caps_panel.chk_show.blockSignals(False)
         self.timeline.sync_fades()
+        self.sfx_panel.set_duck_depth(s.duck_db)
 
     def _fades_changed(self):
         self.project.dirty = True
@@ -652,8 +696,14 @@ class MainWindow(QMainWindow):
         self.viewer.refresh()
         clip = self.selected_clip()
         self.inspector.set_clip(clip)
+        self.layer_panel.set_clip(self.selected_overlay())
+        self.viewer.canvas.selected_overlay = self.tl.selected_overlay
         self.text_panel.refresh()
         self._update_title()
+
+    def selected_overlay(self) -> Optional[OverlayClip]:
+        oid = self.tl.selected_overlay
+        return next((c for c in self.project.overlays if c.id == oid), None) if oid else None
 
     def selected_clip(self) -> Optional[TimelineClip]:
         i = self.project.index_of(self.tl.selected) if self.tl.selected else -1
@@ -666,12 +716,14 @@ class MainWindow(QMainWindow):
         self.analyses = {}
         self._tried_alts = {}
         self._auto_history = []
-        for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel):
+        for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel, self.layer_panel):
             w.set_project(project)
         self._exported = False
         self._sync_project_controls()
         missing = []
         for fid, f in project.footage.items():
+            if f.is_image:
+                continue
             path = analysis_path_for(f)
             a = Analysis.load(path) if os.path.exists(path) else None
             if a is not None:
@@ -854,9 +906,11 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"Restored the backup {os.path.basename(path)}: save to keep it")
 
     def import_dialog(self):
-        exts = " ".join(f"*{e}" for e in VIDEO_EXTENSIONS)
-        paths, _ = QFileDialog.getOpenFileNames(self, "Import footage", self.qs.value("last_dir", ""),
-                                                f"Video files ({exts});;All files (*)")
+        vids = " ".join(f"*{e}" for e in VIDEO_EXTENSIONS)
+        imgs = " ".join(f"*{e}" for e in images.IMAGE_EXTENSIONS)
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import footage and images", self.qs.value("last_dir", ""),
+                                                f"Video and images ({vids} {imgs});;Video files ({vids});;"
+                                                f"Images ({imgs});;All files (*)")
         if paths:
             self.import_files(paths)
 
@@ -868,6 +922,15 @@ class MainWindow(QMainWindow):
         try:
             for path in sorted(paths):
                 if os.path.normcase(os.path.abspath(path)) in existing:
+                    continue
+                if images.is_image(path):
+                    try:
+                        f = self._image_footage(path)
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(f"{os.path.basename(path)}: {e}")
+                        continue
+                    self.project.footage[f.id] = f
+                    added.append(f.id)
                     continue
                 try:
                     info = probe(path)
@@ -893,16 +956,28 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Some files could not be imported:\n\n" + "\n".join(errors[:12]))
         if not added:
             return
-        if not self.project.clips:
-            first = self.project.footage[added[0]]
+        videos = [fid for fid in added if not self.project.footage[fid].is_image]
+        if not self.project.clips and videos:
+            first = self.project.footage[videos[0]]
             self.project.settings.fps = min(FRAME_RATES, key=lambda r: abs(r - first.fps))
             self._sync_project_controls()
         self.project.dirty = True
         if self.a_auto_proxy.isChecked():
-            self.queue_proxies(added)
-        self.queue_analysis(added)
+            self.queue_proxies(videos)
+        self.queue_analysis(videos)
         self.refresh_all(captions=False)
-        self.lbl_status.setText(f"Imported {len(added)} file(s). Analyzing in the background…")
+        n_img = len(added) - len(videos)
+        self.lbl_status.setText(f"Imported {len(added)} file(s)" + (f" ({n_img} image(s))" if n_img else "")
+                                + (". Analyzing in the background…" if videos else ". Drag them onto the timeline "
+                                   "or onto a video layer above it."))
+
+    def _image_footage(self, path: str) -> Footage:
+        """Footage for a picture (see images.py): any clip length fits in it, it has no sound."""
+        info = images.probe(path)
+        return Footage(path=os.path.abspath(path), duration=images.STILL_LENGTH, width=info.width, height=info.height,
+                       fps=info.fps if info.frames > 1 else self.project.settings.fps, has_audio=False,
+                       codec=info.codec, pix_fmt="rgba" if info.has_alpha else "rgb24", bit_depth=8, kind="image",
+                       camera="Animated GIF" if info.frames > 1 else "Image")
 
     # ================================================================== background jobs
     def _status_progress(self, text: str):
@@ -933,8 +1008,8 @@ class MainWindow(QMainWindow):
 
     def queue_analysis(self, ids: list[str], force: bool = False):
         """Analyze footage as one background task; clips run in parallel and appear as each one finishes."""
-        todo = [self.project.footage[fid] for fid in ids
-                if fid in self.project.footage and (force or fid not in self.analyses)]
+        todo = [self.project.footage[fid] for fid in ids if fid in self.project.footage
+                and not self.project.footage[fid].is_image and (force or fid not in self.analyses)]
         if not todo:
             return
         use_gpu = self.a_gpu_analysis.isChecked()
@@ -981,7 +1056,7 @@ class MainWindow(QMainWindow):
         use_gpu = self.qs.value("gpu_proxies", True, type=bool)
         for fid in ids:
             f = self.project.footage.get(fid)
-            if f is None:
+            if f is None or f.is_image:
                 continue
 
             def done(path, fid=fid):
@@ -1006,7 +1081,7 @@ class MainWindow(QMainWindow):
         self.qs.setValue("gpu_proxies", dlg.chk_gpu.isChecked())
         self.project.settings.proxy_height = dlg.cb_res.currentData()
         if dlg.chk_all.isChecked():
-            ids = [fid for fid, f in self.project.footage.items() if not f.has_proxy()]
+            ids = [fid for fid, f in self.project.footage.items() if not f.has_proxy() and not f.is_image]
             self.queue_proxies(ids)
             if not self.chk_proxy.isChecked():
                 self.chk_proxy.setChecked(True)
@@ -1046,6 +1121,7 @@ class MainWindow(QMainWindow):
         (factor), or at a length the user enters (None)."""
         ids = [fid for fid in self._auto_ids if fid in self.project.footage] \
             or list(dict.fromkeys(c.footage_id for c in self.project.clips)) or list(self.project.footage)
+        ids = [fid for fid in ids if not self.project.footage[fid].is_image]
         if not ids:
             self.auto_edit_dialog()
             return
@@ -1327,12 +1403,14 @@ class MainWindow(QMainWindow):
         if not ids:
             return
         if action == "remove":
-            used = [fid for fid in ids if any(c.footage_id == fid for c in self.project.clips)]
+            usage = self.project.usage()
+            used = [fid for fid in ids if usage.get(fid)]
             if used and QMessageBox.question(self, APP_NAME, "Some of this footage is used on the timeline. "
                                                              "Remove it and its clips?") != QMessageBox.Yes:
                 return
             self.project_checkpoint()
             self.project.clips = [c for c in self.project.clips if c.footage_id not in ids]
+            self.project.overlays = [c for c in self.project.overlays if c.footage_id not in ids]
             for fid in ids:
                 self.project.footage.pop(fid, None)
                 self.analyses.pop(fid, None)
@@ -1341,10 +1419,14 @@ class MainWindow(QMainWindow):
         elif action == "append_whole":
             self.project_checkpoint()
             for fid in ids:
-                f = self.project.footage[fid]
-                self.project.clips.append(TimelineClip(fid, 0.0, f.duration))
+                self.project.clips.append(self._whole_clip(fid))
             self._after_structure_change()
+        elif action == "overlay":
+            self.add_overlays(ids)
+        elif action == "append_best" and all(self.project.footage[fid].is_image for fid in ids):
+            self.bin_action("append_whole", ids)
         elif action == "append_best":
+            ids = [fid for fid in ids if not self.project.footage[fid].is_image] or ids
             missing = [fid for fid in ids if fid not in self.analyses]
             if missing:
                 self.queue_analysis(missing)
@@ -1425,7 +1507,7 @@ class MainWindow(QMainWindow):
 
     def detect_log(self, ids: list[str]):
         """Re-run camera identification and choose the log profile for the given footage (in the background)."""
-        ids = [fid for fid in ids if fid in self.project.footage]
+        ids = [fid for fid in ids if fid in self.project.footage and not self.project.footage[fid].is_image]
         if not ids:
             return
         footage = {fid: self.project.footage[fid] for fid in ids}
@@ -1824,6 +1906,8 @@ class MainWindow(QMainWindow):
             self._schedule_audio()
             self._update_title()
             return
+        if action.startswith("rotate:") and not clip_id:
+            return
         i = self.project.index_of(clip_id) if clip_id else -1
         if i < 0:
             if action == "alt_moment":
@@ -1855,6 +1939,14 @@ class MainWindow(QMainWindow):
             self._replace_moments(targets)
         elif action == "face_zoom":
             self._face_zoom(targets)
+        elif action.startswith("rotate:"):
+            self.project_checkpoint()
+            for x in targets:
+                x.rotation = wrap_angle(x.rotation + float(action.split(":", 1)[1]))
+            self.inspector.set_clip(self.selected_clip())
+            self.tl.update()
+            self.viewer.refresh()
+            self._update_title()
         elif action == "auto_color":
             self._auto_color(targets)
         elif action == "reset_color":
@@ -1918,15 +2010,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"“{title}” is not a readable audio file.")
             return
         end = min(dur, self.project.duration) if self.project.duration > 0 else dur
-        x = SoundClip(path, 0.0, 0.0, round(end, 3), self.MUSIC_VOLUME, title)
+        x = SoundClip(path, 0.0, 0.0, round(end, 3), self.MUSIC_VOLUME, title, duck=True)
         self.project_checkpoint()
         self.project.sounds.append(x)
         self.tl.selected_sound = x.id
         self.tl.refresh()
         self._sounds_changed()
         QApplication.clipboard().setText(music.credit(title, url))
-        self.lbl_status.setText(f"Added music “{title}” under the edit ({fmt_time(end, frames=False)}). "
-                                "The NCS credit is on the clipboard: paste it into the video's description.")
+        self.lbl_status.setText(f"Added music “{title}” under the edit ({fmt_time(end, frames=False)}), auto-ducked "
+                                "under the clips' sound. The NCS credit is on the clipboard: paste it into the "
+                                "video's description.")
 
     def _sync_sound_panel(self):
         sid = self.tl.selected_sound
@@ -1968,8 +2061,19 @@ class MainWindow(QMainWindow):
             x.fade_in = max(0.0, float(action.split(":", 1)[1]))
         elif action.startswith("sound_fade_out:"):
             x.fade_out = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("sound_duck:"):
+            x.duck = action.endswith(":1")
+            if x.duck:
+                self.lbl_status.setText(f"“{x.name or os.path.basename(x.path)}” is turned down "
+                                        f"{self.project.settings.duck_db:g} dB while the clips have sound")
         self.tl.refresh()
         self._sounds_changed()
+
+    def _duck_depth(self, db: float):
+        self.project_checkpoint("duck_depth")
+        self.project.settings.duck_db = float(db)
+        self._schedule_audio(300)
+        self._update_title()
 
     def _fit_sound(self, x: SoundClip):
         """Lay the sound over the whole timeline: repeated with crossfades, or cut with a fade out."""
@@ -1988,6 +2092,180 @@ class MainWindow(QMainWindow):
         label = x.name or os.path.basename(x.path)
         self.lbl_status.setText(f"“{label}” fits the timeline: repeated {len(copies)}× with crossfades"
                                 if len(copies) > 1 else f"“{label}” fits the timeline, with a fade out at the end")
+
+    # ================================================================== video layers (overlays)
+    def _whole_clip(self, fid: str) -> TimelineClip:
+        """A main-track clip of the whole footage (DEFAULT_LENGTH seconds of an image)."""
+        f = self.project.footage[fid]
+        return TimelineClip(fid, 0.0, images.DEFAULT_LENGTH if f.is_image else f.duration)
+
+    def _footage_dropped(self, ids: list[str], t: float, track: int):
+        ids = [fid for fid in ids if fid in self.project.footage]
+        if not ids:
+            return
+        if track >= 0:
+            self.add_overlays(ids, t, track)
+            return
+        # Main track: in at the cut nearest the drop point.
+        starts = self.project.clip_starts()
+        at = sum(1 for s, c in zip(starts, self.project.clips) if s + c.duration / 2 < t)
+        self.project_checkpoint()
+        new = [self._whole_clip(fid) for fid in ids]
+        self.project.clips[at:at] = new
+        self.tl.selected = new[0].id
+        self._after_structure_change()
+        self.viewer.seek(self.project.clip_starts()[at] + 0.01)
+        self.lbl_status.setText(f"Added {len(new)} clip(s) to the timeline")
+
+    def _overlay_length(self, f: Footage) -> tuple[float, float]:
+        """Source in / out of a new overlay: an image's usual length, a short video whole, else its best moment."""
+        if f.is_image:
+            return 0.0, images.DEFAULT_LENGTH
+        if f.duration <= 15.0:
+            return 0.0, f.duration
+        best = self._best_for(f.id, relaxed=True) if f.id in self.analyses else None
+        return (best.src_in, best.src_out) if best is not None else (0.0, min(f.duration, 10.0))
+
+    def _free_track(self, start: float, end: float, first: int = 0) -> int:
+        """The lowest layer from `first` up with nothing between start and end (a new layer if all are busy)."""
+        for k in range(first, MAX_LAYERS):
+            if not any(c.track == k and c.start < end - 1e-3 and start < c.end - 1e-3 for c in self.project.overlays):
+                return k
+        return min(MAX_LAYERS - 1, first)
+
+    def add_overlays(self, ids: list[str], t: Optional[float] = None, track: Optional[int] = None):
+        """Put footage / images on video layers at timeline time t (default: the playhead): videos as picture in
+        picture in a corner, images in the middle at half size."""
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Put something on the main track first: video layers show on "
+                                                    "top of it.")
+            return
+        t = self.viewer.t if t is None else t
+        added = []
+        self.project_checkpoint()
+        for fid in ids:
+            f = self.project.footage.get(fid)
+            if f is None:
+                continue
+            src_in, src_out = self._overlay_length(f)
+            k = self._free_track(t, t + src_out - src_in, track or 0)
+            x, y, scale = PLACEMENTS["center" if f.is_image else "br"]
+            c = OverlayClip(fid, round(t, 3), src_in, src_out, k, x, y, scale)
+            self.project.overlays.append(c)
+            added.append(c)
+        if not added:
+            return
+        top = max(c.track for c in self.project.overlays)
+        self.project.settings.overlay_tracks = max(self.project.settings.overlay_tracks, top + 1)
+        self.tl.refresh()
+        self.tl.select_overlay(added[-1].id)
+        self._overlays_changed()
+        self.viewer.seek(min(self.project.duration - 1e-3, added[-1].start + 0.01))
+        self.lbl_status.setText(f"Added {len(added)} clip(s) on video layer V{added[-1].track + 2}. Drag it in the "
+                                "viewer to place it, the Layer tab sizes and rotates it.")
+
+    def _overlay(self, oid: str) -> Optional[OverlayClip]:
+        return next((c for c in self.project.overlays if c.id == oid), None)
+
+    def _on_overlay_selected(self, oid: str):
+        self.layer_panel.set_clip(self._overlay(oid))
+        self.viewer.canvas.selected_overlay = oid
+        self.viewer.canvas.update()
+        if oid:
+            self.show_refine(self.layer_panel)
+
+    def _overlay_moved(self):
+        """An overlay is being dragged on the timeline."""
+        self.layer_panel.set_clip(self.selected_overlay())
+        self.viewer.refresh()
+
+    def _overlays_changed(self):
+        self.project.dirty = True
+        self.layer_panel.set_clip(self.selected_overlay())
+        self.tl.refresh()
+        self.bin.refresh()
+        self.viewer.refresh()
+        self._schedule_audio()
+        self._update_title()
+
+    def _layer_edited(self):
+        """The Layer tab changed the selected overlay."""
+        self.project.dirty = True
+        self.tl.refresh()
+        self.viewer.refresh()
+        c = self.selected_overlay()
+        if c is not None and self.project.footage.get(c.footage_id) and self.project.footage[c.footage_id].has_audio:
+            self._schedule_audio()
+        self._update_title()
+
+    def _overlay_dragged(self, oid: str, x: float, y: float):
+        c = self._overlay(oid)
+        if c is None:
+            return
+        self.project_checkpoint(f"layer:{oid}:drag")
+        c.x, c.y = round(x, 4), round(y, 4)
+        self.layer_panel.set_clip(self.selected_overlay())
+        self.viewer.refresh()
+
+    def _overlay_scaled(self, oid: str, factor: float):
+        c = self._overlay(oid)
+        if c is None:
+            return
+        self.project_checkpoint(f"layer:{oid}:scale")
+        c.scale = round(max(0.02, min(3.0, c.scale * factor)), 4)
+        self.layer_panel.set_clip(c)
+        self.viewer.refresh()
+        self._update_title()
+
+    def _overlay_action(self, action: str, oid: str):
+        c = self._overlay(oid)
+        if c is None:
+            return
+        if action == "ov_edit":
+            self.tl.select_overlay(oid)
+            self.show_refine(self.layer_panel)
+            if not (c.start <= self.viewer.t < c.end):
+                self.viewer.seek(c.start + 0.01)
+            return
+        key = action.split(":", 1)[0]
+        self.project_checkpoint(f"layer:{oid}:{key}" if key in ("ov_fade_in", "ov_fade_out") else "")
+        if action == "ov_delete":
+            self.project.overlays.remove(c)
+            if self.tl.selected_overlay == oid:
+                self.tl.select_overlay("")
+        elif action == "ov_to_playhead":
+            c.start = round(self.viewer.t, 3)
+        elif action == "ov_duplicate":
+            d = OverlayClip.from_dict(c.to_dict())
+            d.id, d.start = new_id(), c.end
+            self.project.overlays.append(d)
+            self.tl.select_overlay(d.id)
+        elif action == "ov_split":
+            cut = self.viewer.t - c.start
+            if not (0.1 < cut < c.duration - 0.1):
+                self.lbl_status.setText("Put the playhead inside the layer clip to split it.")
+                return
+            d = OverlayClip.from_dict(c.to_dict())
+            d.id, d.start, d.src_in = new_id(), c.start + cut, c.src_in + cut
+            c.src_out = c.src_in + cut
+            c.fade_out, d.fade_in = 0.0, 0.0
+            self.project.overlays.append(d)
+        elif action.startswith("ov_place:"):
+            c.x, c.y, c.scale = PLACEMENTS[action.split(":", 1)[1]]
+        elif action.startswith("ov_rotate:"):
+            v = float(action.split(":", 1)[1])
+            c.rotation = 0.0 if v == 0 else wrap_angle(c.rotation + v)
+        elif action.startswith("ov_fade_in:"):
+            c.fade_in = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("ov_fade_out:"):
+            c.fade_out = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("ov_layer:"):
+            c.track = max(0, min(MAX_LAYERS - 1, c.track + (1 if action.endswith("up") else -1)))
+            self.project.settings.overlay_tracks = max(self.project.settings.overlay_tracks, c.track + 1)
+        self._overlays_changed()
+
+    def _fit_lane_heights(self):
+        self.tl.fit_heights(self.timeline.area.viewport().height())
 
     # ================================================================== titles & text
     def add_text(self, preset: str = "title", t: Optional[float] = None):
@@ -2089,6 +2367,25 @@ class MainWindow(QMainWindow):
             self.tl.fit()
         elif key == "captions_generate":
             self.generate_captions()
+        elif key == "layer_add":
+            if self.tl.layers < MAX_LAYERS:
+                self.project_checkpoint()
+                self.project.settings.overlay_tracks = self.tl.layers + 1
+                self.tl.refresh()
+                self.lbl_status.setText(f"Added video layer V{self.tl.layers + 1}: drag footage or images onto it")
+        elif key == "layer_remove":
+            self.project_checkpoint()
+            self.project.settings.overlay_tracks = max(1, self.tl.layers - 1)
+            self.tl.refresh()
+        elif key == "ov_add_media":
+            t, track = payload.split(":")
+            ids = self.bin.selected_ids()
+            if not ids:
+                self.lbl_status.setText("Select footage or images in the Media panel first.")
+            else:
+                self.add_overlays(ids, float(t), int(track))
+        elif key.startswith("ov_"):
+            self._overlay_action(key, payload)
         elif key == "caption_style":
             self.caption_style_dialog()
         elif key == "caption_edit":
@@ -2188,7 +2485,9 @@ class MainWindow(QMainWindow):
                      "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.",
                      lambda: self.viewer.canvas),
             TourStep("The timeline",
-                     "From the top: <b>titles</b>, <b>video clips</b>, <b>sound effects</b> and <b>captions</b>.<br>"
+                     "From the top: <b>titles</b>, <b>video layers</b> (V2, V3… for picture in picture and "
+                     "images on top), the <b>main video track</b>, <b>sound effects</b> and <b>captions</b>.<br>"
+                     "Drag footage or images from Media onto them. Drag a lane's bottom edge to make it taller.<br>"
                      "Drag clips to reorder, drag their edges to trim, <b>Alt-drag</b> to slide which moment "
                      "a clip shows.",
                      lambda: self.timeline),
@@ -2234,7 +2533,9 @@ class MainWindow(QMainWindow):
         return tp, r.adjusted(-4, -2, 4, 2)
 
     def _delete_selected(self):
-        if self.tl.selected_text:
+        if self.tl.selected_overlay:
+            self._overlay_action("ov_delete", self.tl.selected_overlay)
+        elif self.tl.selected_text:
             self._text_action("text_delete", self.tl.selected_text)
         elif self.tl.selected_sound:
             self._sound_action("sound_delete", self.tl.selected_sound)
@@ -2418,7 +2719,7 @@ class MainWindow(QMainWindow):
         s = self.project.settings
         for fid in ids:
             f = self.project.footage.get(fid)
-            if f is None or (f.transcript is not None and not force):
+            if f is None or f.is_image or (f.transcript is not None and not force):
                 continue
 
             def done(words, fid=fid):
@@ -2438,6 +2739,10 @@ class MainWindow(QMainWindow):
         if not used:
             QMessageBox.information(self, APP_NAME, "Put some clips on the timeline first.")
             return
+        if all(self.project.footage[fid].is_image for fid in used):
+            QMessageBox.information(self, APP_NAME, "The timeline only has images: there is no speech to caption.")
+            return
+        used = [fid for fid in used if not self.project.footage[fid].is_image]
         todo = [fid for fid in used if self.project.footage[fid].transcript is None]
         force = False
         if not todo:
@@ -2503,7 +2808,7 @@ class MainWindow(QMainWindow):
         if not self.project.clips:
             QMessageBox.information(self, APP_NAME, "The timeline is empty.")
             return
-        missing = {self.project.footage[c.footage_id].name for c in self.project.clips
+        missing = {self.project.footage[c.footage_id].name for c in self.project.clips + self.project.overlays
                    if not os.path.exists(self.project.footage[c.footage_id].path)}
         if missing:
             QMessageBox.warning(self, APP_NAME, "Missing source files:\n" + "\n".join(sorted(missing)))
@@ -2536,6 +2841,7 @@ class MainWindow(QMainWindow):
         p.clips = [TimelineClip.from_dict(c.to_dict()) for c in self.project.clips]
         p.sounds = [SoundClip.from_dict(x.to_dict()) for x in self.project.sounds]
         p.texts = [TextClip.from_dict(x.to_dict()) for x in self.project.texts]
+        p.overlays = [OverlayClip.from_dict(x.to_dict()) for x in self.project.overlays]
         return p
 
     # ================================================================== preview audio
@@ -2577,6 +2883,99 @@ class MainWindow(QMainWindow):
         if playing:
             self.sfx_panel.stop_preview()
 
+    # ================================================================== updates
+    UPDATE_CHECK_EVERY = 20 * 3600    # seconds between automatic checks
+
+    def check_updates(self, manual: bool = True):
+        """Look for a newer release on GitHub in the background. Automatic checks run at most once a day and say
+        nothing unless there is an update."""
+        from .. import updater
+        if not manual and time.time() - self.qs.value("update_last_check", 0.0, type=float) < self.UPDATE_CHECK_EVERY:
+            return
+        self.qs.setValue("update_last_check", time.time())
+        if manual:
+            self.lbl_status.setText("Checking for updates…")
+
+        def work():
+            try:
+                self.update_checked.emit(updater.latest_release(), "", manual)
+            except Exception as e:  # noqa: BLE001 - offline, rate limited...: never in the way
+                self.update_checked.emit(None, str(e), manual)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_checked(self, release, error: str, manual: bool):
+        from .. import updater
+        if release is None:
+            if manual:
+                QMessageBox.warning(self, APP_NAME, f"Could not check for updates:\n{error}")
+                self.lbl_status.setText("Update check failed")
+            return
+        if not updater.is_newer(release.version):
+            if manual:
+                QMessageBox.information(self, APP_NAME, f"{APP_NAME} {version_string()} is the latest version.")
+                self.lbl_status.setText("KangEdit is up to date")
+            return
+        if not manual and self.qs.value("update_skip", "", type=str) == release.version:
+            return
+        box = QMessageBox(QMessageBox.Information, "Update available",
+                          f"<b>{APP_NAME} {release.version}</b> is available (you have {version_string()}).",
+                          parent=self)
+        kind = updater.install_kind()
+        box.setInformativeText({"git": "This copy is a git checkout: Update runs “git pull”.",
+                                "source": "Update downloads the new version, replaces the app's files and "
+                                          "restarts KangEdit (your projects, settings and caches stay).",
+                                "frozen": "Update downloads the new version and restarts KangEdit with it "
+                                          "(your projects, settings and caches stay)."}[kind])
+        if release.notes:
+            box.setDetailedText(release.notes)
+        b_update = box.addButton("Update now", QMessageBox.AcceptRole)
+        b_page = box.addButton("Release page", QMessageBox.HelpRole)
+        b_skip = box.addButton("Skip this version", QMessageBox.DestructiveRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.setDefaultButton(b_update)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_page:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(release.page))
+        elif clicked is b_skip:
+            self.qs.setValue("update_skip", release.version)
+        elif clicked is b_update:
+            self._install_update(release)
+
+    def _install_update(self, release):
+        from .. import updater
+        if updater.install_kind() == "git":
+            try:
+                out = updater.git_pull()
+            except updater.UpdateError as e:
+                QMessageBox.warning(self, APP_NAME, f"git pull failed:\n{e}")
+                return
+            QMessageBox.information(self, APP_NAME, f"{out or 'Updated.'}\n\nRestart {APP_NAME} to use the new "
+                                                    "version.")
+            return
+        if not self._confirm_discard():
+            return
+
+        def done(prepared):
+            try:
+                if prepared.kind == "source":
+                    updater.install_source(prepared)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, APP_NAME, f"The update could not be installed:\n{e}")
+                return
+            QMessageBox.information(self, APP_NAME, f"{APP_NAME} {prepared.version} is ready: {APP_NAME} restarts "
+                                                    "now to finish the update.")
+            self.project.dirty = False
+            updater.launch(prepared.command)
+            self.close()
+            QApplication.instance().quit()
+
+        self.tasks.submit(f"Updating to {release.version}", lambda p, c: updater.prepare(release, p, c), done,
+                          self._task_error("Update"))
+
     # ================================================================== misc
     def show_shortcuts(self):
         QMessageBox.information(self, "Keyboard shortcuts", (
@@ -2586,13 +2985,17 @@ class MainWindow(QMainWindow):
             "Ctrl+A — select all clips\nR — other moment for the clip (best one nearby)\nH — new hook\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
-            "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline\n"
+            "Ctrl+Z / Ctrl+Shift+Z — undo / redo\nShift+Z — fit timeline · Ctrl+= / Ctrl+− — zoom in / out\n"
             "Ctrl+Shift+B — color adjustments in the viewer on / off\n"
             "Ctrl+wheel on timeline — zoom · on the Media thumbnails — thumbnail size\n\n"
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
-            "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline"))
+            "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline,\n"
+            "auto ducking\n"
+            "Video layers (V2, V3…): drag footage or images from Media onto them; drag the clip in the\n"
+            "viewer to place it, mouse wheel over it to resize\n"
+            "Lanes: drag a lane's bottom edge to make it taller · Shift+wheel scrolls the lanes up / down"))
 
     def closeEvent(self, e):
         if not self._confirm_discard():

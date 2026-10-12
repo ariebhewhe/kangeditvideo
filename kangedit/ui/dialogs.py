@@ -151,6 +151,8 @@ class AutoEditDialog(QDialog):
         self.list.setMaximumHeight(130)
         use_ids = set(selected_ids) if len(selected_ids) > 1 else set(project.footage)
         for f_ in project.footage.values():
+            if f_.is_image:      # pictures have no best moments: add them to the timeline by hand
+                continue
             it = QListWidgetItem(f"{f_.name}  ({f_.duration:.0f}s)")
             it.setData(Qt.UserRole, f_.id)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)

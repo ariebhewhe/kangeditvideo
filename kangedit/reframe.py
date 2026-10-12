@@ -91,6 +91,83 @@ def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox
     return f"[{inp}]{fg},pad={tw}:{th}:{p.pad_x}:{p.pad_y}:black,setsar=1[{out}]"
 
 
+# ----------------------------------------------------------------------------- rotation
+def split_rotation(deg: float) -> tuple[int, float]:
+    """A clockwise rotation as (quarter turns 0..3, remaining angle within ±45°).
+
+    Quarter turns rotate the source before it is fitted into the frame (a sideways phone clip fills the
+    frame upright); the remaining angle tilts the framed picture about the frame's centre."""
+    q = int(round(deg / 90.0))
+    return q % 4, float(deg - q * 90.0)
+
+
+def rotate_quarters(img: np.ndarray, q: int) -> np.ndarray:
+    return np.ascontiguousarray(np.rot90(img, -q)) if q % 4 else img
+
+
+def quarter_dims(sw: int, sh: int, q: int) -> tuple[int, int]:
+    return (sh, sw) if q % 2 else (sw, sh)
+
+
+def tilt(img: np.ndarray, deg: float) -> np.ndarray:
+    """Rotate a framed picture clockwise about its centre, keeping its size (black corners)."""
+    if abs(deg) < 0.01:
+        return img
+    h, w = img.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -deg, 1.0)
+    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def ffmpeg_quarters(q: int) -> str:
+    """Filter turning the source q quarter turns clockwise ("" for none)."""
+    return {1: "transpose=1", 2: "hflip,vflip", 3: "transpose=2"}.get(q % 4, "")
+
+
+def ffmpeg_tilt(deg: float, fill: str = "black") -> str:
+    if abs(deg) < 0.01:
+        return ""
+    return f"rotate={np.radians(deg):.6f}:ow=iw:oh=ih:c={fill}"
+
+
+# ----------------------------------------------------------------------------- overlay layers
+def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float) -> tuple[int, int]:
+    """Size of an overlay: fitted inside the frame (scale 1), then scaled."""
+    s = min(tw / max(1, sw), th / max(1, sh)) * max(0.01, scale)
+    return _even(sw * s), _even(sh * s)
+
+
+def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float) -> np.ndarray:
+    """The overlay picture (RGBA) scaled for a tw x th frame and rotated clockwise on a transparent canvas
+    just big enough for it."""
+    sh, sw = rgba.shape[:2]
+    w, h = overlay_size(sw, sh, tw, th, scale)
+    img = cv2.resize(rgba, (w, h), interpolation=cv2.INTER_AREA if w < sw else cv2.INTER_LINEAR)
+    if abs(rotation) < 0.01:
+        return img
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -rotation, 1.0)
+    cos, sin = abs(m[0, 0]), abs(m[0, 1])
+    rw, rh = int(np.ceil(h * sin + w * cos)), int(np.ceil(h * cos + w * sin))
+    m[0, 2] += rw / 2.0 - w / 2.0
+    m[1, 2] += rh / 2.0 - h / 2.0
+    return cv2.warpAffine(img, m, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                          borderValue=(0, 0, 0, 0))
+
+
+def composite(canvas: np.ndarray, layer: np.ndarray, cx: float, cy: float, alpha: float) -> None:
+    """Blend an RGBA (or BGRA) layer onto a 3- or 4-channel canvas of the same channel order, centred at
+    (cx, cy) in pixels, in place. alpha: extra opacity 0..1."""
+    th, tw = canvas.shape[:2]
+    lh, lw = layer.shape[:2]
+    x0, y0 = int(round(cx - lw / 2.0)), int(round(cy - lh / 2.0))
+    ax0, ay0, ax1, ay1 = max(0, x0), max(0, y0), min(tw, x0 + lw), min(th, y0 + lh)
+    if ax1 <= ax0 or ay1 <= ay0 or alpha <= 0:
+        return
+    src = layer[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0]
+    a = src[..., 3:4].astype(np.float32) * (alpha / 255.0)
+    dst = canvas[ay0:ay1, ax0:ax1, :3]
+    dst[:] = (src[..., :3].astype(np.float32) * a + dst.astype(np.float32) * (1.0 - a) + 0.5).astype(np.uint8)
+
+
 # ----------------------------------------------------------------------------- zoom to a face
 FACE_SIZES = {"medium": 0.22, "close": 0.34, "extreme": 0.5}   # face height as a part of the frame height
 

@@ -6,6 +6,25 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- Images: import JPG, PNG, GIF, BMP, WebP and TIFF. An image on the main track is a 5-second clip that can be
+  trimmed to any length; animated GIFs loop; PNG transparency is kept on video layers.
+- Video layers (V2, V3…) above the main track for picture in picture, logos, B-roll and images on top: drag
+  footage or images from Media onto a layer, place them by dragging in the viewer (mouse wheel resizes), and
+  set position, size, rotation, opacity, fades and volume in the new **Layer** tab. Layer video sound is mixed in.
+- Rotation for clips (Reframe → Rotation, ⟲ / ⟳ 90° and the right-click menu) and for layer clips. Quarter
+  turns turn the footage before it fills the frame.
+- Adjustable lane heights: drag the bottom edge of the video track, the video layers or the sound lane, or use
+  **↕ Lanes** (sliders, *Fit to panel*). The lanes scroll up / down when taller than the panel.
+- Zoom − / + buttons (Ctrl+− / Ctrl+=) next to the zoom slider; **Fit** now fits every lane, not only the main
+  track.
+- Auto ducking: music turns down under the clips' speech and sound (on for NCS music; per sound in the Sounds
+  tab or its right-click menu, with a project-wide *Duck by* amount).
+- The Media list shows which footage the edit uses (**In edit** column, green ✓ on the thumbnails); footage can
+  be dragged onto the timeline.
+- Updates from GitHub: *Help → Check for updates…*, and a daily check at startup. Packaged builds download,
+  verify and install the new release and restart; source copies update their files; git checkouts `git pull`.
+
 ## [0.2.1] - 2026-10-12
 
 ### Fixed

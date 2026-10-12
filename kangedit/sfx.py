@@ -116,7 +116,7 @@ def fit_to_timeline(x: SoundClip, file_len: float, total: float) -> list[SoundCl
 
     def copy(start: float, dur: float, fi: float, fo: float) -> SoundClip:
         return SoundClip(x.path, round(start, 3), round(src_in, 3), round(src_in + dur, 3), x.volume, x.name,
-                         round(fi, 3), round(fo, 3))
+                         round(fi, 3), round(fo, 3), x.duck)
 
     if unit >= total - 0.01:
         out = [copy(0.0, total, x.fade_in, max(x.fade_out, min(FIT_CROSSFADE, total / 4)))]

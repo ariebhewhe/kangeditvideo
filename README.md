@@ -47,6 +47,13 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Media list views** | The **☰** / **▦** buttons above the Media list switch between the detail view (duration, format, camera, log profile, status) and a thumbnail grid. In the grid, move the mouse across a thumbnail to scrub through the clip; Ctrl+wheel resizes the thumbnails. |
 | **Recent projects** | *File → Open recent* lists the last 10 projects you opened or saved. |
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
+| **Images** | Import JPG, PNG, GIF, BMP, WebP and TIFF pictures along with your footage. On the main track an image is a 5-second clip (trim it to any length); an animated GIF loops; PNG transparency is kept on video layers. |
+| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. |
+| **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
+| **Lane heights and zoom** | Drag the bottom edge of the video track, the video layers or the sound lane to make them taller (double-click the edge to reset), or use **↕ Lanes** (sliders and *Fit to panel*). **⇔ Fit** (Shift+Z) zooms so the whole edit, every lane included, fits the width; **− / +** (Ctrl+− / Ctrl+=) zoom out / in. |
+| **Used in the edit** | The Media list's **In edit** column and a green **✓** on the thumbnails show which footage the timeline uses, and how many times. |
+| **Auto ducking** | Music turns down by itself while the clips have speech or sound and comes back up in between (sidechain compression in the preview mix and the export). Music added from the NCS list is ducked; switch it on for any sound in the **Sounds** tab or the sound's right-click menu, and set how far it drops (*Duck by*, 12 dB by default). |
+| **Updates** | *Help → Check for updates…* looks for a newer release on GitHub; KangEdit also checks once a day at startup (*Help → Check for updates at startup*). A packaged build downloads its new version, checks it against the release's checksums and restarts with it; a source copy replaces its files and reinstalls its packages; a git checkout runs `git pull`. |
 
 ### Color
 
@@ -171,6 +178,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Shift+Z | Fit the timeline |
+| Ctrl+− / Ctrl+= | Zoom the timeline out / in |
 | Ctrl+Shift+A | Auto Edit… |
 | Ctrl+Shift+B | Color adjustments in the viewer on / off |
 | F1 | Shortcut list |
@@ -185,6 +193,15 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Drag / drag edges of a sound | Move / trim the sound |
 | Right-click a sound | Volume, fade in / out, fit to timeline, move to the playhead, delete |
 | Ctrl+wheel | Zoom |
+| Shift+wheel | Scroll the lanes up / down (when they are taller than the panel) |
+| Drag a lane's bottom edge | Make the video track, the video layers or the sound lane taller |
+| Drag footage from Media | Onto a video layer: an overlay there · onto the main track: a clip at that cut |
+| Drag a layer clip | Move it in time, or up / down to another layer; drag its edges to trim |
+
+| Mouse on the viewer | Action |
+|---|---|
+| Drag a title or a layer clip | Place it |
+| Wheel over the selected layer clip | Resize it |
 
 On macOS, use ⌘ where this table says Ctrl.
 
@@ -205,7 +222,7 @@ Sound effects are mixed into the preview and the export at their own volume (rig
 
 ### Background music (NCS)
 
-At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume. **▶ Preview** (or double-click a track) streams it so you can listen first without downloading it, and **■ Stop** stops it; previews also stop when the timeline starts playing. **YouTube** opens the track in your browser.
+At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume, auto-ducked under the clips' sound. **▶ Preview** (or double-click a track) streams it so you can listen first without downloading it, and **■ Stop** stops it; previews also stop when the timeline starts playing. **YouTube** opens the track in your browser.
 
 NCS music is free to use in videos as long as the description credits it: the credit is copied to the clipboard when you add a track. Music from other YouTube channels needs its owner's permission.
 
@@ -331,6 +348,8 @@ kangedit/
   camera.py             camera identification and log-profile choice
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
+  images.py             still images and animated GIFs as footage
+  updater.py            update check and install from the GitHub releases
   export.py             FFmpeg filtergraph rendering (+ preview audio mix)
   preview.py            background preview engine: decode thread + render pool, read-ahead, pre-roll, transitions
   decoder.py            PyAV frame-accurate decoding
@@ -338,8 +357,8 @@ kangedit/
   proxy.py              proxy generation (GPU decode/encode with CPU fallback)
   models.py             project model, undo, save/load (.kgproj)
   tasks.py              background task queue
-  ui/                   PySide6 interface: viewer, timeline, media bin, inspector, captions,
-                        sounds, dialogs
+  ui/                   PySide6 interface: viewer, timeline, media bin, inspector, video layers,
+                        captions, sounds, dialogs
 ```
 
 ---
