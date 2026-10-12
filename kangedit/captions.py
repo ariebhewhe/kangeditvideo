@@ -249,8 +249,8 @@ def build_captions(project: Project, style: Optional[CaptionStyle] = None, aspec
                 mid = (w["s"] + w["e"]) / 2
                 if mid < clip.src_in or mid >= clip.src_out:
                     continue
-                ts = t0 + max(w["s"], clip.src_in) - clip.src_in
-                te = t0 + min(w["e"], clip.src_out) - clip.src_in
+                ts = t0 + clip.time_at(max(w["s"], clip.src_in))
+                te = t0 + clip.time_at(min(w["e"], clip.src_out))
                 text = w["w"]
                 if cur is not None:
                     new_len = len(cur.text) + 1 + len(text)

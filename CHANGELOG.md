@@ -6,6 +6,21 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- Slow and fast motion: any clip (main track or video layer) plays from 0.1× to 8×. Right-click → *Speed* for
+  0.25×, 0.5×, 0.75×, 1.5×, 2×, 3×, 4× or a custom speed, or use the Inspector's new **Speed** group (one-click
+  presets and a slider; the Layer tab has the same for layer clips). The clip keeps its in and out points and gets
+  longer or shorter on the timeline; its sound is time-stretched with its pitch kept.
+- Speed ramps: templates that change the speed along the clip, smoothly: *Hero moment* (fast in, slow motion in
+  the middle, fast out), *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse* and
+  *Montage*. A ramp combines with the clip's speed (a 2× *Pulse* is twice as fast throughout). Ramps follow the
+  footage frame for frame in the preview and the export, and the sound follows the ramp.
+- Smooth slow motion in the export: slowed-down parts blend neighbouring frames instead of repeating them (an
+  option in the Export dialog, on by default).
+- Speed works with everything else: transitions and J / L cuts use the footage around the clip at its speed,
+  captions follow the new timing, the timeline's filmstrip and waveform show the clip as it plays (and its speed in
+  the clip header), trims and slips move at the clip's speed, and multicam angles play at their main clip's speed.
+
 ## [0.3.0] - 2026-10-12
 
 ### License

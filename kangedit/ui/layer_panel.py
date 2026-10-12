@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..models import OverlayClip, Project
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import clamp as clamp_speed
 from .inspector import ParamSlider, wrap_angle
 
 LAYER_HELP = (
@@ -150,6 +152,17 @@ class LayerPanel(QScrollArea):
         f.addRow("Fade out", self.sl_fade_out)
         f.addRow("Starts at", self.sp_start)
         f.addRow("Length", self.sp_len)
+        self.sl_speed = ParamSlider(MIN_SPEED, MAX_SPEED, 1.0, 0.05, 2, "×")
+        self.sl_speed.setToolTip("Below 1× is slow motion, above 1× fast motion")
+        self.sl_speed.changed.connect(lambda v: self._set("speed", clamp_speed(v)))
+        f.addRow("Speed", self.sl_speed)
+        self.cb_ramp = QComboBox()
+        self.cb_ramp.addItem("None (constant speed)", "")
+        for key, (label, desc, _keys) in RAMPS.items():
+            self.cb_ramp.addItem(label, key)
+            self.cb_ramp.setItemData(self.cb_ramp.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_ramp.currentIndexChanged.connect(lambda _: self._set("ramp", self.cb_ramp.currentData() or ""))
+        f.addRow("Speed ramp", self.cb_ramp)
         f.addRow("Layer", self.sp_layer)
         v.addWidget(g)
 
@@ -210,7 +223,14 @@ class LayerPanel(QScrollArea):
             sp.blockSignals(True)
             sp.setValue(val)
             sp.blockSignals(False)
-        self.sp_len.setMaximum(max(0.25, (f.duration if f else clip.src_out) - clip.src_in))
+        self.sp_len.setMaximum(max(0.25, ((f.duration if f else clip.src_out) - clip.src_in) / self._ratio(clip)))
+        moving = not (f is not None and f.is_image)
+        self.sl_speed.set_value(clip.speed)
+        self.cb_ramp.blockSignals(True)
+        self.cb_ramp.setCurrentIndex(max(0, self.cb_ramp.findData(clip.ramp if clip.ramp in RAMPS else "")))
+        self.cb_ramp.blockSignals(False)
+        for w in (self.sl_speed, self.cb_ramp):
+            w.setEnabled(moving)
         sound = f is not None and f.has_audio and not f.is_image
         self.grp_sound.setEnabled(sound)
         self.grp_sound.setToolTip("" if sound else "This footage has no sound")
@@ -223,12 +243,21 @@ class LayerPanel(QScrollArea):
         setattr(c, key, val)
         if key == "track":
             self.lbl_title.setText(self.lbl_title.text().rsplit(" V", 1)[0] + f" V{c.track + 2}")
+        if key in ("speed", "ramp"):
+            self.sp_len.blockSignals(True)
+            self.sp_len.setValue(c.duration)
+            self.sp_len.blockSignals(False)
         self.changed.emit()
+
+    @staticmethod
+    def _ratio(c: OverlayClip) -> float:
+        """Source seconds per timeline second (the length on the timeline scales with the source used)."""
+        return c.src_dur / c.duration if c.duration > 1e-6 else c.speed
 
     def _set_length(self, val: float):
         c = self.clip
         if c is not None:
-            self._set("src_out", c.src_in + max(0.25, val), "length")
+            self._set("src_out", c.src_in + max(0.25, val) * self._ratio(c), "length")
 
     def _rotate_by(self, deg: float):
         if self.clip is not None:

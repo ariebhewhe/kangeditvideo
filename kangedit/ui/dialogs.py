@@ -431,6 +431,12 @@ class ExportDialog(QDialog):
                                 "Falls back to the CPU automatically if the card can't do it. ProRes always uses the CPU.\n"
                                 "GPU files are a little larger at the same quality setting.")
         self.chk_gpu.setChecked(use_gpu)
+        self.chk_blend = QCheckBox("Smooth slow motion (blend frames)")
+        self.chk_blend.setToolTip("Slowed-down clips blend neighbouring frames instead of showing each one twice or "
+                                  "more:\nsmoother movement, slightly softer. Off: crisp repeated frames.")
+        self.chk_blend.setChecked(True)
+        slow = [c for c in project.clips + project.overlays if c.ramp or c.speed < 1.0]
+        self.chk_blend.setVisible(bool(slow))
         self.lbl_size = QLabel("")
         self.lbl_size.setStyleSheet("color: #8b909a;")
         for cb in (self.cb_aspect, self.cb_res):
@@ -446,6 +452,7 @@ class ExportDialog(QDialog):
         form.addRow("Captions", self.cb_caps)
         form.addRow(self.chk_proxy)
         form.addRow(self.chk_gpu)
+        form.addRow(self.chk_blend)
         lay.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Export")
@@ -489,6 +496,7 @@ class ExportDialog(QDialog):
             captions=self.cb_caps.currentData() if self.cb_caps.isEnabled() else "none",
             use_proxies=self.chk_proxy.isChecked(),
             use_gpu=self.chk_gpu.isChecked(),
+            blend_slowmo=self.chk_blend.isChecked(),
         )
 
 

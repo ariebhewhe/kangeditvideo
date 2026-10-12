@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 
 from .color import Grade
+from .speed import timemap
 
 LOOP_CROSSFADE = 2.0   # seconds of crossfade between the repeats of a looping sound
 
@@ -96,11 +97,30 @@ class TimelineClip:
     box_y: float = 0.5
     box_w: float = 0.0
     box_h: float = 0.0
+    speed: float = 1.0             # 0.5 = half speed (slow motion), 2 = double (see speed.py)
+    ramp: str = ""                 # speed.RAMPS key: speed ramp template along the clip ("" = constant)
     id: str = field(default_factory=new_id)
 
     @property
-    def duration(self) -> float:
+    def src_dur(self) -> float:
+        """Length of the source range used."""
         return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def duration(self) -> float:
+        """Length on the timeline (the source range at the clip's speed)."""
+        return self.timemap().duration
+
+    def timemap(self):
+        return timemap(self.src_dur, self.speed, self.ramp)
+
+    def src_at(self, t: float) -> float:
+        """Source time shown `t` seconds into the clip on the timeline."""
+        return self.src_in + self.timemap().src(t)
+
+    def time_at(self, src: float) -> float:
+        """Seconds into the clip (timeline) where source time `src` shows."""
+        return self.timemap().time(src - self.src_in)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -142,11 +162,26 @@ class OverlayClip:
     angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
     link: str = ""                 # multicam: id of the main-track clip it follows
     linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
+    speed: float = 1.0             # see TimelineClip.speed
+    ramp: str = ""
     id: str = field(default_factory=new_id)
 
     @property
-    def duration(self) -> float:
+    def src_dur(self) -> float:
         return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def duration(self) -> float:
+        return self.timemap().duration
+
+    def timemap(self):
+        return timemap(self.src_dur, self.speed, self.ramp)
+
+    def src_at(self, t: float) -> float:
+        return self.src_in + self.timemap().src(t)
+
+    def time_at(self, src: float) -> float:
+        return self.timemap().time(src - self.src_in)
 
     @property
     def end(self) -> float:

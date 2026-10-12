@@ -12,6 +12,8 @@ from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import Project, TimelineClip
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import clamp as clamp_speed
 
 
 class ParamSlider(QWidget):
@@ -180,6 +182,36 @@ class Inspector(QScrollArea):
         f.addRow("Source in", self.sp_in)
         f.addRow("Source out", self.sp_out)
         f.addRow("Duration", self.lbl_dur)
+        lay.addWidget(g)
+
+        # --- Speed: slow / fast motion and ramps
+        g = QGroupBox("Speed")
+        f = QFormLayout(g)
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        for v in (0.25, 0.5, 1.0, 2.0, 4.0):
+            b = QPushButton(f"{v:g}×")
+            b.setToolTip("Normal speed" if v == 1 else (f"{v:g}× slow motion" if v < 1 else f"{v:g}× fast motion"))
+            b.setFixedWidth(46)
+            b.clicked.connect(lambda _=False, v=v: self.sp_speed.set_value(v, emit=True))
+            row.addWidget(b)
+        row.addStretch(1)
+        f.addRow(row)
+        self.sp_speed = ParamSlider(MIN_SPEED, MAX_SPEED, 1.0, 0.05, 2, "×")
+        self.sp_speed.setToolTip("Below 1× is slow motion, above 1× fast motion. The clip gets longer or shorter "
+                                 "on the timeline; its sound keeps its pitch.")
+        self.sp_speed.changed.connect(self._set_speed)
+        f.addRow("Speed", self.sp_speed)
+        self.cb_ramp = QComboBox()
+        self.cb_ramp.addItem("None (constant speed)", "")
+        for key, (label, desc, _keys) in RAMPS.items():
+            self.cb_ramp.addItem(label, key)
+            self.cb_ramp.setItemData(self.cb_ramp.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_ramp.setToolTip("Speed ramp template: the speed changes along the clip (multiplied by the speed "
+                                "above)")
+        self.cb_ramp.currentIndexChanged.connect(lambda _: self._set_ramp())
+        f.addRow("Ramp", self.cb_ramp)
+        self.grp_speed = g
         lay.addWidget(g)
 
         # --- Edit into this clip (from the previous one)
@@ -360,6 +392,11 @@ class Inspector(QScrollArea):
         self.sp_out.setMaximum(f.duration)
         self.sp_in.setValue(clip.src_in)
         self.sp_out.setValue(clip.src_out)
+        self.cb_ramp.blockSignals(True)
+        self.cb_ramp.setCurrentIndex(max(0, self.cb_ramp.findData(clip.ramp if clip.ramp in RAMPS else "")))
+        self.cb_ramp.blockSignals(False)
+        self.sp_speed.set_value(clip.speed)
+        self.grp_speed.setEnabled(not f.is_image)
         select_data(self.cb_log, f.log_profile, profile_label(f.log_profile))
         self.cb_tone.setCurrentIndex(max(0, self.cb_tone.findData(f.tonemap)))
         self.cb_tone.setEnabled(effective_profile(f.log_profile) in LOG_PROFILES)
@@ -390,6 +427,26 @@ class Inspector(QScrollArea):
         else:
             c.src_out = max(min(f.duration, v), c.src_in + 0.25)
         self.lbl_dur.setText(f"{c.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_speed(self, v: float):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:speed")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.speed = clamp_speed(v)
+        self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_ramp(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:ramp")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.ramp = self.cb_ramp.currentData() or ""
+        self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
         self.changed.emit("trim")
 
     def _set_edit(self, key: str):

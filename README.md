@@ -52,6 +52,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Multicam** | Two or more cameras (or a phone and a camera) on the same scene: turn on *Multicam* in ✨ Auto Edit and give each file its angle. The angles are synced by their sound (onset matching over the whole recording, then sample-accurate matching in windows across it, with clock drift corrected), the main angle is edited as usual and the others follow on the video layers, cut at the same moments. Layouts: picture in picture, main video + talking cam, stacked, side by side, 2 × 2 grid; boxes are cropped around each angle's face. The angles keep in sync as you trim, slip, split or swap moments; *Tools → Multicam layout* changes the layout later. |
 | **Images** | Import JPG, PNG, GIF, BMP, WebP and TIFF pictures along with your footage. On the main track an image is a 5-second clip (trim it to any length); an animated GIF loops; PNG transparency is kept on video layers. |
 | **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. |
+| **Slow & fast motion, speed ramps** | Right-click a clip → *Speed* (0.25× to 4×, or any speed from 0.1× to 8×), or the Inspector's **Speed** group. *Speed ramp* templates change the speed along the clip: *Hero moment*, *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse*, *Montage*. The sound keeps its pitch, captions and multicam angles follow, and the export can blend frames for smoother slow motion. |
 | **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
 | **Lane heights and zoom** | Drag the bottom edge of the video track, the video layers or the sound lane to make them taller (double-click the edge to reset), or use **↕ Lanes** (sliders and *Fit to panel*). **⇔ Fit** (Shift+Z) zooms so the whole edit, every lane included, fits the width; **− / +** (Ctrl+− / Ctrl+=) zoom out / in. |
 | **Used in the edit** | The Media list's **In edit** column and a green **✓** on the thumbnails show which footage the timeline uses, and how many times. |
@@ -234,7 +235,7 @@ an image, a second camera angle. Higher layers are in front of lower ones.
   clip resizes it.
 - The **🧩 Layer** tab (double-click the clip, or select it) has one-click positions (full frame, centre and the
   four picture-in-picture corners), X / Y, size, rotation (⟲ / ⟳ 90°), opacity, fade in / out, start, length,
-  layer and the clip's own volume.
+  speed and speed ramp, layer and the clip's own volume.
 - Clips cropped to fill a box (the multicam layouts) also get **Crop X / Y**, to choose which part of the picture
   fills it.
 
@@ -242,8 +243,8 @@ an image, a second camera angle. Higher layers are in front of lower ones.
 
 - On the timeline, drag a layer clip to move it in time, or up / down to another layer; drag its edges to trim.
   It snaps to the playhead, the cuts and other layer clips.
-- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, fades, layer
-  up / down and *Delete*.
+- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, *Speed*,
+  *Speed ramp*, fades, layer up / down and *Delete*.
 - A layer clip's sound is mixed in at its own volume (0 % mutes it). PNG transparency is kept.
 
 **Multicam: several cameras of the same moments**
@@ -424,6 +425,7 @@ kangedit/
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
   images.py             still images and animated GIFs as footage
+  speed.py              slow / fast motion and speed ramps (timeline ↔ source time map, FFmpeg setpts / atempo)
   sync.py               syncing recordings by their sound (onset envelope + GCC-PHAT, drift fit)
   multicam.py           multicam layouts and keeping the angles in step with the edit
   faces.py              face detection (YuNet model in assets/) for Zoom to face and best-moment scoring

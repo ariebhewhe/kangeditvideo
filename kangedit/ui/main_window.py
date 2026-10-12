@@ -38,6 +38,9 @@ from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
 from ..models import Footage, OverlayClip, Project, SoundClip, TextClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS
+from ..speed import clamp as clamp_speed
+from ..speed import label as speed_label
 from ..tasks import TaskQueue
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
@@ -2082,6 +2085,38 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self._schedule_audio()
 
+    def _ask_speed(self, cur: float) -> Optional[float]:
+        v, ok = QInputDialog.getDouble(self, "Clip speed",
+                                       f"Speed ({MIN_SPEED:g}× to {MAX_SPEED:g}×; below 1 is slow motion, "
+                                       "above 1 fast motion):", cur, MIN_SPEED, MAX_SPEED, 2)
+        return clamp_speed(v) if ok else None
+
+    def set_speed(self, targets: list, action: str):
+        """Slow / fast motion and speed ramps on main-track clips: 'speed:<x>', 'ramp:<key>' or 'speed_custom'
+        (asks). The timeline closes up around the new lengths; linked camera angles follow."""
+        if not targets:
+            return
+        if action == "speed_custom":
+            v = self._ask_speed(targets[0].speed)
+            if v is None:
+                return
+            action = f"speed:{v}"
+        key, val = action.split(":", 1)
+        self.project_checkpoint()
+        for x in targets:
+            f = self.project.footage.get(x.footage_id)
+            if f is not None and f.is_image:
+                continue                       # a still has no motion to slow down
+            if key == "speed":
+                x.speed = clamp_speed(float(val))
+            else:
+                x.ramp = val if val in RAMPS else ""
+        self._after_structure_change()
+        c = targets[0]
+        what = speed_label(c.speed, c.ramp) or "normal speed"
+        self.lbl_status.setText(f"Speed: {what} — {len(targets)} clip(s); "
+                                f"{'the ramp' if c.ramp else 'the clip'} now runs {c.duration:.1f} s.")
+
     def split_at_playhead(self):
         idx, off = self.project.clip_at(self.viewer.t)
         if idx is None:
@@ -2090,13 +2125,15 @@ class MainWindow(QMainWindow):
         if off < 0.1 or off > c.duration - 0.1:
             return
         self.project_checkpoint()
-        cut = c.src_in + off
+        cut = c.src_at(off)
         new = TimelineClip.from_dict(c.to_dict())
         new.id = new_id()
         new.src_in = cut
         c.src_out = cut
         self.project.clips.insert(idx + 1, new)
         self._after_structure_change()
+        if c.ramp:
+            self.lbl_status.setText("Split a speed-ramped clip: each part now plays the whole ramp.")
 
     def clip_action(self, action: str, clip_id: str):
         if action == "select_all":
@@ -2158,6 +2195,8 @@ class MainWindow(QMainWindow):
             self._replace_moments(targets)
         elif action == "face_zoom":
             self._face_zoom(targets)
+        elif action.startswith(("speed:", "ramp:")) or action == "speed_custom":
+            self.set_speed(targets, action)
         elif action.startswith("rotate:"):
             self.project_checkpoint()
             for x in targets:
@@ -2469,8 +2508,8 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Put the playhead inside the layer clip to split it.")
                 return
             d = OverlayClip.from_dict(c.to_dict())
-            d.id, d.start, d.src_in = new_id(), c.start + cut, c.src_in + cut
-            c.src_out = c.src_in + cut
+            d.id, d.start, d.src_in = new_id(), c.start + cut, c.src_at(cut)
+            c.src_out = d.src_in
             c.fade_out, d.fade_in = 0.0, 0.0
             self.project.overlays.append(d)
         elif action.startswith("ov_place:"):
@@ -2482,6 +2521,15 @@ class MainWindow(QMainWindow):
             c.fade_in = max(0.0, float(action.split(":", 1)[1]))
         elif action.startswith("ov_fade_out:"):
             c.fade_out = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("ov_speed:"):
+            c.speed = clamp_speed(float(action.split(":", 1)[1]))
+        elif action.startswith("ov_ramp:"):
+            c.ramp = action.split(":", 1)[1]
+        elif action == "ov_speed_custom":
+            v = self._ask_speed(c.speed)
+            if v is None:
+                return
+            c.speed = v
         elif action.startswith("ov_layer:"):
             c.track = max(0, min(MAX_LAYERS - 1, c.track + (1 if action.endswith("up") else -1)))
             self.project.settings.overlay_tracks = max(self.project.settings.overlay_tracks, c.track + 1)
@@ -2873,7 +2921,7 @@ class MainWindow(QMainWindow):
                     dec = pool.get(f, use_proxies, 720)
                     quarters = reframe.split_rotation(c.rotation)[0]
                     frames = [reframe.rotate_quarters(img.copy(), quarters) for i in range(FACE_SAMPLES)
-                              if (img := dec.frame_at(c.src_in + c.duration * (i + 0.5) / FACE_SAMPLES))
+                              if (img := dec.frame_at(c.src_in + c.src_dur * (i + 0.5) / FACE_SAMPLES))
                               is not None]
                     face = reframe.find_face(frames)
                     if face is not None:
@@ -2925,7 +2973,7 @@ class MainWindow(QMainWindow):
                     dec = pool.get(footage[c.footage_id], use_proxies, 360)
                     frames = []
                     for i in range(5):
-                        img = dec.frame_at(c.src_in + c.duration * (i + 0.5) / 5)
+                        img = dec.frame_at(c.src_in + c.src_dur * (i + 0.5) / 5)
                         if img is not None:
                             frames.append(img.copy())
                     grades[c.id] = auto_correct(frames, lp, tm, base=base)
@@ -3230,13 +3278,15 @@ class MainWindow(QMainWindow):
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
+            "Speed: right-click a clip → Speed (slow / fast motion, 0.1× to 8×) or Speed ramp (Hero moment,\n"
+            "Bullet time, Slow → fast…), or the Inspector's Speed group · the sound keeps its pitch\n"
             "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline,\n"
             "auto ducking\n"
             "Video layers (V2, V3… above the main track): drag footage or images from Media onto a layer\n"
             "(or right-click footage → Add on a video layer) · drag the clip in the viewer to place it,\n"
             "mouse wheel over it to resize · on the timeline drag it to move (up / down: another layer),\n"
             "its edges to trim · double-click it (or the 🧩 Layer tab) for size, crop, rotation, opacity,\n"
-            "fades, volume · higher layers are in front · right-click an empty layer to add a layer\n"
+            "fades, speed, volume · higher layers are in front · right-click an empty layer to add a layer\n"
             "Multicam: ✨ Auto Edit → Multicam syncs camera angles by sound; Tools → Multicam layout\n"
             "changes their layout later · camera angles are linked to their main clip: dragging an angle\n"
             "slips the group, its edges trim it, R gives it another moment · Ctrl+L (🔗 Link) unlinks /\n"

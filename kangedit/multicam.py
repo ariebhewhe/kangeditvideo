@@ -15,6 +15,7 @@ from typing import Optional
 from . import reframe
 from .config import frame_size
 from .models import Footage, OverlayClip, Project, TimelineClip
+from .speed import clamp
 from .sync import SyncResult
 
 TEMPLATES = {
@@ -188,8 +189,18 @@ def build(project: Project, clips: list[TimelineClip], angles: dict[str, int],
             if best is None:
                 continue
             fid, (a_start, b_in, b_out) = best
-            oc = OverlayClip(fid, round(t0 + (a_start - c.src_in), 4), round(b_in, 4), round(b_out, 4),
-                             k - 2, angle=k, volume=1.0 if sound_angle == k else 0.0, link=c.id)
+            # The angle plays at the main clip's speed. A ramp needs the same source range to line up all the
+            # way through; an angle covering only part of the clip gets the ramp's average speed over that part
+            # instead (in step at both ends).
+            speed, ramp = c.speed, c.ramp
+            t_in = c.time_at(a_start)
+            if ramp:
+                a_end = a_start + (b_out - b_in)
+                if abs(a_start - c.src_in) > 0.02 or abs(a_end - c.src_out) > 0.02:
+                    speed, ramp = clamp((b_out - b_in) / max(1e-3, c.time_at(a_end) - t_in)), ""
+            oc = OverlayClip(fid, round(t0 + t_in, 4), round(b_in, 4), round(b_out, 4),
+                             k - 2, angle=k, volume=1.0 if sound_angle == k else 0.0, link=c.id,
+                             speed=speed, ramp=ramp)
             place(oc, project.footage[fid], lay[k - 1], template, tw, th)
             out.append(oc)
     return out
