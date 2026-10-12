@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
 ### Added
 - *Help → Copy system info*: app version, OS, CPU, memory, library versions, FFmpeg, GPU decode / encode
   support, screens and folders, ready to paste into a bug report.
