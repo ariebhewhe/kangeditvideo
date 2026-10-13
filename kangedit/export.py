@@ -26,6 +26,7 @@ CODECS = {
     "h265": ("H.265 / HEVC (MP4) - smaller files", ".mp4"),
     "prores": ("Apple ProRes 422 HQ (MOV) - for further editing", ".mov"),
 }
+GPU_STALL = 180.0   # seconds without progress before a GPU export is redone on the CPU
 QUALITIES = {"High": 18, "Medium": 21, "Small file": 26}
 CAPTION_MODES = {
     "none": "No captions",
@@ -461,11 +462,13 @@ def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] =
     try:
         if encoder:
             try:
+                # A GPU encoder that hangs (some driver versions never start) is given up after GPU_STALL s.
                 run_ffmpeg(build_export(project, s, workdir, encoder), project.duration, progress, cancel,
-                           cwd=workdir, label=f"Exporting {name} (GPU: {hw_encoder_label(encoder)})")
+                           cwd=workdir, label=f"Exporting {name} (GPU: {hw_encoder_label(encoder)})",
+                           stall=GPU_STALL)
                 return s.output
             except FFmpegError:
-                pass   # driver hiccup, out of video memory, unsupported source...: redo it on the CPU
+                pass   # driver hiccup, out of video memory, a hang, unsupported source...: redo it on the CPU
         run_ffmpeg(build_export(project, s, workdir), project.duration, progress, cancel, cwd=workdir,
                    label=f"Exporting {name}" + (" (CPU)" if s.use_gpu else ""))
     finally:

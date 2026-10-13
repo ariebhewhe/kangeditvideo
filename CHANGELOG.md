@@ -43,6 +43,11 @@ and the Release workflow uses that section as the GitHub release notes.
   source, and hardware).
 
 ### Fixed
+- Generating proxies could stay at 0 % forever: on some machines (seen with Intel Quick Sync on Windows) the
+  GPU decode + encode never starts, and the stuck FFmpeg also blocked every task queued after it. A GPU attempt
+  that makes no progress for 60 s is now stopped and the proxy is made the next way (CPU decoding, then fully on
+  the CPU); a way that hung is skipped for the rest of the session. A GPU export that hangs is redone on the
+  CPU the same way (after 3 minutes), and *Cancel* now stops an FFmpeg that has gone silent.
 - Transitions in multicam edits: the camera angles on the layers cut hard while only the main angle
   dissolved, so a transition hardly showed (in the boxed layouts most of the frame jumped). The angles now take
   part: a dissolve-like transition cross-fades them too, a dip fades them out and in.
