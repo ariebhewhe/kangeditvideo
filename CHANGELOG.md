@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
 ### Added
 - Slow and fast motion: any clip (main track or video layer) plays from 0.1× to 8×. Right-click → *Speed* for
   0.25×, 0.5×, 0.75×, 1.5×, 2×, 3×, 4× or a custom speed, or use the Inspector's new **Speed** group (one-click
