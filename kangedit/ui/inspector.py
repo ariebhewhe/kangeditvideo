@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayo
 from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
-from ..models import Project, TimelineClip
+from ..models import OverlayClip, Project, TimelineClip
 from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
 from ..speed import clamp as clamp_speed
 
@@ -168,6 +168,11 @@ class Inspector(QScrollArea):
         self.lbl_title.setStyleSheet("font-weight: 600; font-size: 13px;")
         self.lbl_title.setWordWrap(True)
         lay.addWidget(self.lbl_title)
+        # A clip on a video layer: its position, size and opacity are in the Layer tab.
+        self.b_layer = QPushButton("🧩 Position, size && opacity on the layer…")
+        self.b_layer.clicked.connect(lambda: self.request.emit("layer_tab"))
+        self.b_layer.hide()
+        lay.addWidget(self.b_layer)
 
         # --- Clip timing
         g = QGroupBox("Clip")
@@ -287,10 +292,13 @@ class Inspector(QScrollArea):
         b_auto.setToolTip("Analyze this clip and set exposure, white balance and contrast automatically")
         b_auto.clicked.connect(lambda: self.request.emit("auto_color"))
         b_auto_all = QPushButton("✨ Auto all clips")
+        b_auto_all.setToolTip("Auto color every clip: the main track and the video on every layer")
         b_auto_all.clicked.connect(lambda: self.request.emit("auto_color_all"))
         b_reset = QPushButton("Reset")
         b_reset.clicked.connect(lambda: self.request.emit("reset_color"))
         b_copy = QPushButton("Copy to all clips")
+        b_copy.setToolTip("Give every clip this clip's grade: the main track and the video on every layer "
+                          "(pictures on the layers, such as logos, are left as they are)")
         b_copy.clicked.connect(lambda: self.request.emit("copy_grade_all"))
         btns.addWidget(b_auto, 0, 0)
         btns.addWidget(b_auto_all, 0, 1)
@@ -350,6 +358,7 @@ class Inspector(QScrollArea):
             b.clicked.connect(lambda _=False, k=step: self._rotate_by(k))
             rot_row.addWidget(b)
         f.addRow("Rotation", rot_row)
+        self.grp_reframe = g
         lay.addWidget(g)
 
         # --- Audio
@@ -377,25 +386,32 @@ class Inspector(QScrollArea):
         """The clips an edit applies to: the shown clip and the rest of the selection."""
         return ([self.clip] if self.clip is not None else []) + self.others
 
-    def set_clip(self, clip: Optional[TimelineClip]):
+    def set_clip(self, clip):
+        """Show a clip: one on the main track (TimelineClip), or on a video layer (OverlayClip)."""
         self.clip = clip
-        sel = set(self.selection()) if clip is not None else set()
+        layer = isinstance(clip, OverlayClip)
+        sel = set(self.selection()) if clip is not None and not layer else set()
         self.others = [c for c in self.project.clips if c.id in sel and c is not clip] if clip and clip.id in sel else []
         self.widget().setEnabled(clip is not None)
+        self.b_layer.setVisible(layer)
+        self.grp_edit.setVisible(not layer)          # transitions and J / L cuts: between main-track clips
+        self.grp_reframe.setVisible(not layer)       # a layer clip is placed and sized in the Layer tab
         if clip is None:
-            self.lbl_title.setText("Select a clip on the timeline")
+            self.lbl_title.setText("Select a clip on the timeline (main track or a video layer)")
             return
         f = self.project.footage[clip.footage_id]
-        score = f"  ·  score {clip.score * 100:.0f}" if clip.score is not None else ""
+        score = f"  ·  score {clip.score * 100:.0f}" if getattr(clip, "score", None) is not None else ""
         many = f"\n{len(self.others) + 1} clips selected: changes apply to all of them" if self.others else ""
-        self.lbl_title.setText(f"{f.name}{score}{many}")
+        where = f"  ·  layer V{clip.track + 2}" if layer else ""
+        self.lbl_title.setText(f"{f.name}{where}{score}{many}")
         for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
                   self.sp_split):
             w.blockSignals(True)
-        self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
-        self.sp_tdur.setValue(clip.transition_dur)
-        self.sp_split.setValue(clip.audio_split)
-        self.grp_edit.setEnabled(any(self.project.index_of(c.id) > 0 for c in self.targets))
+        if not layer:
+            self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
+            self.sp_tdur.setValue(clip.transition_dur)
+            self.sp_split.setValue(clip.audio_split)
+            self.grp_edit.setEnabled(any(self.project.index_of(c.id) > 0 for c in self.targets))
         self.sp_in.setMaximum(f.duration)
         self.sp_out.setMaximum(f.duration)
         self.sp_in.setValue(clip.src_in)
@@ -421,10 +437,11 @@ class Inspector(QScrollArea):
         self.lbl_dur.setText(f"{clip.duration:.2f} s")
         for key, ps in self.params.items():
             ps.set_value(getattr(clip.grade, key))
-        self.rf_zoom.set_value(clip.zoom)
-        self.rf_x.set_value(clip.offset_x)
-        self.rf_y.set_value(clip.offset_y)
-        self.rf_rot.set_value(clip.rotation)
+        if not layer:
+            self.rf_zoom.set_value(clip.zoom)
+            self.rf_x.set_value(clip.offset_x)
+            self.rf_y.set_value(clip.offset_y)
+            self.rf_rot.set_value(clip.rotation)
         self.vol.set_value(clip.volume * 100.0)
 
     def _set_trim(self, which: str, v: float):

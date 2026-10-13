@@ -791,6 +791,11 @@ class TimelineView(QWidget):
             self._menu_action(sub, label, f"ov_rotate:{key}", oid)
         if not (self.project.footage.get(c.footage_id) and self.project.footage[c.footage_id].is_image):
             self._speed_menu(m, "ov_", oid, c.speed, c.ramp, audio=c.audio_mode)
+        sub = m.addMenu("Color")
+        self._menu_action(sub, "Color, log && LUT…", "ov_color", oid)
+        self._menu_action(sub, "Auto color", "ov_auto_color", oid)
+        self._menu_action(sub, "Reset color", "ov_reset_color", oid)
+        self._menu_action(sub, "Copy this grade to all clips (every layer)", "ov_copy_grade", oid)
         for key, label, cur in (("ov_fade_in", "Fade in", c.fade_in), ("ov_fade_out", "Fade out", c.fade_out)):
             sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
             for v in (0.0, 0.25, 0.5, 1.0, 2.0):

@@ -52,7 +52,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
 | **Multicam** | Two or more cameras (or a phone and a camera) on the same scene: turn on *Multicam* in ✨ Auto Edit and give each file its angle. The angles are synced by their sound (onset matching over the whole recording, then sample-accurate matching in windows across it, with clock drift corrected), the main angle is edited as usual and the others follow on the video layers, cut at the same moments. Layouts: picture in picture, main video + talking cam, stacked, side by side, 2 × 2 grid; boxes are cropped around each angle's face. The angles keep in sync as you trim, slip, split or swap moments; *Tools → Multicam layout* changes the layout later. |
 | **Images** | Import JPG, PNG, GIF, BMP, WebP and TIFF pictures along with your footage. On the main track an image is a 5-second clip (trim it to any length); an animated GIF loops; PNG transparency is kept on video layers. |
-| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. |
+| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. A layer clip is refined like a main-track clip: with it selected, the **🎨 Color** tab sets its log conversion, exposure and color, ✨ Auto, look LUT, source in / out, speed and volume. |
 | **Slow & fast motion, speed ramps** | Right-click a clip → *Speed* (0.25× to 4×, or any speed from 0.1× to 8×), or the Inspector's **Speed** group. *Speed ramp* templates change the speed along the clip: *Hero moment*, *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse*, *Montage*. *Sound at this speed* keeps the sound in sync (pitch kept, or pitch following the speed like a tape), plays it at normal speed, or mutes it. Captions and multicam angles follow, and the export can blend frames for smoother slow motion. |
 | **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
 | **Lane heights and zoom** | Drag the bottom edge of the video track, the video layers or the sound lane to make them taller (double-click the edge to reset), or use **↕ Lanes** (sliders and *Fit to panel*). **⇔ Fit** (Shift+Z) zooms so the whole edit, every lane included, fits the width; **− / +** (Ctrl+− / Ctrl+=) zoom out / in. |
@@ -268,6 +268,15 @@ an image, a second camera angle. Higher layers are in front of lower ones.
   speed and speed ramp, layer and the clip's own volume.
 - Clips cropped to fill a box (the multicam layouts) also get **Crop X / Y**, to choose which part of the picture
   fills it.
+
+**Refine it**
+
+- With a layer clip selected, the **🎨 Color** (Clip) tab works on it as on a main-track clip: log conversion and
+  camera detection, exposure and color, ✨ Auto, look LUT, source in / out, speed and volume. The 🧩 Layer tab's
+  *Color, log, LUT, trim & speed* button gets you there; right-click the clip → *Color* for auto color, reset and
+  *Copy this grade to all clips*.
+- *✨ Auto all clips* and *Copy to all clips* cover the main track and the video on every layer (pictures on the
+  layers, such as logos, keep their own look).
 
 **Time it**
 

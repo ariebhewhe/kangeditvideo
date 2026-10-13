@@ -24,6 +24,12 @@ and the Release workflow uses that section as the GitHub release notes.
 - Speed works with everything else: transitions and J / L cuts use the footage around the clip at its speed,
   captions follow the new timing, the timeline's filmstrip and waveform show the clip as it plays (and its speed in
   the clip header), trims and slips move at the clip's speed, and multicam angles play at their main clip's speed.
+- Refine clips on every video layer, not only the main track: select a clip on V2, V3… and the **🎨 Color** /
+  Clip tab refines it like a main-track clip: log conversion and camera detection, exposure and color, ✨ Auto,
+  look LUT, source in / out, speed and volume (its position, size and opacity stay in the 🧩 Layer tab, which
+  has a button to the color tools). Right-click a layer clip → *Color* for color, auto color, reset and copying
+  its grade. *Auto all clips* and *Copy to all clips* now cover the video on every layer too (pictures on the
+  layers, such as logos, are left as they are).
 - README: *System requirements* (minimum Windows, macOS and Linux versions for the ready-made builds and from
   source, and hardware).
 

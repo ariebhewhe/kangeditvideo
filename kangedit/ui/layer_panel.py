@@ -82,6 +82,11 @@ class LayerPanel(QScrollArea):
         self.body = QWidget()
         v = QVBoxLayout(self.body)
         v.setContentsMargins(0, 0, 0, 0)
+        self.b_color = QPushButton("🎨 Color, log, LUT, trim && speed…")
+        self.b_color.setToolTip("Refine this layer clip like a main-track clip in the Clip tab: log conversion, "
+                                "exposure and color, auto color, look LUT, source in / out, speed and volume")
+        self.b_color.clicked.connect(lambda: self._emit("ov_color"))
+        v.addWidget(self.b_color)
 
         g = QGroupBox("Position && size")
         f = QFormLayout(g)
