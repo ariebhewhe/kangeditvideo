@@ -395,12 +395,16 @@ class PreviewEngine:
     def _overlays(self, t: float, look: Look, interrupt) -> list:
         """Decode the overlay layers showing at timeline time t: [(decoder, frame, OverlayShot)]."""
         out = []
+        seen: dict[int, int] = {}
         for ov in look.overlays:
             c = ov.clip
+            # Clips on a layer alternate between two decoders, so two overlapping in a transition (or a
+            # multicam cross-fade) each keep reading forward instead of seeking back and forth.
+            n = seen[c.track] = seen.get(c.track, -1) + 1
             if not (c.start <= t < c.end) or c.alpha_at(t) <= 0:
                 continue
             try:
-                dec = self.decoders.get(ov.footage, look.use_proxies, look.decode_h, 10 + c.track)
+                dec = self.decoders.get(ov.footage, look.use_proxies, look.decode_h, 10 + 2 * c.track + n % 2)
                 frame, _ = dec.raw_at(c.src_at(t - c.start), interrupt)
             except Exception:  # noqa: BLE001 - a missing overlay file doesn't stop the picture below
                 continue

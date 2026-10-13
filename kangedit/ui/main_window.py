@@ -1290,6 +1290,11 @@ class MainWindow(QMainWindow):
                     blockers = multicam.coverage_blockers(mc_footage, mc_angles, syncs)
             progress(0.3, "Analyzing footage…")
             analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
+            if multi and multi.get("template") == "switch":       # switching scores every angle's picture
+                progress(0.45, "Analyzing the camera angles…")
+                for fid, f in mc_footage.items():
+                    if fid not in analyses:
+                        analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
             order = story_order(footage, ids)
             intro = outro = None
             notes: list[str] = []
@@ -1402,13 +1407,16 @@ class MainWindow(QMainWindow):
                 self.project.footage[fid].face = face
         if replace:
             self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
-        new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"))
+        plan = (multicam.switch_plan(self.project, self.analyses, angles, syncs)
+                if multi["template"] == "switch" else (self.project.settings.multicam or {}).get("switch"))
+        new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"),
+                             switch=plan)
         self.project.overlays += new
         top = max((c.track for c in self.project.overlays), default=0)
         self.project.settings.overlay_tracks = max(1, top + 1)
         self.project.settings.multicam = {
             "angles": dict(angles), "template": multi["template"], "audio": multi.get("audio", "main"),
-            "covered": multi.get("covered", True),
+            "covered": multi.get("covered", True), "switch": plan or {},
             "syncs": {fid: [ref, r.offset, r.drift, r.confidence, r.overlap] for fid, (ref, r) in syncs.items()},
             "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
         notes = []
@@ -1435,10 +1443,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "There are no synced angles on the timeline yet: turn on "
                                                     "Multicam in ✨ Auto Edit.")
             return
+        if template == "switch":
+            self._multicam_switch()
+            return
         self.project_checkpoint()
         n = multicam.relayout(self.project, template)
         self._overlays_changed()
         self.lbl_status.setText(f"Multicam layout: {multicam.TEMPLATES[template]} ({n} camera-angle clips)")
+
+    def _multicam_switch(self):
+        """Switch to the switching layout: analyse the angles (in the background), plan the cuts, rebuild."""
+        mc = self.project.settings.multicam or {}
+        footage = {fid: self.project.footage[fid] for fid in (mc.get("angles") or {}) if fid in self.project.footage}
+        have = {fid: self.analyses[fid] for fid in footage if fid in self.analyses}
+        use_gpu = self.a_gpu_analysis.isChecked()
+
+        def job(progress, cancel):
+            out = dict(have)
+            todo = [fid for fid in footage if fid not in out]
+            for k, fid in enumerate(todo):
+                progress(k / max(1, len(todo)), f"Analyzing the camera angles: {k + 1}/{len(todo)}")
+                out[fid] = load_or_analyze(footage[fid], cancel=cancel, use_gpu=use_gpu)
+            return out
+
+        def done(analyses: dict):
+            self.analyses.update(analyses)
+            self.project_checkpoint()
+            st = self.project.settings
+            st.multicam = {**st.multicam, "switch": multicam.switch_plan(self.project, self.analyses)}
+            n = multicam.relayout(self.project, "switch")
+            self._overlays_changed()
+            cuts = sum(max(0, len(v) - 1) for v in st.multicam["switch"].values())
+            self.lbl_status.setText(f"Multicam layout: switching ({n} camera-angle shots; the recording has "
+                                    f"{cuts} angle changes to choose from)")
+
+        self.tasks.submit("Multicam switching", job, done, self._task_error("Multicam switching"))
 
     def new_hook(self):
         """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
@@ -3336,7 +3375,7 @@ class MainWindow(QMainWindow):
             "Multicam: ✨ Auto Edit → Multicam syncs camera angles by sound; Tools → Multicam layout\n"
             "changes their layout later · camera angles are linked to their main clip: dragging an angle\n"
             "slips the group, its edges trim it, R gives it another moment · Ctrl+L (🔗 Link) unlinks /\n"
-            "links them\n"
+            "links them · layouts include Switching (one angle at a time, cut to the best angle)\n"
             "Lanes: drag a lane's bottom edge to make it taller · Shift+wheel scrolls the lanes up / down"))
 
     def closeEvent(self, e):

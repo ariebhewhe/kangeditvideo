@@ -30,10 +30,24 @@ and the Release workflow uses that section as the GitHub release notes.
   has a button to the color tools). Right-click a layer clip → *Color* for color, auto color, reset and copying
   its grade. *Auto all clips* and *Copy to all clips* now cover the video on every layer too (pictures on the
   layers, such as logos, are left as they are).
+- Multicam **Switching** layout (✨ Auto Edit → Multicam → Layout, or *Tools → Multicam layout*): one camera fills
+  the frame at a time and the edit cuts between the angles at the best moments, like a live multicam edit,
+  instead of showing every angle together. Each angle is scored along the recording (who is speaking, judged
+  by which camera's microphone is loudest, the closer face, the subject's activity, sharpness, shake) and the
+  cuts are chosen with a minimum shot length of 2 s, no cutting on noise, and a short cutaway when one angle
+  is held too long. The shots follow trims, slips and splits like the other layouts; the sound stays on the
+  main angle.
 - README: *System requirements* (minimum Windows, macOS and Linux versions for the ready-made builds and from
   source, and hardware).
 
 ### Fixed
+- Transitions in multicam edits: the camera angles on the layers cut hard while only the main angle
+  dissolved, so a transition hardly showed (in the boxed layouts most of the frame jumped). The angles now take
+  part: a dissolve-like transition cross-fades them too, a dip fades them out and in.
+- Undo after changing the multicam layout left the new layout's settings behind, so the next edit rebuilt the
+  angles in the undone layout. The multicam settings are now part of undo.
+- The preview gives overlapping clips on one video layer their own decoders, so a cross-fade between two
+  clips of the same camera plays without seeking back and forth.
 - The macOS build now declares macOS 14 as its minimum (it said 12, but the Qt, onnxruntime and NumPy it bundles
   need macOS 14), so older Macs get a clear message instead of a crash.
 

@@ -174,6 +174,9 @@ class OverlayClip:
     speed: float = 1.0             # see TimelineClip.speed
     ramp: str = ""
     audio_mode: str = "sync"
+    mix_in: float = 0.0            # multicam: fades for the main track's transitions (set by multicam, kept apart
+    mix_out: float = 0.0           # from the user's fade_in / fade_out)
+    piece: int = 0                 # multicam switching: which shot of its main clip
     id: str = field(default_factory=new_id)
 
     @property
@@ -201,7 +204,8 @@ class OverlayClip:
         return self.start + self.duration
 
     def fades(self) -> tuple[float, float]:
-        d, fi, fo = self.duration, max(0.0, self.fade_in), max(0.0, self.fade_out)
+        d = self.duration
+        fi, fo = max(0.0, self.fade_in, self.mix_in), max(0.0, self.fade_out, self.mix_out)
         if fi + fo > d:
             k = d / (fi + fo)
             fi, fo = fi * k, fo * k
@@ -465,6 +469,7 @@ class Project:
             "texts": [x.to_dict() for x in self.texts],
             "overlays": [x.to_dict() for x in self.overlays],
             "overlay_tracks": self.settings.overlay_tracks,
+            "multicam": copy.deepcopy(self.settings.multicam),   # its layout follows the angles' clips
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
@@ -476,6 +481,8 @@ class Project:
         self.texts = [TextClip.from_dict(d) for d in snap.get("texts", [])]
         self.overlays = [OverlayClip.from_dict(d) for d in snap.get("overlays", []) if d.get("footage_id") in self.footage]
         self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
+        if "multicam" in snap:
+            self.settings.multicam = copy.deepcopy(snap["multicam"])
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
