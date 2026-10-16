@@ -1568,13 +1568,14 @@ class MainWindow(QMainWindow):
             for fid, f in broll.items():
                 if fid not in analyses:
                     analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
-            groups = scenes.time_groups(everything, story_order(everything, list(ids) + list(broll)))
+            # The scenes come from the edited footage alone; B-roll joins the scene it was recorded in.
+            groups = scenes.join_scenes(scenes.time_groups(footage, order), footage, broll)
+            n_scenes = len({groups[f] for f in footage if f in groups})
             openers = (s.video_format == "long" or s.order == "chronological") and s.order != "best_first"
             opener_len = round((s.clip_min + s.clip_max) / 2, 2)
-            if openers and len(set(groups.values())) > 1:
+            if openers and n_scenes > 1:
                 sel = copy.copy(sel)
-                sel.target_duration = max(s.clip_min, sel.target_duration
-                                          - opener_len * (len(set(groups.values())) - 1))
+                sel.target_duration = max(s.clip_min, sel.target_duration - opener_len * (n_scenes - 1))
             progress(0.8, "Choosing the best moments…")
             used = existing + blockers + [c for c in (intro, outro) if c]
             body = select(footage, analyses, sel, order, existing=used, avoid=avoid, seed=seed)
@@ -1582,7 +1583,7 @@ class MainWindow(QMainWindow):
             body = body[len(hooks):]
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
-            if openers and len(set(groups.values())) > 1:
+            if openers and n_scenes > 1:
                 prefer = set(broll) | {f for f in footage if footage[f].bin == binlib.BROLL}
                 n = scenes.add_scene_openers(clips, groups, analyses, everything, opener_len, s.min_gap, used,
                                              prefer=prefer)
