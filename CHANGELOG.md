@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 ### Added
 - Long-form auto edit: **scenes** are time groups of the footage (a gap of over 30 minutes between recordings,
   such as another day or place, starts a new one). Each scene after the first opens with a scenic / travel shot
