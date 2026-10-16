@@ -19,11 +19,13 @@ from .models import Footage
 
 GOP = 12          # short GOP: any frame decodes quickly when scrubbing
 QUALITY = 22      # x264 CRF scale
-STALL = 60.0      # seconds without progress before a (GPU) attempt is given up for the next one
+STALL = 30.0      # seconds without progress before a GPU attempt is given up for the next way
+CPU_STALL = 300.0  # ... and before the CPU attempt is (an error is shown instead of 0 % forever)
 
 log = logging.getLogger(__name__)
-# GPU decode / encode pairs that hung on this machine: later proxies skip them (for this session).
+# GPU decode / encode pairs that hung, for this session: per file, and for every file once one hung on two.
 _stalled: set[tuple] = set()
+_stalled_on: dict[tuple, set[str]] = {}
 
 
 def proxy_path_for(footage: Footage, height: int) -> str:
@@ -62,7 +64,8 @@ def generate_proxy(footage: Footage, height: int = 540, progress: Optional[Progr
         return out
     hw, enc = (hw_decoder(), hw_encoder("h264")) if use_gpu else (None, None)
     attempts = list(dict.fromkeys([(hw, enc), (None, enc), (None, None)]))   # best first, no repeats
-    attempts = [a for a in attempts if a not in _stalled] or [(None, None)]
+    attempts = [a for a in attempts if a not in _stalled and footage.path not in _stalled_on.get(a, ())]
+    attempts = attempts or [(None, None)]
     tmp = out + ".part.mp4"
     try:
         for k, (dec, encoder) in enumerate(attempts):
@@ -75,11 +78,14 @@ def generate_proxy(footage: Footage, height: int = 540, progress: Optional[Progr
                 # A GPU attempt that hangs (some driver / encoder combinations never start) is stopped after
                 # STALL seconds and the next way is tried; the CPU is only ever slow, never stopped.
                 run_ffmpeg(proxy_args(footage, height, tmp, dec, encoder), footage.duration, progress, cancel,
-                           label=label, stall=STALL if (dec or encoder) else None)
+                           label=label, stall=STALL if (dec or encoder) else CPU_STALL)
                 break
             except FFmpegError as e:
-                if "stopped making progress" in str(e):
-                    _stalled.add((dec, encoder))
+                if "stopped making progress" in str(e) and (dec or encoder):
+                    files = _stalled_on.setdefault((dec, encoder), set())
+                    files.add(footage.path)
+                    if len(files) >= 2:          # not just this file: skip it for every file
+                        _stalled.add((dec, encoder))
                 log.warning("Proxy attempt %s failed for %s: %s", gpu or "CPU", footage.name, str(e)[-300:])
                 if k == len(attempts) - 1:
                     raise

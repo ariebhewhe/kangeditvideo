@@ -15,9 +15,10 @@ from typing import Optional
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
-                               QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSizePolicy, QSplitter, QTabWidget, QToolButton, QWidget)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QTabWidget, QTextEdit, QToolButton, QWidget)
 
 from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
@@ -25,7 +26,7 @@ from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyz
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
 from .. import images, multicam, music, reframe, sfx, updater
-from ..sync import SyncResult, sync_files
+from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -241,7 +242,7 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Redo", self.redo, "Ctrl+Shift+Z"))
         m.addSeparator()
         m.addAction(self._act("Split at playhead", self.split_at_playhead, "S"))
-        m.addAction(self._act("Select all clips", self.tl.select_all, "Ctrl+A"))
+        m.addAction(self._act("Select all", self._select_all, "Ctrl+A"))
         m.addAction(self._act("Delete selected clips / sound", self._delete_selected, "Del"))
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
         m.addAction(self._act("Link / unlink camera angles", lambda: self.toggle_link(), "Ctrl+L",
@@ -568,7 +569,10 @@ class MainWindow(QMainWindow):
         self.bin.action.connect(self.bin_action)
         self.bin.log_profile.connect(self.set_log_profile)
 
+        self.bin.edit_started.connect(self.project_checkpoint)
+        self.bin.edited.connect(self._bins_edited)
         self.inspector.selection = self.tl.selected_ids
+        self.inspector.layer_selection = self.tl.selected_overlay_ids
         self.text_panel.playhead = lambda: self.viewer.t
         self.inspector.before_change.connect(self._inspector_before)
         self.inspector.changed.connect(self._inspector_changed)
@@ -1296,6 +1300,11 @@ class MainWindow(QMainWindow):
                     if fid not in analyses:
                         analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
             order = story_order(footage, ids)
+            if multi and multi.get("whole"):
+                # The whole recording, cut only between the angles (no best moments, hook or bookends).
+                clips = multicam.whole_clips(mc_footage, mc_angles, syncs, order, multi.get("covered", True))
+                note = f"Whole recording: {sum(c.duration for c in clips) / 60:.1f} min"
+                return analyses, clips, [note], syncs, faces
             intro = outro = None
             notes: list[str] = []
             sel = s
@@ -1375,9 +1384,16 @@ class MainWindow(QMainWindow):
         todo = [fid for fid, k in angles.items() if k >= 2 and fid not in known]
         syncs = dict(known)
         if todo:
-            by_path = sync_files([footage[f].path for f in mains], [footage[f].path for f in todo],
-                                 lambda p, m: progress(0.25 * p, m), cancel)
             ref_of = {footage[f].path: f for f in mains}
+            # Everything is synced to the longest recording (it usually spans all the others), and each angle's
+            # offset to the main angle worked out through it; what doesn't match it is synced directly.
+            durations = {f.path: f.duration for f in footage.values()}
+            by_path = sync_to_longest([footage[f].path for f in mains], [footage[f].path for f in todo],
+                                      durations, lambda p, m: progress(0.2 * p, m), cancel)
+            left = [f for f in todo if footage[f].path not in by_path]
+            if left:
+                by_path.update(sync_files([footage[f].path for f in mains], [footage[f].path for f in left],
+                                          lambda p, m: progress(0.2 + 0.05 * p, m), cancel))
             for fid in todo:
                 hit = by_path.get(footage[fid].path)
                 if hit is not None:
@@ -1416,7 +1432,7 @@ class MainWindow(QMainWindow):
         self.project.settings.overlay_tracks = max(1, top + 1)
         self.project.settings.multicam = {
             "angles": dict(angles), "template": multi["template"], "audio": multi.get("audio", "main"),
-            "covered": multi.get("covered", True), "switch": plan or {},
+            "covered": multi.get("covered", True), "whole": multi.get("whole", False), "switch": plan or {},
             "syncs": {fid: [ref, r.offset, r.drift, r.confidence, r.overlap] for fid, (ref, r) in syncs.items()},
             "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
         notes = []
@@ -1844,7 +1860,7 @@ class MainWindow(QMainWindow):
             return
         lut = imported[0]
         clip = self._inspected()
-        targets = self.inspector.targets if clip is not None else []   # the shown clip and the rest of the selection
+        targets = self.inspector.graded if clip is not None else []   # the shown clip and the rest of the selection
         if target == "log":
             ids = ids or list(dict.fromkeys(c.footage_id for c in targets))
             if ids:
@@ -2225,6 +2241,10 @@ class MainWindow(QMainWindow):
             self.project_checkpoint()
             gone = {x.id for x in targets}
             self.project.clips = [x for x in self.project.clips if x.id not in gone]
+            layer_gone = set(self.tl.selected_overlay_ids()) if clip_id in sel else set()
+            if layer_gone:                    # (Ctrl+A) the selected clips on the video layers go too
+                self.project.overlays = [o for o in self.project.overlays if o.id not in layer_gone]
+                self.tl.select_overlay("")
             self.tl.selected = ""
             self._after_structure_change()
         elif action == "duplicate":
@@ -2882,8 +2902,33 @@ class MainWindow(QMainWindow):
         r = tp.btn_hook.geometry().united(tp.btn_alt.geometry())
         return tp, r.adjusted(-4, -2, 4, 2)
 
+    def _bins_edited(self, message: str):
+        self.project.dirty = True
+        self._update_title()
+        if message:
+            self.lbl_status.setText(message)
+
+    def _select_all(self):
+        """Ctrl+A where the focus is: every item in the Media panel, the text of a text field, or else every clip
+        on the timeline (main track and video layers)."""
+        w = QApplication.focusWidget()
+        if w is not None and self.bin.isAncestorOf(w):
+            self.bin.select_all()
+        elif isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            w.selectAll()
+        else:
+            self.tl.select_all()
+
     def _delete_selected(self):
-        if self.tl.selected_overlay:
+        layer = self.tl.selected_overlay_ids()
+        if len(layer) > 1 and not self.tl.selected:     # several layer clips (Ctrl+click)
+            self.project_checkpoint()
+            self.project.overlays = [o for o in self.project.overlays if o.id not in set(layer)]
+            self.tl.select_overlay("")
+            self._overlays_changed()
+        elif self.tl.selected and self.tl.selected_ids():
+            self.clip_action("delete", self.tl.selected)
+        elif self.tl.selected_overlay:
             self._overlay_action("ov_delete", self.tl.selected_overlay)
         elif self.tl.selected_text:
             self._text_action("text_delete", self.tl.selected_text)
@@ -2909,6 +2954,10 @@ class MainWindow(QMainWindow):
 
     def _inspector_changed(self, kind: str):
         self.project.dirty = True
+        if self.inspector.layer_others:       # the change reached selected clips on the layers too
+            self.tl.refresh()
+            self.viewer.refresh()
+            self._schedule_audio()
         if self.selected_overlay() is not None and self.selected_clip() is None:
             # A clip on a video layer: its grade, trim, speed or sound.
             if kind == "footage_color":
@@ -2957,7 +3006,7 @@ class MainWindow(QMainWindow):
         elif clip is None:
             return
         elif req == "auto_color":
-            self._auto_color(self.inspector.targets or [clip])
+            self._auto_color(self.inspector.graded or [clip])
             return
         elif req.startswith("face_zoom:"):
             self._face_zoom(self.inspector.targets or [clip], req.split(":", 1)[1])
@@ -2968,7 +3017,7 @@ class MainWindow(QMainWindow):
                 c.zoom, c.offset_x, c.offset_y = 1.0, 0.0, 0.0
         elif req == "reset_color":
             self.project_checkpoint()
-            for c in self.inspector.targets or [clip]:
+            for c in self.inspector.graded or [clip]:
                 c.grade = Grade()
         elif req == "copy_grade_all":
             self.project_checkpoint()
@@ -3256,14 +3305,16 @@ class MainWindow(QMainWindow):
             self.sfx_panel.stop_preview()
 
     # ================================================================== updates
-    UPDATE_CHECK_EVERY = 20 * 3600    # seconds between automatic checks
+    UPDATE_CHECK_EVERY = 15 * 60    # seconds: restarting the app again and again doesn't ask GitHub each time
 
     def check_updates(self, manual: bool = True):
-        """Look for a newer release on GitHub in the background. Automatic checks run at most once a day and say
-        nothing unless there is an update."""
-        if not manual and time.time() - self.qs.value("update_last_check", 0.0, type=float) < self.UPDATE_CHECK_EVERY:
-            return
-        self.qs.setValue("update_last_check", time.time())
+        """Look for a newer release on GitHub in the background. The check at startup runs every time the app
+        starts (unless it started a few minutes ago) and says nothing unless there is an update."""
+        if not manual:
+            last = self.qs.value("update_last_auto", 0.0, type=float)
+            if 0 <= time.time() - last < self.UPDATE_CHECK_EVERY:
+                return
+            self.qs.setValue("update_last_auto", time.time())
         if manual:
             self.lbl_status.setText("Checking for updates…")
 
@@ -3351,7 +3402,7 @@ class MainWindow(QMainWindow):
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
-            "Ctrl+A — select all clips\nR — other moment for the clip (best one nearby)\nH — new hook\n"
+            "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\nH — new hook\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Shift+R — reset the layout\n"

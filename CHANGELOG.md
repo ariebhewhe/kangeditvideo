@@ -6,6 +6,37 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- Media panel **bins**: a *Bin* list above the media (all media, not in a bin, each bin with its count), a *Bin*
+  column, and right-click → *Bins*: new bin, move the selected media to a bin (or out of it), rename or delete a
+  bin (its media stays), and **Bins by date**, which sorts the media into a bin per recording day (from the
+  file's creation time, else its date). Bins are saved with the project and undoable.
+- Media panel **filters**: show videos or photos / images only, and only one picture shape: landscape, portrait,
+  square, 16:9, 9:16, 4:3, 3:4 or 21:9 (as shown: a phone clip filmed upright is portrait).
+- Multicam: *Use the whole recording (no best-moment cuts)* in ✨ Auto Edit → Multicam puts the main angle's
+  whole recording on the timeline, so Switching cuts between the cameras all the way through, like editing a
+  full multicam event.
+- Multicam sync uses the longest recording as the reference: every file is synced to it and each angle's offset
+  to the main angle is worked out through it (files that don't match it are synced directly, as before).
+- Ctrl+A selects the clips on the video layers too (multicam angles, picture in picture...), and Ctrl+click adds
+  a layer clip to the selection: color, LUT, log, speed and volume changes and Delete apply to them as well.
+- DaVinci Resolve LUTs with a 1D shaper before the 3D LUT (LUT_1D_SIZE + LUT_3D_SIZE in one .cube) import and
+  apply correctly.
+
+### Fixed
+- The update check at startup only ran once every 20 hours (and a manual check reset that), so a new release
+  often showed no popup. It now runs at every start (not again within 15 minutes).
+- Windows: after *Update now*, a console window with `find "<number>"` appeared and the update could hang:
+  the restart helper ran without a console, so each of its commands opened a window of its own and its pause
+  failed. It now runs hidden, waits with a command that works there, and gives up waiting after two minutes.
+- Ctrl+A in the Media panel selects all the media shown there (it selected the timeline's clips instead); in a
+  text field it selects the text.
+- A proxy that hangs on one file no longer turns GPU proxies off for every file: a GPU way that hung is skipped
+  for that file (and for all only after it hung on two). GPU attempts give up after 30 s without progress, and
+  a CPU attempt after 5 minutes with an error instead of staying at 0 %.
+- Camera RAW files FFmpeg can't decode (Sony X-OCN in MXF, Blackmagic RAW, REDCODE, ARRIRAW...) now say so and
+  what to do (convert to ProRes, DNxHR or H.264 / H.265 first) instead of "Could not decode frames".
+
 ## [0.4.0] - 2026-10-13
 
 ### Added
