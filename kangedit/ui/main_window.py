@@ -1378,7 +1378,7 @@ class MainWindow(QMainWindow):
             body = sorted((c for c in clips if c.label != "hook"), key=where)
             clips = hooks + body
             beats = self._music_beats(sound, cancel) if sound is not None else None
-            clips, notes = polish.finish(clips, footage, analyses, s, beats, 0.0)
+            clips, notes = polish.finish(clips, footage, analyses, s, beats, 0.0, avoid=blockers)
             apply_edit_style(clips, footage, analyses, s)
             return analyses, clips, notes
 
@@ -1590,7 +1590,7 @@ class MainWindow(QMainWindow):
                     notes.append(f"{n} scene(s) open with a scenic shot")
             progress(0.9, "Finishing the edit…")
             beats = self._music_beats(music_clip, cancel) if music_clip is not None else None
-            clips, more = polish.finish(clips, everything, analyses, s, beats, t_start)
+            clips, more = polish.finish(clips, everything, analyses, s, beats, t_start, avoid=used)
             notes += more
             apply_edit_style(clips, everything, analyses, s, groups=groups)
             plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
