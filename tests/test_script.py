@@ -40,6 +40,7 @@ def test_split_and_normalize():
     assert lines[0] == "Welcome to the channel!" and lines[1] == "Today we're looking at their new camera."
     assert "[beat]" not in lines[2] and len(lines) == 6
     assert S.normalize("Héllo, WORLD!  It's") == "hello world its"
+    assert S.split_script("ANNA:\nHello there friend.") == ["Hello there friend."]     # a label on its own line
     assert S.similarity("their new camera", "there new camera") > 0.85
 
 

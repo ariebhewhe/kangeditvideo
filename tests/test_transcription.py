@@ -72,3 +72,30 @@ def test_files_transcribed_in_one_task(qapp, monkeypatch):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_cancelled_batch_keeps_the_finished_files(qapp, monkeypatch):
+    from kangedit.ffmpeg import Cancelled
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        p = Project()
+        files = [Footage(f"c{k}.mp4", 30.0, 1920, 1080, 30.0, True) for k in range(3)]
+        p.footage = {f.id: f for f in files}
+        w.set_project(p)
+        p.dirty = False
+        monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None: None)
+
+        def fake_transcribe(f, model, lang, progress, cancel):
+            if f.name == "c1.mp4":
+                raise Cancelled()                           # the user pressed Cancel during the second file
+            return [{"s": 0.0, "e": 0.5, "w": "hi"}]
+        monkeypatch.setattr("kangedit.ui.main_window.transcribe", fake_transcribe)
+        monkeypatch.setattr(w.tasks, "submit",
+                            lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+        w.queue_transcription([f.id for f in files])
+        assert files[0].transcript and files[2].transcript is None and w.project.dirty
+        assert "cancelled: 1 of 3" in w.lbl_status.text()
+    finally:
+        w.project.dirty = False
+        w.close()

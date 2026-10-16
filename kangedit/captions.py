@@ -61,13 +61,24 @@ def model_ready(name: str) -> bool:
     return name in _models
 
 
+_loading: dict[str, threading.Event] = {}
+
+
 def _get_model(name: str):
     """The speech model, loaded (and on first use downloaded) once: it stays loaded for every later file, next
-    to one other model (the auto edit's quick listening model doesn't push out the captions one)."""
-    with _model_lock:
-        if name in _models:
-            _models.move_to_end(name)
-            return _models[name]
+    to one other model (the auto edit's quick listening model doesn't push out the captions one). The loading
+    itself runs outside the lock, so a slow download of one model doesn't hold up another."""
+    while True:
+        with _model_lock:
+            if name in _models:
+                _models.move_to_end(name)
+                return _models[name]
+            busy = _loading.get(name)
+            if busy is None:
+                busy = _loading[name] = threading.Event()
+                break
+        busy.wait()                       # someone else is loading it: use theirs (or try again if it failed)
+    try:
         from faster_whisper import WhisperModel
         device, compute = "cpu", "int8"
         try:
@@ -77,10 +88,15 @@ def _get_model(name: str):
         except Exception:
             pass
         model = WhisperModel(name, device=device, compute_type=compute)
-        _models[name] = model
-        while len(_models) > MAX_MODELS:
-            _models.popitem(last=False)
+        with _model_lock:
+            _models[name] = model
+            while len(_models) > MAX_MODELS:
+                _models.popitem(last=False)
         return model
+    finally:
+        with _model_lock:
+            _loading.pop(name, None)
+        busy.set()
 
 
 def load_model(name: str, progress: Optional[ProgressCb] = None) -> None:
@@ -147,14 +163,19 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
     (model load or a long decode). It gives up and returns no words LISTEN_TIMEOUT after the model is ready:
     the first call loads (or downloads) the model, which must not use up the time for listening."""
     out: dict = {}
+    stop = threading.Event()          # ends the helper's transcription when we give up on it or are cancelled
 
     def work():
         try:
             _get_model(model_name)
             out["ready"] = True
+            if stop.is_set():
+                return
             audio = _load_audio_16k(footage.path, start, duration)
-            out["words"] = transcribe_audio(audio, model_name, language, None, cancel, offset=start,
-                                            quick=True)[0] if audio.size else []
+            out["words"] = transcribe_audio(audio, model_name, language, None, stop, offset=start,
+                                            quick=True)[0] if audio.size and not stop.is_set() else []
+        except Cancelled:
+            pass
         except BaseException as e:  # noqa: BLE001
             out["error"] = e
 
@@ -166,8 +187,10 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
         if out.get("ready"):
             waited += 0.1
         if cancel is not None and cancel.is_set():
+            stop.set()
             raise Cancelled()
         if waited > LISTEN_TIMEOUT:
+            stop.set()
             return []
     if "error" in out:
         raise out["error"]

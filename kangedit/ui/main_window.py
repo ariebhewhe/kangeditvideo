@@ -3441,23 +3441,25 @@ class MainWindow(QMainWindow):
             done, errors = [], []
             for k, f in enumerate(todo):
                 if cancel.is_set():
-                    raise Cancelled()
+                    return done, errors, True
                 tag = f" ({k + 1}/{len(todo)})" if len(todo) > 1 else ""
 
                 def step(p, msg="", k=k, tag=tag):
                     progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
                 try:
                     words = transcribe(f, model, lang, step, cancel)
-                except Cancelled:
-                    raise
+                except Cancelled:          # the files finished before the cancel are kept
+                    return done, errors, True
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{f.name}: {e}")
                     continue
                 done.append((f.id, words))
-            return done, errors
+            return done, errors, False
 
         def finished(res):
-            done, errors = res
+            done, errors, cancelled = res
+            if cancelled:
+                self.lbl_status.setText(f"Transcription cancelled: {len(done)} of {len(todo)} file(s) done")
             for fid, words in done:
                 ff = self.project.footage.get(fid)
                 if ff is not None:
@@ -3706,7 +3708,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, f"{APP_NAME} {prepared.version} is ready: {APP_NAME} restarts "
                                                     "now to finish the update.")
             self.project.dirty = False
-            updater.launch(prepared.command)
+            updater.launch(prepared.command, prepared.env)
             self.close()
             QApplication.instance().quit()
 
