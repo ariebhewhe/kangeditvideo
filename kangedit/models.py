@@ -375,6 +375,7 @@ class ProjectSettings:
     # Multicam (see multicam.py): {"angles": {footage id: angle number}, "template": key, "audio": choice}
     multicam: dict = field(default_factory=dict)
     bins: list = field(default_factory=list)   # Media panel bins made by hand (kept even when empty)
+    script: dict = field(default_factory=dict)  # the last auto edit from a script (see ScriptEditDialog.settings)
 
     def to_dict(self) -> dict:
         return asdict(self)

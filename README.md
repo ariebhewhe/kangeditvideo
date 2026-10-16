@@ -37,6 +37,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Opening & closing** | Looks for the greeting that opens the video and the sign-off that closes it, in English and Indonesian: "hello…", "welcome…", "assalamualaikum…", "thanks for watching", "sampai jumpa"… It searches intro/outro-named files and the first and last recordings, and uses the whole spoken passage. |
 | **Transitions & J/L cuts** | Optional transitions between scenes or at every cut: dissolve, dip to black or white, wipe, slide, zoom, or a mix. For long-form, J-cuts let the next scene's sound lead in, and L-cuts let a voice finish over the next picture. |
 | **Reuse rules** | Footage can be used several times, but its segments never overlap, always keep a minimum gap, and near-identical shots are rejected. Clips that break the rule after manual edits get a red outline. |
+| **Edit from a script** | ✨ Auto Edit → **📜 Script** (or *Tools → Auto Edit from script…*): paste the script and each line is found in the footage's transcripts by text similarity, then the clips are laid out in the script's order. The **similarity threshold** (30–100 %) decides how close a line must be; speech-recognition slips and small ad-libs still match. A line said in several takes uses the best match or the last good take. Clips are cut on word boundaries with adjustable padding, lines said one after the other in the same take become one clip, and a live preview lists every line with its score, file and time (lines not found in red). Files without a transcript are transcribed first. |
 | **Regenerate shorter / longer** | **− Shorter** / **+ Longer** on the toolbar rebuild the edit about 25% shorter or longer with the same settings. *Tools → Regenerate auto edit at length…* asks for an exact length. |
 
 ### Editing
@@ -65,7 +66,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 | | |
 |---|---|
-| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices. DJI D-Log M, D-Log2 and the D-Log / D-Log2 *Vivid* looks are in the same menu and use DJI's official LUTs (see [Official camera LUTs](#official-camera-luts)). |
+| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices (full-range files read correctly). The filmic output keeps hues (bright reds stay red, skies don't turn cyan) and fades the brightest colours to white, and colours outside Rec.709 are compressed smoothly into it instead of clipping. DJI D-Log M, D-Log2 and the D-Log / D-Log2 *Vivid* looks are in the same menu and use DJI's official LUTs (see [Official camera LUTs](#official-camera-luts)). |
 | **Camera auto-detect** | The camera is identified from the file's metadata, and its log profile is chosen from the metadata or the picture. **Detect all** re-runs it for every file in the background. |
 | **Official camera LUTs** | Use the makers' own conversion LUTs (DJI D-Log M, Sony, Panasonic, Fujifilm, Nikon, ARRI…) instead of the built-in curves. See [Official camera LUTs](#official-camera-luts). |
 | **LUTs (.cube)** | Import 1D/3D `.cube` LUTs (or the `.zip` they come in) as a log conversion or as a creative look with a strength slider. |
@@ -462,10 +463,11 @@ kangedit/
   ffmpeg_setup.py       FFmpeg download and unpacking (standard library only)
   analysis.py           per-footage signal extraction (OpenCV + FFmpeg, parallel CPU/GPU decode)
   autoedit.py           scoring, best-moment selection, presets, transition / J-L placement
+  scriptedit.py         edit from a script: line matching against transcripts (text similarity), clip layout
   bookends.py           story order and opening / closing detection
   edits.py              transitions and split edits shared by preview, export and preview audio
   captions.py           Whisper transcription, caption building, layouts, animations, SRT/ASS
-  color.py              log curves, gamut matrices, grading, preview LUTs, auto color
+  color.py              log curves, gamut matrices, gamut compression, tone map, grading, preview LUTs, auto color
   camera.py             camera identification and log-profile choice
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
@@ -481,6 +483,7 @@ kangedit/
   reframe.py            aspect-ratio crop/fit geometry (shared by preview and export)
   proxy.py              proxy generation (GPU decode/encode with CPU fallback)
   models.py             project model, undo, save/load (.kgproj)
+  bins.py               Media panel bins (by hand or by recording date) and filters
   tasks.py              background task queue
   ui/                   PySide6 interface: viewer, timeline, media bin, inspector, video layers,
                         captions, sounds, dialogs

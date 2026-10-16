@@ -25,7 +25,7 @@ from .. import lut as lutlib
 from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
-from .. import images, multicam, music, reframe, sfx, updater
+from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
         self.a_auto = self._act("Auto Edit…", self.auto_edit_dialog, "Ctrl+Shift+A",
                                 "Pick the best moments from your footage automatically")
         m.addAction(self.a_auto)
+        m.addAction(self._act("Auto Edit from script…", self.script_edit_dialog, None,
+                              "Find each line of a script in the footage's speech and lay the clips out in order"))
         m.addAction(self._act("Regenerate auto edit shorter (−25%)", lambda: self.regenerate_auto_edit(0.75),
                               "Ctrl+Shift+-", "Rebuild the automatic edit about a quarter shorter than the timeline"))
         m.addAction(self._act("Regenerate auto edit longer (+25%)", lambda: self.regenerate_auto_edit(1.25),
@@ -421,7 +423,11 @@ class MainWindow(QMainWindow):
             b.setFixedWidth(30)
             b.setToolTip(tip + " (same settings and footage)")
             b.clicked.connect(lambda _=False, k=factor: self.regenerate_auto_edit(k))
-        self.grp_auto = group(self.btn_auto, b_short, b_long)
+        self.btn_script = QPushButton("📜 Script")
+        self.btn_script.setToolTip("Auto edit from a script: each line is found in what the footage says (by text "
+                                   "similarity) and the clips are laid out in the script's order")
+        self.btn_script.clicked.connect(self.script_edit_dialog)
+        self.grp_auto = group(self.btn_auto, b_short, b_long, self.btn_script)
         bar.add(group(self.grp_auto, arrow()))
 
         refine = QLabel("3. Refine")
@@ -1213,6 +1219,64 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     pass
         return s
+
+    def script_edit_dialog(self):
+        """Auto edit from a script: transcribe what is missing, match each line, lay out the clips."""
+        from .script_dialog import ScriptEditDialog
+        if not any(not f.is_image and f.has_audio for f in self.project.footage.values()):
+            QMessageBox.information(self, APP_NAME, "Import footage with sound first: the script is matched to "
+                                                    "what it says.")
+            return
+        dlg = ScriptEditDialog(self.project, self.bin.selected_ids(), self)
+        if dlg.exec() != ScriptEditDialog.Accepted:
+            return
+        st = dlg.settings()
+        self.project.settings.script = st
+        self.project.dirty = True
+        foot = [self.project.footage[i] for i in st["footage"] if i in self.project.footage]
+        if not foot or not scriptedit.split_script(st["script"]):
+            QMessageBox.information(self, APP_NAME, "Type a script and choose the footage to search.")
+            return
+        todo = [f.id for f in foot if f.transcript is None]
+        if todo:
+            self.lbl_status.setText(f"Transcribing {len(todo)} file(s) for the script…")
+            self.queue_transcription(todo)
+
+        def job(progress, cancel):     # runs after the transcriptions (the queue is in order)
+            progress(0.0, "Matching the script to the footage…")
+            return scriptedit.script_edit(st["script"], foot, st["threshold"], st["prefer"], st["pad_in"],
+                                          st["pad_out"], st["merge"])
+
+        self.tasks.submit("Auto edit from script", job, self._apply_script_edit,
+                          self._task_error("Auto edit from script"))
+
+    def _apply_script_edit(self, result):
+        st = self.project.settings.script
+        if not result.clips:
+            QMessageBox.information(self, APP_NAME, "None of the script's lines were found in the footage. Lower "
+                                                    "the similarity threshold, or check the footage's language "
+                                                    "(Captions settings).")
+            return
+        self.project_checkpoint()
+        if st.get("replace", True):
+            self.project.clips = result.clips
+        else:
+            self.project.clips.extend(result.clips)
+        self.tl.selected = ""
+        self.refresh_all()
+        self.tl.fit()
+        self.viewer.seek(0)
+        found = len(result.matches) - len(result.missing)
+        self.lbl_status.setText(f"Script edit: {found} of {len(result.matches)} lines found, {len(result.clips)} "
+                                f"clip(s), {sum(c.duration for c in result.clips):.1f} s")
+        if result.missing:
+            box = QMessageBox(QMessageBox.Information, "Auto edit from script",
+                              f"{len(result.missing)} of {len(result.matches)} lines were not found (below "
+                              f"{st.get('threshold', scriptedit.DEFAULT_THRESHOLD):.0%} similarity) and were "
+                              "left out.", parent=self)
+            box.setDetailedText("\n".join(f"{m.index + 1}. {m.line}  (closest: {m.score:.0%})"
+                                           for m in result.missing))
+            box.exec()
 
     def auto_edit_dialog(self):
         if not self.project.footage:
@@ -3108,7 +3172,8 @@ class MainWindow(QMainWindow):
                         img = dec.frame_at(c.src_in + c.src_dur * (i + 0.5) / 5)
                         if img is not None:
                             frames.append(img.copy())
-                    grades[c.id] = auto_correct(frames, lp, tm, base=base)
+                    grades[c.id] = auto_correct(frames, lp, tm, base=base,
+                                               full_range=footage[c.footage_id].color_range == "pc")
                 progress(1.0, name)
                 return grades
             finally:

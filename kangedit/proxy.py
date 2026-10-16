@@ -42,7 +42,9 @@ def proxy_args(footage: Footage, height: int, out: str, hw: Optional[str] = None
         s = height / short
         w, h = int(round(w * s / 2)) * 2, int(round(h * s / 2)) * 2
     matrix = ffmpeg_matrix(footage.color_space, min(footage.width, footage.height))
-    vf = (f"scale={w}:{h}:flags=bicubic:in_color_matrix={matrix}:out_color_matrix=bt709"
+    # Shrinking 2x or more (4K -> 540p): area averaging, made for it (no shimmer when scrubbing); else bicubic.
+    flags = "area" if short >= 2 * min(w, h) else "bicubic"
+    vf = (f"scale={w}:{h}:flags={flags}:in_color_matrix={matrix}:out_color_matrix=bt709"
           f":in_range=auto:out_range=tv,format={'nv12' if encoder else 'yuv420p'}")
     # -xerror: a GPU that can't decode a stream otherwise yields garbage frames with exit code 0.
     args = ["-xerror", "-hwaccel", hw] if hw else []
@@ -50,7 +52,9 @@ def proxy_args(footage: Footage, height: int, out: str, hw: Optional[str] = None
     if encoder:
         args += ["-c:v", encoder] + hw_encoder_args(encoder, QUALITY)
     else:
-        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(QUALITY)]
+        # fastdecode (no CABAC, no deblocking): proxies decode ~1.8x faster, which is what they are for
+        # (smooth scrubbing and playback); the files are somewhat larger.
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-tune", "fastdecode", "-crf", str(QUALITY)]
     args += ["-g", str(GOP), "-bf", "0",
              "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
              "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart", out]
