@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -51,25 +52,43 @@ LANGUAGES = [
 LISTEN_TIMEOUT = 180.0   # seconds before listen() gives up on a part of a file
 
 _model_lock = threading.Lock()
-_model = None
-_model_name = None
+_models: "OrderedDict[str, object]" = OrderedDict()   # loaded speech models, most recently used last
+MAX_MODELS = 2           # the captions model and the small one used to listen for the opening / closing
+
+
+def model_ready(name: str) -> bool:
+    """Whether the speech model is loaded already (using it starts at once)."""
+    return name in _models
 
 
 def _get_model(name: str):
-    global _model, _model_name
+    """The speech model, loaded (and on first use downloaded) once: it stays loaded for every later file, next
+    to one other model (the auto edit's quick listening model doesn't push out the captions one)."""
     with _model_lock:
-        if _model is None or _model_name != name:
-            from faster_whisper import WhisperModel
-            device, compute = "cpu", "int8"
-            try:
-                import ctranslate2
-                if ctranslate2.get_cuda_device_count() > 0:
-                    device, compute = "cuda", "float16"
-            except Exception:
-                pass
-            _model = WhisperModel(name, device=device, compute_type=compute)
-            _model_name = name
-        return _model
+        if name in _models:
+            _models.move_to_end(name)
+            return _models[name]
+        from faster_whisper import WhisperModel
+        device, compute = "cpu", "int8"
+        try:
+            import ctranslate2
+            if ctranslate2.get_cuda_device_count() > 0:
+                device, compute = "cuda", "float16"
+        except Exception:
+            pass
+        model = WhisperModel(name, device=device, compute_type=compute)
+        _models[name] = model
+        while len(_models) > MAX_MODELS:
+            _models.popitem(last=False)
+        return model
+
+
+def load_model(name: str, progress: Optional[ProgressCb] = None) -> None:
+    """Load the speech model now (before a batch of files), saying so only when it isn't loaded yet."""
+    if not model_ready(name):
+        if progress:
+            progress(0.0, f"Loading speech model '{name}' (first run downloads it)…")
+        _get_model(name)
 
 
 def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = None) -> np.ndarray:
@@ -160,8 +179,9 @@ def transcribe(footage: Footage, model_name: str = "large-v3", language: str = "
     if not footage.has_audio:
         footage.transcript = []
         return []
+    load_model(model_name, progress)
     if progress:
-        progress(0.0, f"Loading speech model '{model_name}' (first run downloads it)…")
+        progress(0.0, f"Reading the sound of {footage.name}…")
     audio = _load_audio_16k(footage.path)   # the original's audio: proxies may be re-encoded
     if audio.size == 0:
         footage.transcript = []

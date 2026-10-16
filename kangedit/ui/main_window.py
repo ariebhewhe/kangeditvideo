@@ -31,7 +31,8 @@ from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import polish, scenes
-from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
+from ..captions import (Caption, build_captions, delete_captions, edit_caption, listen, load_model, project_layout,
+                        transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -3424,23 +3425,52 @@ class MainWindow(QMainWindow):
         self.caps_panel.set_captions(self.captions)
 
     def queue_transcription(self, ids: list[str], force: bool = False):
+        """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
+        then the files are transcribed one after the other. A file that fails doesn't stop the others."""
         s = self.project.settings
-        for fid in ids:
-            f = self.project.footage.get(fid)
-            if f is None or f.is_image or (f.transcript is not None and not force):
-                continue
+        todo = [self.project.footage[fid] for fid in dict.fromkeys(ids) if fid in self.project.footage
+                and not self.project.footage[fid].is_image
+                and (force or self.project.footage[fid].transcript is None)]
+        if not todo:
+            return
+        model, lang = s.whisper_model, s.whisper_language
 
-            def done(words, fid=fid):
+        def job(progress, cancel):
+            if any(f.has_audio for f in todo):
+                load_model(model, progress)
+            done, errors = [], []
+            for k, f in enumerate(todo):
+                if cancel.is_set():
+                    raise Cancelled()
+                tag = f" ({k + 1}/{len(todo)})" if len(todo) > 1 else ""
+
+                def step(p, msg="", k=k, tag=tag):
+                    progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
+                try:
+                    words = transcribe(f, model, lang, step, cancel)
+                except Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{f.name}: {e}")
+                    continue
+                done.append((f.id, words))
+            return done, errors
+
+        def finished(res):
+            done, errors = res
+            for fid, words in done:
                 ff = self.project.footage.get(fid)
                 if ff is not None:
                     ff.transcript = words
-                    self.project.dirty = True
-                    self.update_captions()
-                    self.bin.refresh()
+            if done:
+                self.project.dirty = True
+                self.update_captions()
+                self.bin.refresh()
+            if errors:
+                QMessageBox.warning(self, APP_NAME, "Some files could not be transcribed:\n\n" + "\n".join(errors))
 
-            self.tasks.submit(f"Transcribing {f.name}",
-                              lambda p, c, f=f: transcribe(f, s.whisper_model, s.whisper_language, p, c),
-                              done, self._task_error(f"Transcription of {f.name}"))
+        name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
+        self.tasks.submit(name, job, finished, self._task_error("Transcription"))
 
     def generate_captions(self):
         used = list(dict.fromkeys(c.footage_id for c in self.project.clips))
