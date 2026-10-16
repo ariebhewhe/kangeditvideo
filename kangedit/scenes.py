@@ -7,14 +7,17 @@ closest to when it was really shot. Bins by date, story order (and so where the 
 for) and scenes all use it.
 
 A scene is a time group: files recorded close together. A new scene starts where the next file begins more
-than SCENE_GAP after the previous one ended (a new day, a new place). In a long-form edit each scene after the
+than SCENE_GAP after the previous one ended (a new day), or, when both carry a location (phones and many cameras
+record one), more than SCENE_DISTANCE from where the scene's last located recording was made (a new place). In a long-form edit each scene after the
 first opens with a scenic / travel shot from that scene (a wide establishing shot: no faces, no speech, sharp,
 colourful, steady or gently moving), and "transitions between scenes" means between these time groups.
 """
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -23,7 +26,11 @@ import numpy as np
 from .models import Footage, TimelineClip
 
 SCENE_GAP = 30 * 60.0          # seconds between two recordings that start a new scene
+SCENE_DISTANCE = 1000.0        # metres between two recordings that start a new scene
+_ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
+LOCATION_TAGS = ("com.apple.quicktime.location.iso6709", "location", "location-eng", "com.android.location")
 EARLIEST = datetime(1995, 1, 1).timestamp()   # dates before this are a camera clock that was never set
+PREFER_BONUS = 0.12            # scenic score bonus for footage the user put in the B-roll bin
 SAMPLE_RATE = 4.0              # analysis samples per second (analysis.py)
 
 
@@ -57,20 +64,57 @@ def recorded_time(f: Footage) -> Optional[float]:
     return min(times) if times else None
 
 
-def time_groups(footage: dict[str, Footage], order: list[str], gap: float = SCENE_GAP) -> dict[str, int]:
+def parse_location(tags: dict) -> list:
+    """[latitude, longitude] from a file's metadata tags (ISO 6709, e.g. "+37.3317-122.0302+012.000/", as phones,
+    action cameras and drones write it), or [] when it has none."""
+    for k in LOCATION_TAGS:
+        m = _ISO6709.match(str(tags.get(k, "")).split("|")[0].strip())
+        if m:
+            lat, lon = float(m.group(1)), float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lon <= 180 and (lat, lon) != (0.0, 0.0):
+                return [lat, lon]
+    return []
+
+
+def read_locations(footage: dict[str, Footage]) -> None:
+    """Fill in the location of footage imported before locations were read (gps None), from its file."""
+    from .ffmpeg import probe
+    for f in footage.values():
+        if f.gps is None and not f.is_image:
+            try:
+                f.gps = parse_location(probe(f.path).tags)
+            except Exception:  # noqa: BLE001  (missing file, no FFmpeg: no location)
+                f.gps = []
+
+
+def distance(a: list, b: list) -> float:
+    """Metres between two [latitude, longitude] (haversine)."""
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return 2 * 6371000.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def time_groups(footage: dict[str, Footage], order: list[str], gap: float = SCENE_GAP,
+                far: float = SCENE_DISTANCE) -> dict[str, int]:
     """Scene number of each file in `order` (story order): a new scene starts where a file begins more than
-    `gap` seconds after the previous one ended. A file without a recording time stays in the scene before it."""
+    `gap` seconds after the previous one ended, or was recorded more than `far` metres from the scene's last
+    located file. A file without a recording time stays in the scene before it."""
     groups: dict[str, int] = {}
-    g, end = 0, None
+    g, end, where = 0, None, None
     for fid in order:
         f = footage.get(fid)
         if f is None:
             continue
         t = recorded_time(f)
+        loc = f.gps or None
         if t is not None:
             if end is not None and t - end > gap:
+                g, where = g + 1, None
+            elif loc is not None and where is not None and distance(loc, where) > far:
                 g += 1
             end = max(end or t, t + f.duration)
+        if loc is not None:
+            where = loc
         groups[fid] = g
     return groups
 
@@ -123,10 +167,11 @@ def _overlaps(fid: str, a: float, b: float, used: list[TimelineClip], gap: float
 
 
 def find_opener(fids: list[str], analyses: dict, footage: dict[str, Footage], length: float,
-                used: list[TimelineClip], gap: float = 0.0, scores: Optional[dict] = None) -> Optional[TimelineClip]:
+                used: list[TimelineClip], gap: float = 0.0, scores: Optional[dict] = None,
+                prefer: Optional[set] = None) -> Optional[TimelineClip]:
     """The best scenic shot `length` seconds long in these files (one scene's), clear of the `used` clips by
-    `gap` seconds, a little earlier in the scene preferred (arriving somewhere). None when there is none worth
-    showing (too short footage, or no moment scenic enough)."""
+    `gap` seconds, a little earlier in the scene preferred (arriving somewhere), and files in `prefer` (the
+    B-roll bin) first. None when there is none worth showing (too short footage, or no moment scenic enough)."""
     scores = scores if scores is not None else scenic_scores({i: analyses[i] for i in fids if i in analyses},
                                                              footage)
     best: Optional[tuple[float, str, float]] = None
@@ -143,6 +188,8 @@ def find_opener(fids: list[str], analyses: dict, footage: dict[str, Footage], le
         mean = (csum[n:] - csum[:-n]) / n                                  # window starting at each sample
         starts = t[:len(mean)]
         mean = mean - 0.02 * rank                                          # earlier files of the scene first
+        if prefer and fid in prefer:
+            mean = mean + PREFER_BONUS
         for k in np.argsort(-mean)[:50]:
             a = float(starts[k])
             b = a + L
@@ -160,9 +207,10 @@ def find_opener(fids: list[str], analyses: dict, footage: dict[str, Footage], le
 
 def add_scene_openers(clips: list[TimelineClip], groups: dict[str, int], analyses: dict,
                       footage: dict[str, Footage], length: float, gap: float = 0.0,
-                      used: Optional[list[TimelineClip]] = None) -> int:
+                      used: Optional[list[TimelineClip]] = None, prefer: Optional[set] = None) -> int:
     """Open every scene of an edit after the first with a scenic shot from that scene (in place): before the
-    first clip of each new time group, past any hook. Returns how many were added."""
+    first clip of each new time group, past any hook; footage in `prefer` (the B-roll bin) first. Returns how
+    many were added."""
     used = list(used or []) + list(clips)
     start = next((k for k, c in enumerate(clips) if c.label != "hook"), len(clips))
     added, seen = 0, set()
@@ -172,7 +220,7 @@ def add_scene_openers(clips: list[TimelineClip], groups: dict[str, int], analyse
         g = groups.get(clips[k].footage_id)
         if g is not None and prev is not None and g != prev and g not in seen and clips[k].label != "closing":
             fids = [f for f, gg in groups.items() if gg == g]
-            opener = find_opener(fids, analyses, footage, length, used, gap)
+            opener = find_opener(fids, analyses, footage, length, used, gap, prefer=prefer)
             if opener is not None:
                 clips.insert(k, opener)
                 used.append(opener)

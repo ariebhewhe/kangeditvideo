@@ -397,6 +397,10 @@ class MediaBin(QWidget):
         else:
             self._bin_edit(lambda: binlib.add_bin(self.project, name), f"New bin “{name}”", name)
 
+    def add_to_broll(self, ids: list[str]):
+        self._bin_edit(lambda: binlib.move_to_bin(self.project, ids, binlib.BROLL),
+                       f"Added {len(ids)} item(s) to the {binlib.BROLL} bin: scenes open with it first")
+
     def move_to_bin(self, ids: list[str], name: str):
         self._bin_edit(lambda: binlib.move_to_bin(self.project, ids, name),
                        f"Moved {len(ids)} item(s) " + (f"to the bin “{name}”" if name else "out of their bin"))
@@ -454,6 +458,8 @@ class MediaBin(QWidget):
             m.exec(self.stack.currentWidget().viewport().mapToGlobal(pos))
             return
         self._bin_menu(m, ids)
+        a = m.addAction(f"Add to {binlib.BROLL} bin", lambda: self.add_to_broll(ids))
+        a.setToolTip("Cutaway footage (views, travel, details): scenes of a long-form auto edit open with it first")
         m.addSeparator()
         for key, label in (("append_best", "Append best moment to timeline"),
                            ("append_whole", "Append whole clip to timeline"),

@@ -27,6 +27,7 @@ RATIOS = {
     "21:9": ("21:9 (cinema)", 2.39),
 }
 ALL, UNSORTED = "\x00all", ""          # bin choices besides the bins themselves
+BROLL = "B-roll"                       # footage for cutaways: scenic openers come from it first
 
 
 def shown_size(f: Footage) -> tuple[int, int]:
