@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-16
+
 ### Added
 - **Edit from a script**: ✨ Auto Edit → **📜 Script** (or *Tools → Auto Edit from script…*). Paste the script;
   each line is found in the footage's transcripts by text similarity and the clips are laid out in the script's
