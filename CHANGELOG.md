@@ -18,6 +18,9 @@ and the Release workflow uses that section as the GitHub release notes.
 - Multicam switching with the whole recording: the transitions from the Auto Edit settings weren't applied.
   The main track is now cut at every angle change, so the transitions (and the angle shots) play there; the
   recording keeps its length and stays in sync.
+- Windows updates: the restart helper could leave some files of the old version in place (robocopy skips files
+  of the same size and time stamp, which a new build can have). It now copies every file, and writes what it
+  did to `update.log` in the logs folder.
 
 ## [0.5.0] - 2026-10-16
 
