@@ -74,7 +74,7 @@ def _shown(window):
     return sorted(b.tree.topLevelItem(i).text(0) for i in range(b.tree.topLevelItemCount()))
 
 
-def test_media_panel_bins_filters_and_select_all(window, project, qapp):
+def test_media_panel_bins_filters_and_select_all(window, project, qapp, monkeypatch):
     window.set_project(project)
     b = window.bin
     b.cb_kind.setCurrentIndex(b.cb_kind.findData("video"))
@@ -89,10 +89,8 @@ def test_media_panel_bins_filters_and_select_all(window, project, qapp):
     b.show_bin("Interviews")
     assert _shown(window) == ["cinema.mov", "wide.mp4"]
     assert b.tree.topLevelItem(0).text(7) == "Interviews"
-    window.show()
-    window.activateWindow()
-    b.tree.setFocus()
-    qapp.processEvents()
+    # Ctrl+A with the focus in the Media panel (given directly: a test window may not get the OS focus)
+    monkeypatch.setattr("kangedit.ui.main_window.QApplication.focusWidget", staticmethod(lambda: b.tree))
     b.tree.clearSelection()
     window._select_all()                                        # Ctrl+A in the Media panel: what it shows
     assert sorted(b.selected_ids()) == sorted(ids)
