@@ -150,15 +150,22 @@ def _loud(a: Optional[Analysis], t0: float, t1: float) -> bool:
 
 
 def apply_edit_style(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict[str, Analysis],
-                     s: AutoEditSettings, switches: Optional[set[int]] = None) -> None:
-    """Transitions and J/L cuts for an automatic edit (in place). switches: indices of the clips that start
-    on another camera angle (multicam switching): those cuts count as scene changes."""
+                     s: AutoEditSettings, switches: Optional[set[int]] = None,
+                     groups: Optional[dict[str, int]] = None) -> None:
+    """Transitions and J/L cuts for an automatic edit (in place). A scene change is a cut into another time
+    group of footage (`groups`: footage id -> scene, see scenes.time_groups), into or out of the hook, or, without
+    groups, into another file or a jump of over 30 s in one. switches: indices of the clips that start on
+    another camera angle (multicam switching): those cuts count as scene changes too."""
     n_style = 0
     switches = switches or set()
     for k in range(1, len(clips)):
         a, b = clips[k - 1], clips[k]
         b.transition, b.audio_split = "", 0.0
-        scene = a.footage_id != b.footage_id or abs(b.src_in - a.src_out) > 30.0 or k in switches
+        if groups and a.footage_id in groups and b.footage_id in groups:
+            scene = groups[a.footage_id] != groups[b.footage_id] or (a.label == "hook") != (b.label == "hook")
+        else:
+            scene = a.footage_id != b.footage_id or abs(b.src_in - a.src_out) > 30.0
+        scene = scene or k in switches
         continuous = a.footage_id == b.footage_id and abs(b.src_in - a.src_out) < 0.01   # one recording, cut
         bookend = a.label == "opening" or b.label == "closing"
         if s.transitions == "all" or (s.transitions == "scenes" and (scene or bookend)):

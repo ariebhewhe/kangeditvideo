@@ -28,6 +28,7 @@ from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook
 from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
+from .. import scenes
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
@@ -1395,14 +1396,27 @@ class MainWindow(QMainWindow):
                 ends = [c for c in (intro, outro) if c is not None]
                 sel = copy.copy(s)
                 sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
+            # Scenes are time groups of the footage; in a long-form edit in story order each scene after the
+            # first opens with a scenic / travel shot from it (room for them is kept in the target).
+            groups = scenes.time_groups(footage, order)
+            openers = (s.video_format == "long" or s.order == "chronological") and s.order != "best_first"
+            opener_len = round((s.clip_min + s.clip_max) / 2, 2)
+            if openers and len(set(groups.values())) > 1:
+                sel = copy.copy(sel)
+                sel.target_duration = max(s.clip_min, sel.target_duration
+                                          - opener_len * (len(set(groups.values())) - 1))
             progress(0.8, "Choosing the best moments…")
-            body = select(footage, analyses, sel, order,
-                          existing=existing + blockers + [c for c in (intro, outro) if c], avoid=avoid, seed=seed)
+            used = existing + blockers + [c for c in (intro, outro) if c]
+            body = select(footage, analyses, sel, order, existing=used, avoid=avoid, seed=seed)
             hooks = list(itertools.takewhile(lambda c: c.label == "hook", body))
             body = body[len(hooks):]
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
-            apply_edit_style(clips, footage, analyses, s)
+            if openers and len(set(groups.values())) > 1:
+                n = scenes.add_scene_openers(clips, groups, analyses, footage, opener_len, s.min_gap, used)
+                if n:
+                    notes.append(f"{n} scene(s) open with a scenic shot")
+            apply_edit_style(clips, footage, analyses, s, groups=groups)
             plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
                     if multi and multi.get("template") == "switch" else None)
             return analyses, clips, notes, syncs, faces, plan

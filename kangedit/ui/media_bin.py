@@ -412,6 +412,11 @@ class MediaBin(QWidget):
             self._bin_edit(lambda: binlib.rename_bin(self.project, name, new), f"Renamed the bin to “{new.strip()}”",
                            new.strip())
 
+    def clear_bins(self):
+        n = len(binlib.all_bins(self.project))
+        self._bin_edit(lambda: binlib.clear_bins(self.project),
+                       f"Cleared {n} bin(s) (all the media stays in the project)", binlib.ALL)
+
     def delete_bin(self, name: str):
         self._bin_edit(lambda: binlib.delete_bin(self.project, name),
                        f"Deleted the bin “{name}” (its media stays in the project)", binlib.ALL)
@@ -437,6 +442,9 @@ class MediaBin(QWidget):
             sub.addSeparator()
             sub.addAction(f"Rename bin “{cur}”…", lambda: self.rename_bin(cur))
             sub.addAction(f"Delete bin “{cur}” (keeps its media)", lambda: self.delete_bin(cur))
+        if binlib.all_bins(self.project):
+            sub.addSeparator()
+            sub.addAction("Clear all bins (keeps the media)", self.clear_bins)
 
     def _menu(self, pos):
         ids = self.selected_ids()

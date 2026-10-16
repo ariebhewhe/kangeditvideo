@@ -6,6 +6,19 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- Long-form auto edit: **scenes** are time groups of the footage (a gap of over 30 minutes between recordings,
+  such as another day or place, starts a new one). Each scene after the first opens with a scenic / travel shot
+  from that scene (a view without faces or talking, sharp, colourful, steady or gently panning) when it has one,
+  and *Transitions between scenes* play between these scenes rather than at every change of file.
+- Media panel: right-click → *Bins* → **Clear all bins** (the media stays in the project; undoable).
+
+### Changed
+- The recording date of a file is the oldest one it carries: its creation time tag, its file creation date or its
+  modification date (copying a file renews its creation date; a camera with its clock unset writes a wrong tag,
+  and dates before 1995 are ignored). Bins by date, story order and the choice of the files searched for the
+  opening and closing all use it.
+
 ## [0.5.1] - 2026-10-16
 
 ### Fixed
