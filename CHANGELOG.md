@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-10-17
+
 ### Added
 - **Quick first look**: new footage is first analysed from its keyframes only, every file at once, many times
   faster than the full analysis, so it can be browsed and edited (auto edit included) at once. The full

@@ -271,3 +271,14 @@ def test_the_speech_model_suits_the_computer(monkeypatch):
     monkeypatch.setattr(os, "cpu_count", lambda: 12)               # a 6-core, 12-thread Ryzen 5 3600
     assert captions.cpu_threads() == 6
     assert Project().settings.whisper_model == "auto"
+
+
+@needs_models
+def test_smarter_analysis_is_on_by_default(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        assert w.a_smart.isChecked() and w.a_smart.isEnabled() and smart.enabled()
+    finally:
+        w.project.dirty = False
+        w.close()
