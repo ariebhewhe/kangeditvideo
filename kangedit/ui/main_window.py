@@ -111,6 +111,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.project = Project()
         self.analyses: dict[str, Analysis] = {}
+        self._stale_thumbs: set[str] = set()
+        self._analysis_refresh = QTimer(self, singleShot=True, interval=500)
+        self._analysis_refresh.timeout.connect(self._refresh_after_analysis)
         self._refine_lock = threading.Lock()
         self._refine_queue: list = []
         self._refine_cancel = threading.Event()
@@ -1190,8 +1193,8 @@ class MainWindow(QMainWindow):
     def queue_analysis(self, ids: list[str], force: bool = False):
         """Analyze footage in two passes: a quick first look from the keyframes (all files at once, in a few
         seconds each), then the full analysis in the background, replacing each quick look as it finishes.
-        Analyses made without the smarter analysis get it added (when it's on). `force` (Re-analyze) runs the
-        full analysis at once."""
+        Analyses made without the smarter analysis get it added in the background too (when it's on), never
+        holding up other tasks. `force` (Re-analyze) runs the full analysis at once."""
         todo = [self.project.footage[fid] for fid in ids if fid in self.project.footage
                 and not self.project.footage[fid].is_image]
         if not force:
@@ -1216,16 +1219,17 @@ class MainWindow(QMainWindow):
                 return [], failed
             full, first, upgrade = [], [], []
             for f in todo:
-                a = load_plain(f)
+                a = self.analyses.get(f.id) or load_plain(f)     # (opening a project has loaded most)
                 if a is None:
                     first.append(f)
                     full.append(f)
                     continue
-                self.analysis_ready.emit(f.id, a)
+                if f.id not in self.analyses:            # (opening a project loads them already)
+                    self.analysis_ready.emit(f.id, a)
                 if a.quick:
                     full.append(f)
-                if needs_smart(f, a):
-                    upgrade.append((f, a))
+                elif needs_smart(f, a):
+                    upgrade.append(f)
             if first:
                 done = [0]
 
@@ -1244,24 +1248,14 @@ class MainWindow(QMainWindow):
                 workers = max(1, min(len(first), (os.cpu_count() or 4) // 2))
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quick-look") as ex:
                     list(ex.map(look, first))
-            for k, (f, a) in enumerate(upgrade):
-                if cancel.is_set():
-                    break
-                progress(k / len(upgrade), f"Smarter analysis {k + 1}/{len(upgrade)}: {f.name}")
-                try:
-                    if make_smart(f, a, cancel):
-                        a.save(f.analysis_path or analysis_path_for(f))
-                        self.analysis_ready.emit(f.id, a)
-                except Exception:  # noqa: BLE001 - the plain analysis still works
-                    traceback.print_exc()
-            return full, failed
+            return full + upgrade, failed
 
         def done(res):
-            full, failed = res
+            later, failed = res
             if failed:
                 QMessageBox.warning(self, APP_NAME, "Analysis failed:\n\n" + "\n".join(failed)[-1500:])
-            if full:
-                self._refine(full)
+            if later:
+                self._refine(later)
 
         name = f"Analyzing {todo[0].name}" if len(todo) == 1 else f"Analyzing {len(todo)} clips"
         self.tasks.submit(name, job, done, self._task_error("Analysis"))
@@ -1287,6 +1281,29 @@ class MainWindow(QMainWindow):
             if not batch:
                 break
             failed: list[str] = []
+            # Files with a full analysis only need the smarter analysis added (no decoding): those first.
+            rest = []
+            for k, f in enumerate(batch):
+                if cancel.is_set():
+                    return
+                a = self.analyses.get(f.id)
+                if a is None or a.quick:
+                    rest.append(f)
+                    continue
+                if not needs_smart(f, a):
+                    continue
+                self.refine_status.emit(f"Smarter analysis in the background: {k + 1}/{len(batch)} {f.name}")
+                try:
+                    if make_smart(f, a, cancel):
+                        a.save(f.analysis_path or analysis_path_for(f))
+                        self.analysis_ready.emit(f.id, a)
+                except Cancelled:
+                    return
+                except Exception:  # noqa: BLE001 - the plain analysis still works
+                    traceback.print_exc()
+            batch = rest
+            if not batch:
+                continue
             try:
                 analyze_many(batch, lambda p, m="": self.refine_status.emit(f"Full analysis in the background: {m} "
                                                                              f"({p:.0%})"),
@@ -1321,11 +1338,19 @@ class MainWindow(QMainWindow):
     def _on_analysis_ready(self, fid: str, a: Analysis):
         if fid in self.project.footage:
             self.analyses[fid] = a
-            self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] != fid}
+            self._stale_thumbs.add(fid)
             f = self.project.footage[fid]
             if f.log_pending:
                 self._log_from_picture(f, list(a.thumbs))
-            self.refresh_all(captions=False)
+            # Hundreds of files finish one after the other (opening a big project, an import): one refresh for
+            # all that came in within half a second, not a full refresh of the window for each.
+            if not self._analysis_refresh.isActive():
+                self._analysis_refresh.start()
+
+    def _refresh_after_analysis(self):
+        stale, self._stale_thumbs = self._stale_thumbs, set()
+        self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] not in stale}
+        self.refresh_all(captions=False)
 
     def queue_proxies(self, ids: list[str]):
         height = self.project.settings.proxy_height
