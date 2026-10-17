@@ -190,8 +190,11 @@ class AutoEditDialog(QDialog):
         f = QFormLayout(g)
         self.cb_style = _combo(STYLE_LABELS, last.style)
         self.cb_order = _combo(ORDERS, last.order)
-        self.chk_every = QCheckBox("Use every footage at least once (if it fits)")
+        self.chk_every = QCheckBox("Use every footage at least once")
         self.chk_every.setChecked(last.use_every_footage)
+        self.chk_every.setToolTip("Every usable file gets a clip, shorter ones when that fits them in the target "
+                                  "length; with more files than fit even at the shortest clip length, the edit "
+                                  "runs longer than the target.")
         self.chk_replace = QCheckBox("Replace current timeline (otherwise append)")
         self.chk_replace.setChecked(last.replace_timeline)
         f.addRow("Prioritize", self.cb_style)

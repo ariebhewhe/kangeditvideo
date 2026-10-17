@@ -6,6 +6,16 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-17
+
+### Fixed
+- *Use every footage at least once* now uses every usable file (0.6.3 stopped at 90% once past the target
+  length, leaving files out). With more files than fit even at the shortest clip length, the edit runs longer
+  than the target; the checkbox's tooltip says so.
+- The timeline warned that clips overlap or sit too close to another clip of the same footage for the pieces
+  *Remove fillers* leaves (one take cut straight together, one piece right after the other). Jump cuts like
+  these aren't counted any more; a moment shown again elsewhere still is.
+
 ## [0.6.3] - 2026-10-16
 
 ### Changed
