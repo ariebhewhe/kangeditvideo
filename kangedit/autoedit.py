@@ -82,6 +82,7 @@ class AutoEditSettings:
     bookends: bool = False          # find the opening and closing (file names, recording time, speech)
     pacing: str = "steady"          # polish.PACING key: how clip lengths change along the edit
     cut_on_pauses: bool = True      # cuts between words, not in the middle of one
+    whole_sentences: bool = True    # long form: each clip with speech starts and ends on whole sentences
     beat_sync: bool = True          # cuts on the beat of the music on the timeline (when there is music)
     remove_fillers: bool = False    # take out "um / eh / anu", long pauses and false starts (needs transcripts)
     shot_variety: bool = True       # avoid three shots of the same size in a row
