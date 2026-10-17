@@ -182,9 +182,11 @@ def test_two_passes_in_the_app(qapp, monkeypatch, tmp_path):
             open(f.path, "wb").close()
         p = Project()
         p.footage = {f.id: f for f in files}
-        monkeypatch.setattr(w, "queue_analysis", lambda ids, force=False: None)
+        # No analysis while the project opens; then the real queue_analysis. (Not monkeypatch.undo(): that would
+        # also drop conftest's guards against message boxes, and a late box from an earlier test would block.)
+        w.queue_analysis = lambda ids, force=False: None
         w.set_project(p)
-        monkeypatch.undo()
+        del w.queue_analysis
         looked, full_runs = [], []
 
         def quick(f, cancel=None):
