@@ -75,7 +75,7 @@ def test_repeats_are_dropped_jump_cuts_kept():
 def test_merged_transcript_in_recording_order(tmp_path):
     import os
     a, b = _talk(str(tmp_path / "b_later.mp4")), _talk(str(tmp_path / "a_first.mp4"))
-    for f, t in ((a, 2_000_000_000), (b, 1_900_000_000)):
+    for f, t in ((a, 1_700_000_000), (b, 1_600_000_000)):       # in the past: macOS also counts the creation date
         open(f.path, "wb").close()
         os.utime(f.path, (t, t))
     b.transcript = _words([("Pagi.", 0.5, 1.0)])
