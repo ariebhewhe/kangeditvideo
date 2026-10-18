@@ -7,6 +7,9 @@ and the Release workflow uses that section as the GitHub release notes.
 ## [Unreleased]
 
 ### Changed
+- A *Hook first* edit has its hook only at the beginning of the timeline. Long-form *Hook first* edits also
+  opened every later scene with a scenic shot, with a dissolve and its sound leading in, which played like
+  another hook in every scene; scene openers are now only added to edits in story order (*Chronological*).
 - The hook is for the whole video again, not one moment per scene: the long-form teaser takes the strongest
   moments of all the footage scored together (still never the same moment twice, nor one the edit already
   shows), strongest first, wherever they were filmed. Before, each of its moments came from another scene

@@ -1749,9 +1749,9 @@ class MainWindow(QMainWindow):
                 ends = [c for c in (intro, outro) if c is not None]
                 sel = copy.copy(s)
                 sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
-            # Scenes are time groups (and places) of the footage; in a long-form edit in story order each scene
-            # after the first opens with a scenic / travel shot from it, B-roll first (room for them is kept in
-            # the target).
+            # Scenes are time groups (and places) of the footage; in an edit in story order each scene after the
+            # first opens with a scenic / travel shot from it, B-roll first (room for them is kept in the target).
+            # A hook-first edit has one hook, at the start of the timeline: no opener plays like another one.
             everything = {**footage, **broll}
             scenes.read_locations(everything)
             for fid, f in broll.items():
@@ -1760,7 +1760,7 @@ class MainWindow(QMainWindow):
             # The scenes come from the edited footage alone; B-roll joins the scene it was recorded in.
             groups = scenes.join_scenes(scenes.time_groups(footage, order), footage, broll)
             n_scenes = len({groups[f] for f in footage if f in groups})
-            openers = (s.video_format == "long" or s.order == "chronological") and s.order != "best_first"
+            openers = s.order == "chronological"
             opener_len = round((s.clip_min + s.clip_max) / 2, 2)
             if openers and n_scenes > 1:
                 sel = copy.copy(sel)

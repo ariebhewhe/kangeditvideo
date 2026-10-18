@@ -1,6 +1,7 @@
 """Recording dates (the oldest one a file carries), scenes as time groups, scenic openers and transitions
 between scenes, and clearing all bins."""
 
+import itertools
 import os
 import threading
 import time
@@ -138,6 +139,32 @@ def test_long_form_auto_edit_opens_scenes(qapp, tmp_path, monkeypatch):
         assert clips[firsts_b].transition == "dissolve"
         assert all(c.transition == "" for k, c in enumerate(clips[1:], 1) if k != firsts_b)
         assert "scenic shot" in w.lbl_status.text()
+    finally:
+        w.project.dirty = False
+        w.close()
+
+
+def test_hook_first_edit_has_its_hook_only_at_the_start(qapp, tmp_path, monkeypatch):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        fs, footage, analyses, groups = _three_days(tmp_path)
+        p = Project()
+        p.footage = footage
+        w.set_project(p)
+        monkeypatch.setattr("kangedit.ui.main_window.load_or_analyze", lambda f, **kw: analyses[f.id])
+        monkeypatch.setattr(w, "queue_analysis", lambda ids, force=False: None)
+        monkeypatch.setattr(w.tasks, "submit",
+                            lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+        for fmt in ("long", "short"):
+            s = AutoEditSettings(video_format=fmt, target_duration=60.0, clip_min=4.0, clip_max=8.0, min_gap=2.0,
+                                 order="hook", transitions="scenes", bookends=False)
+            w._run_auto_edit(s, list(footage), None)
+            labels = [c.label for c in w.project.clips]
+            n = len(list(itertools.takewhile(lambda x: x == "hook", labels)))
+            assert n >= 1 and "hook" not in labels[n:]                 # the hook opens the video...
+            assert "scene" not in labels                                # ...and no scene opens with another
+            assert len({groups[c.footage_id] for c in w.project.clips[n:]}) == 3
     finally:
         w.project.dirty = False
         w.close()
