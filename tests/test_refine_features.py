@@ -553,3 +553,45 @@ def test_moment_frames_decodes_a_real_clip(window, tmp_path):
     frames = window._moment_frames(TimelineClip(f.id, 1.0, 3.0), threading.Event())
     assert len(frames) == 24 and frames[0].shape[0] == 240
     assert np.abs(frames[0].astype(int) - frames[-1].astype(int)).mean() > 5      # it moves
+
+
+def test_transcript_of_the_whole_edit(window):
+    footage, analyses = two_files()
+    fa, fb = list(footage)
+    footage[fa].transcript = [{"s": 1.0, "e": 1.5, "w": "Hello"}, {"s": 1.6, "e": 2.0, "w": "there."},
+                              {"s": 12.0, "e": 12.5, "w": "Look!"}]
+    footage[fb].transcript = None
+    window.project.footage = footage
+    a, b, c = TimelineClip(fa, 0.5, 2.5), TimelineClip(fb, 4.0, 6.0), TimelineClip(fa, 11.0, 13.0)
+    window.project.clips = [a, b, c]
+    panel = window.edit_text
+    window.show_refine(panel)
+    rows = [panel.list.item(k).text() for k in range(panel.list.count())]
+    assert len(rows) == 3 and rows[0].endswith("Hello there.") and rows[2].endswith("Look!")
+    assert "no transcript yet" in rows[1] and "transcribe them" in panel.info.text()
+    panel._clicked(panel.list.item(2))                      # goes to the third clip
+    assert abs(window.viewer.t - 4.0) < 0.05
+    panel.search.setText("look")
+    assert panel.list.item(0).isHidden() and not panel.list.item(2).isHidden()
+    panel.search.setText("")
+    # dragged into another order: the edit follows (undoable), the numbers and times too
+    panel.reordered.emit([c.id, a.id, b.id])
+    assert [x.id for x in window.project.clips] == [c.id, a.id, b.id]
+    assert panel.list.item(0).text().startswith("1.  00:00") and panel.list.item(0).text().endswith("Look!")
+    window.undo()
+    assert [x.id for x in window.project.clips] == [a.id, b.id, c.id]
+    window.viewer.time_changed.emit(2.5)                   # the clip playing is marked
+    assert panel.list.item(1).background().color().alpha() > 0
+
+
+def test_moving_a_transcript_row_moves_the_clip(window):
+    from PySide6.QtCore import QModelIndex
+    footage, analyses = two_files()
+    fa, fb = list(footage)
+    window.project.footage = footage
+    a, b, c = TimelineClip(fa, 0.5, 2.5), TimelineClip(fb, 4.0, 6.0), TimelineClip(fa, 11.0, 13.0)
+    window.project.clips = [a, b, c]
+    window.show_refine(window.edit_text)
+    m = window.edit_text.list.model()
+    assert m.moveRow(QModelIndex(), 2, QModelIndex(), 0)       # the row a drag moves
+    assert [x.id for x in window.project.clips] == [c.id, a.id, b.id]

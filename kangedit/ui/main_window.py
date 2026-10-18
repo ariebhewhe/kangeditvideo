@@ -55,6 +55,7 @@ from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
 from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
                       ProxyDialog, TranscriptDialog)
+from .edit_transcript import EditTranscript
 from .flow import FlowBar
 from .inspector import Inspector, wrap_angle
 from .layer_panel import PLACEMENTS, LayerPanel
@@ -99,6 +100,10 @@ class RefineTabs(QTabWidget):
 
     def setCurrentWidget(self, panel: QWidget) -> None:   # noqa: N802 (Qt name) — accepts the panel itself
         super().setCurrentWidget(self._pages.get(panel, panel))
+
+    def shows(self, panel: QWidget) -> bool:
+        """The tab of this panel is the one showing."""
+        return self.currentWidget() is self._pages.get(panel, panel)
 
 
 class MainWindow(QMainWindow):
@@ -147,6 +152,7 @@ class MainWindow(QMainWindow):
         self.sfx_panel = SoundPanel()
         self.text_panel = TextPanel(self.project)
         self.layer_panel = LayerPanel(self.project)
+        self.edit_text = EditTranscript(self.project)
         self._exported = False
         self._tour: Optional[TourOverlay] = None
 
@@ -170,6 +176,7 @@ class MainWindow(QMainWindow):
         tabs.add(self.caps_panel, "💬 Captions")
         tabs.add(self.text_panel, "🔤 Text")
         tabs.add(self.sfx_panel, "🔊 Sounds")
+        tabs.add(self.edit_text, "🗒 Transcript")
         tabs.setTabToolTip(0, "Colour, log conversion, reframe, rotation, speed, volume and transition of the selected clip "
                               "(on the main track or a video layer)")
         tabs.setTabToolTip(1, "Video layers: position, size, crop, rotation, opacity, fades and volume of the clip "
@@ -178,6 +185,8 @@ class MainWindow(QMainWindow):
         tabs.setTabToolTip(2, "Generate, edit, style and delete captions")
         tabs.setTabToolTip(3, "Animated titles and text")
         tabs.setTabToolTip(4, "Sound effects, music and auto ducking")
+        tabs.setTabToolTip(5, "What is said in the edit, clip by clip: click to go there, drag to reorder the clips")
+        tabs.currentChanged.connect(lambda _i: self._refresh_edit_text())
         self.right_tabs = tabs
         for panel in (self.inspector, self.layer_panel, self.caps_panel, self.text_panel, self.sfx_panel, self.viewer):
             compact_combos(panel)
@@ -313,6 +322,9 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Make a highlight reel (9:16)…", self.highlight_reel, None,
                               "Turn the edit into a 30-60 s vertical reel of its best moments, framed on the faces "
                               "(Undo brings the edit back)"))
+        m.addAction(self._act("YouTube chapters…", lambda: self.chapters_dialog(), None,
+                              "Chapter timestamps for the video's description, from the edit's scenes and what is "
+                              "said; title cards for them"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -583,6 +595,11 @@ class MainWindow(QMainWindow):
         self.timeline.btn_slip.toggled.connect(lambda _on: self._update_slip_text())
         self.timeline.slip_text.slip_to.connect(self.slip_clip_to)
         self.timeline.slip_text.transcribe.connect(lambda fid: self.queue_transcription([fid]))
+        self.edit_text.seek.connect(self.viewer.seek)
+        self.edit_text.reordered.connect(self._reorder_by_transcript)
+        self.edit_text.transcribe.connect(self._transcribe_edit)
+        self.viewer.time_changed.connect(lambda t: self.edit_text.show_time(t)
+                                         if self.right_tabs.shows(self.edit_text) else None)
         self.tl.sounds_changed.connect(self._sounds_changed)
         self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
@@ -840,6 +857,7 @@ class MainWindow(QMainWindow):
         self.inspector.set_clip(self._inspected())
         if not self.timeline.slip_text.isHidden():
             self._update_slip_text(slipping=True)
+        self._refresh_edit_text()
         self.layer_panel.set_clip(self.selected_overlay())
         self.viewer.canvas.selected_overlay = self.tl.selected_overlay
         self.text_panel.refresh()
@@ -908,7 +926,7 @@ class MainWindow(QMainWindow):
         self.analyses = {}
         self._tried_alts = {}
         self._auto_history = []
-        for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel, self.layer_panel):
+        for w in (self.viewer, self.tl, self.bin, self.inspector, self.text_panel, self.layer_panel, self.edit_text):
             w.set_project(project)
         self._exported = False
         self._sync_project_controls()
@@ -2673,6 +2691,41 @@ class MainWindow(QMainWindow):
                                 + (f" ({locked} item(s) in use were kept)" if locked else ""))
 
     # ================================================================== timeline editing
+    def chapters_dialog(self):
+        from .chapters_dialog import ChaptersDialog
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Make an edit first (✨ Auto Edit or clips on the timeline).")
+            return
+        dlg = ChaptersDialog(self.project, self)
+        dlg.exec()
+        if dlg.added:
+            self.refresh_all()
+
+    def _refresh_edit_text(self):
+        """The edit's transcript follows the timeline while its tab shows."""
+        if self.right_tabs.shows(self.edit_text):
+            self.edit_text.refresh()
+            self.edit_text.show_time(self.viewer.t)
+
+    def _reorder_by_transcript(self, ids: list):
+        """Clips dragged into another order in the edit's transcript: the timeline follows."""
+        by_id = {c.id: c for c in self.project.clips}
+        if sorted(ids) != sorted(by_id):
+            self._refresh_edit_text()
+            return
+        self.project_checkpoint()
+        self.project.clips = [by_id[i] for i in ids]
+        multicam.follow(self.project)
+        self._after_structure_change()
+        self.lbl_status.setText("Clips reordered from the transcript")
+
+    def _transcribe_edit(self):
+        todo = list(dict.fromkeys(c.footage_id for c in self.project.clips
+                                  if (f := self.project.footage.get(c.footage_id)) is not None and f.has_audio
+                                  and not f.is_image and f.transcript is None))
+        if todo:
+            self.queue_transcription(todo)
+
     def _after_structure_change(self):
         self.refresh_all()
         self._schedule_audio()
