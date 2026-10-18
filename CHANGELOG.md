@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
 ### Added
 - **Dynamic zoom** (Clip tab): a slow zoom in or out, or a pan across the picture (also zoom + pan), as
   DaVinci Resolve's Dynamic Zoom, with how much it zooms and its easing. Brings life to photos and steady
@@ -62,34 +64,11 @@ and the Release workflow uses that section as the GitHub release notes.
   finished proxy no longer mixes the sound again, and a mix taking a while is shown in the status bar.
 - Speech under loud constant noise (a car's road roar) gave no text at all: voice activity detection heard
   no voice in it, so the file was cached as "nobody speaks". When the background is loud the recogniser now
-  hears the whole sound; a fake sign-off Whisper adds at the end of such a file ("Terima kasih telah
-  menonton!") and Chinese Qwen3-ASR hears in the noise of a non-Chinese video are dropped. Files cached
-  empty by an older version are transcribed again.
-- Qwen3-ASR did nothing: the model it downloaded from did not exist. It now downloads from a published
-  sherpa-onnx export (with a second one as fallback), hears the sound in 20 s pieces (its limit) and
-  collapses the phrase loops it can fall into over noise.
-- Downloading Qwen3-ASR stayed at 0 % on Windows: the download's progress bar wrote to a console the app
-  doesn't have, which stopped the download. Progress bars are off (the app shows its own), output with no
-  console to go to is dropped instead of failing, and a download that receives nothing for 3 minutes stops
-  with a message instead of waiting forever (it carries on where it stopped next time).
-- A clip with a dynamic zoom or stabilization was exported without its sound (cut from the wrong place in
-  its file), and the export failed when another clip followed it.
-- In Source mode, clicking a caption, a word in the 🗒 Transcript tab, a clip's "Other moment" or a timeline
-  menu item moved the file's playhead instead of the edit's: it now shows the edit there. Back from Source
-  mode after an Undo the playhead stays on the (shorter) edit; removing the file shown goes back to the edit;
-  I / O mark in and out in full screen too.
-- Stabilization did almost nothing on a clip that doesn't start its file: only every other frame's shake was
-  measured. Measured again (every frame) on first use.
-- An exported stabilized clip that turns showed black wedges at its edges (the preview didn't): the window is
-  cut larger, so its corners are picture.
-- 🎣 Hook: *More suggestions* skipped moments while some were ticked; a new hook clip kept the old moment's
-  face position and noise level.
-- YouTube chapters: an edit of only 1 or 2 clips gave fewer than the 3 chapters YouTube needs; taking the
-  title cards off didn't refresh the timeline.
+  hears the whole sound, and the fake sign-off Whisper adds at the end of such a file ("Terima kasih telah
+  menonton!") is dropped. Files cached empty by an older version are transcribed again.
+- On Windows, a download or error with no console to write to (the app runs without one) could fail; such
+  output is now dropped, and errors go to the log.
 - The timeline's right-click menu showed the J / L cut menu twice and no *Split at playhead*.
-- *Auto* uses Whisper when Qwen3-ASR can't be downloaded (no internet), instead of failing.
-- Closing KangEdit during a Qwen3-ASR transcription left its helper process running; it now ends with the
-  app. A long stretch of speech without pauses is cut for Qwen3-ASR where it is quietest, not mid-word.
 - The Refine panel could be made so narrow that its tabs (Layer, Caption, Text…) were cut off: its smallest
   width now shows every tab.
 
