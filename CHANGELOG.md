@@ -6,6 +6,29 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- **Dynamic zoom** (Clip tab): a slow zoom in or out, or a pan across the picture (also zoom + pan), as
+  DaVinci Resolve's Dynamic Zoom, with how much it zooms and its easing. Brings life to photos and steady
+  shots; the preview shows it as the export makes it.
+- **Stabilize** (Clip tab): smooths a shaky handheld clip. The camera's movement is measured once in the
+  background (optical flow, kept in the cache per file), the picture follows a steadier path, zoomed in just
+  enough to hide the edges; *Strength* goes from "take out the shake" to "hold it as on a tripod". Shown in the
+  preview as exported; an export measures what isn't measured yet.
+- **Transcript while slipping**: in Slip mode (or during an Alt / Shift slip) the clip's transcript shows
+  under the timeline buttons, the sentences it shows highlighted as you drag. Click a sentence (or find it by
+  its words) to slip the clip to start on it.
+- **Choose the hook**: 🎣 Hook (H) no longer swaps in a random strong moment. It shows the strongest moments
+  of the whole video as thumbnails (start, middle, end), the best ticked; tick the ones you like, set how many
+  clips the hook has (1-5) or ask for more suggestions.
+- **Hook clips** setting in ✨ Auto Edit: a hook of 1 to 5 clips (a teaser of 2 s moments), or automatic
+  (1 in short-form, 3 in long-form).
+
+### Fixed
+- Music just added to the timeline could stay silent in playback (the export had it): every proxy finished
+  in the background cancelled the preview sound being mixed and started it again, so on a big project, while
+  proxies were being made, the new mix never finished and playback kept the sound from before the music. A
+  finished proxy no longer mixes the sound again, and a mix taking a while is shown in the status bar.
+
 ### Changed
 - A *Hook first* edit has its hook only at the beginning of the timeline. Long-form *Hook first* edits also
   opened every later scene with a scenic shot, with a dissolve and its sound leading in, which played like
@@ -13,7 +36,7 @@ and the Release workflow uses that section as the GitHub release notes.
 - The hook is for the whole video again, not one moment per scene: the long-form teaser takes the strongest
   moments of all the footage scored together (still never the same moment twice, nor one the edit already
   shows), strongest first, wherever they were filmed. Before, each of its moments came from another scene
-  and was only the best of that scene. *Find a new hook clip* works the same way.
+  and was only the best of that scene. *🎣 Hook* suggests moments from the whole video the same way.
 
 ## [0.6.9] - 2026-10-17
 

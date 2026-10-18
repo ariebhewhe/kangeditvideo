@@ -22,6 +22,7 @@ from ..speed import RAMPS, SOUND_MODES, SPEED_PRESETS, sound_mode
 from ..speed import label as speed_label
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
 from .flow import FlowBar
+from .slip_transcript import SlipTranscript
 from .theme import CLIP_COLORS, fmt_time
 
 RULER = 24
@@ -1685,8 +1686,9 @@ class TimelinePanel(QWidget):
         self.btn_fade.setPopupMode(QToolButton.InstantPopup)
         self.btn_fade.setMenu(self._fade_menu())
         self.btn_hook = QToolButton(text="🎣 Hook")
-        self.btn_hook.setToolTip("Replace the first clip (the hook) with another strong moment not used in the "
-                                 "edit (H). Click again for the next one; Undo brings the previous back.")
+        self.btn_hook.setToolTip("Choose the opening hook (H): the strongest moments of the whole video as "
+                                 "thumbnails, the best ticked. Tick others, ask for more, and set how many clips "
+                                 "it has. Undo brings the previous hook back.")
         self.btn_alt = QToolButton(text="🔀 Other moment")
         self.btn_alt.setToolTip("Swap the selected clip for the best moment close by in its footage (R). Its length "
                                 "follows the new moment. Click again for the next one; Undo brings the previous back.")
@@ -1754,6 +1756,10 @@ class TimelinePanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(top)
+        # Slip mode: what is said in the selected clip's footage, to slip it to a sentence (main window fills it).
+        self.slip_text = SlipTranscript()
+        self.slip_text.hide()
+        lay.addWidget(self.slip_text)
         lay.addWidget(self.area, 1)
         lay.addWidget(self.scroll)
         self.view.heights_changed.connect(lambda _h: self._sync_heights())

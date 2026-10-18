@@ -202,12 +202,12 @@ def test_new_hook_goes_before_the_opening(window):
     fa = next(iter(footage))
     opening = TimelineClip(fa, 0.5, 4.5, label="opening")
     window.project.clips = [opening, TimelineClip(fa, 10.0, 15.0)]
-    window.new_hook()
+    window.new_hook(choose=False)
     clips = window.project.clips
     hooks = [c for c in clips if c.label == "hook"]
     assert len(hooks) >= 2 and clips[len(hooks)] is opening
     first = [(c.src_in, c.footage_id) for c in hooks]
-    window.new_hook()                                   # replaces the teaser, keeps the opening
+    window.new_hook(choose=False)                      # replaces the teaser, keeps the opening
     assert [c.label for c in window.project.clips].count("hook") == len(hooks)
     assert [(c.src_in, c.footage_id) for c in window.project.clips[:len(hooks)]] != first
 
@@ -285,3 +285,78 @@ def test_inspector_sets_dynamic_zoom_and_stabilize(window, monkeypatch):
     assert clip.stabilize == 0.0
     window.undo()
     assert window.project.clips[0].stabilize == pytest.approx(0.8)
+
+
+def test_slip_shows_the_transcript_and_slips_to_a_sentence(window):
+    clip = _project_with_clip(window, start=1.0, dur=2.0)
+    f = window.project.footage[clip.footage_id]
+    f.has_audio = True
+    f.transcript = [{"s": 0.5, "e": 0.9, "w": "Hello"}, {"s": 1.0, "e": 1.6, "w": "there."},
+                    {"s": 6.0, "e": 6.4, "w": "Look"}, {"s": 6.5, "e": 7.2, "w": "at"}, {"s": 7.3, "e": 7.9, "w": "this!"}]
+    panel = window.timeline.slip_text
+    window._on_select(clip.id)
+    assert panel.isHidden()                                   # Move mode: no transcript
+    window.timeline.btn_slip.setChecked(True)
+    assert not panel.isHidden() and panel.list.count() == 2
+    assert panel.list.item(0).text().endswith("Hello there.") and panel.list.item(0).font().bold()
+    assert not panel.list.item(1).font().bold()               # the clip (1-3 s) doesn't show the second
+    panel.search.setText("look")
+    assert panel.list.item(0).isHidden() and not panel.list.item(1).isHidden()
+    panel._clicked(panel.list.item(1))                        # slip to "Look at this!"
+    c = window.project.clips[0]
+    assert (c.src_in, c.src_out) == (6.0, 8.0) and panel.list.item(1).font().bold()
+    window.undo()
+    assert window.project.clips[0].src_in == 1.0
+    window.timeline.btn_move.setChecked(True)
+    assert panel.isHidden()
+    # a temporary slip (Alt / Shift drag in Move mode) shows it for the drag
+    window._slip_follow(clip.id, 1.5)
+    assert not panel.isHidden()
+    window.tl.slip_end.emit()
+    assert panel.isHidden()
+
+
+def test_hook_button_offers_the_strongest_moments_as_thumbnails(window, monkeypatch):
+    from kangedit.autoedit import HOOK_SUGGESTIONS
+    from kangedit.ui.hook_picker import HookPicker
+    footage, analyses = two_files()
+    for a in analyses.values():                          # a thumbnail a second, each a different grey
+        n = int(a.times[-1]) + 1
+        a.thumbs = np.stack([np.full((36, 64, 3), 5 * k, np.uint8) for k in range(n)])
+        a.thumb_times = np.arange(n, dtype=np.float32)
+    window.project.footage = footage
+    window.analyses.update(analyses)
+    window.project.settings.video_format = "short"
+    window.last_auto = AutoEditSettings(clip_min=1.5, clip_max=3.0, min_gap=1.0)
+    fa = next(iter(footage))
+    window.project.clips = [TimelineClip(fa, 2.0, 5.0), TimelineClip(fa, 12.0, 15.0)]
+    seen = {}
+
+    def run(dlg):
+        seen["first"] = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        assert len(dlg.cards) == HOOK_SUGGESTIONS
+        assert not dlg.cards[0][0].icon().isNull()                  # a picture of the moment
+        scores = [c.score for _, c in dlg.cards]
+        assert scores == sorted(scores, reverse=True)               # strongest first...
+        assert [b.isChecked() for b, _ in dlg.cards] == [True] + [False] * (HOOK_SUGGESTIONS - 1)   # ...ticked
+        assert all(abs(c.duration - 3.0) < 0.05 for _, c in dlg.cards)   # as long as the hook it replaces
+        dlg.sp_count.setValue(2)                                    # a 2-clip teaser: 2 s moments, top two ticked
+        assert [b.isChecked() for b, _ in dlg.cards][:3] == [True, True, False]
+        assert all(abs(c.duration - 2.0) < 0.05 for _, c in dlg.cards)
+        before = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        dlg.more()                                                  # others, not offered yet
+        assert not set(before) & {(c.footage_id, c.src_in) for _, c in dlg.cards}
+        dlg.cards[0][0].setChecked(False)
+        dlg.cards[2][0].setChecked(True)
+        seen["chosen"] = [(c.footage_id, c.src_in) for c in dlg.chosen()]
+        return HookPicker.Accepted
+
+    monkeypatch.setattr(HookPicker, "exec", run)
+    window.new_hook()
+    clips = window.project.clips
+    assert [c.label for c in clips[:2]] == ["hook", "hook"] and clips[2].label == ""
+    assert [(c.footage_id, c.src_in) for c in clips[:2]] == seen["chosen"]
+    assert len(clips) == 3 and clips[2].src_in == 12.0               # the hook replaced the first clip
+    assert window.last_auto.hook_clips == 2                         # the next auto edit's hook has 2 clips
+    window.undo()
+    assert [(c.src_in, c.label) for c in window.project.clips] == [(2.0, ""), (12.0, "")]

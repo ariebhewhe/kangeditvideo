@@ -18,9 +18,9 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame,
-                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QDockWidget,
+                               QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
+                               QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
                                QTabWidget, QTextEdit, QToolButton, QWidget)
 
 from .. import APP_NAME, autosave, camera, version_string
@@ -28,7 +28,7 @@ from .. import lut as lutlib
 from .. import keying, smart, spherical
 from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analyze, load_plain, make_smart,
                         needs_smart, quick_look, quick_path_for)
-from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
+from ..autoedit import (HOOK_SUGGESTIONS, AutoEditSettings, apply_edit_style, hook_plan, hook_suggestions,
                         natural_length, score_samples, select)
 from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
             self.tray = Tray(self, self.tasks)
             self.tray.show()
 
+        self._slip_shown = None          # what the Slip transcript shows (see _update_slip_text)
         self._measuring: set = set()     # (footage id, from, to) whose shake is being measured (stabilize.py)
         self._audio_done = True          # the latest preview mix is made (or failed)
         self._audio_said = False         # the status bar says a mix is being made
@@ -293,8 +294,9 @@ class MainWindow(QMainWindow):
                               "Ctrl+Shift+=", "Rebuild the automatic edit about a quarter longer than the timeline"))
         m.addAction(self._act("Regenerate auto edit at length…", lambda: self.regenerate_auto_edit(None), None,
                               "Rebuild the automatic edit with the same settings at a length you choose"))
-        m.addAction(self._act("Find a new hook clip", self.new_hook, "H",
-                              "Replace the opening hook with another strong moment not used in the edit"))
+        m.addAction(self._act("Choose the hook…", lambda: self.new_hook(), "H",
+                              "Choose the opening hook from the strongest moments of the whole video, as thumbnails "
+                              "(and how many clips it has)"))
         fin = m.addMenu("Finish the edit")
         for key, label, tip in (
                 ("beats", "Cut on the music's beat", "Move each cut to the nearest beat of the music on the timeline"),
@@ -576,6 +578,11 @@ class MainWindow(QMainWindow):
         self.tl.edit_finished.connect(self._on_timeline_finished)
         self.tl.slip_preview.connect(self.viewer.show_source)
         self.tl.slip_end.connect(lambda: self.viewer.show_source(None))
+        self.tl.slip_preview.connect(self._slip_follow)
+        self.tl.slip_end.connect(self._update_slip_text)
+        self.timeline.btn_slip.toggled.connect(lambda _on: self._update_slip_text())
+        self.timeline.slip_text.slip_to.connect(self.slip_clip_to)
+        self.timeline.slip_text.transcribe.connect(lambda fid: self.queue_transcription([fid]))
         self.tl.sounds_changed.connect(self._sounds_changed)
         self.tl.sound_dropped.connect(lambda paths, t: self.add_sounds(paths, t))
         self.sfx_panel.add_sound.connect(lambda path, name: self.add_sounds([path], None, [name]))
@@ -621,7 +628,7 @@ class MainWindow(QMainWindow):
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
         self.timeline.fades_changed.connect(self._fades_changed)
         self.timeline.btn_delete.clicked.connect(lambda: self.clip_action("delete", self.tl.selected))
-        self.timeline.btn_hook.clicked.connect(self.new_hook)
+        self.timeline.btn_hook.clicked.connect(lambda: self.new_hook())
         self.timeline.btn_undo.clicked.connect(self.undo)
         self.timeline.btn_redo.clicked.connect(self.redo)
         self.timeline.btn_alt.clicked.connect(lambda: self.clip_action("alt_moment", self._moment_clip()))
@@ -831,6 +838,8 @@ class MainWindow(QMainWindow):
             self.update_captions()
         self.viewer.refresh()
         self.inspector.set_clip(self._inspected())
+        if not self.timeline.slip_text.isHidden():
+            self._update_slip_text(slipping=True)
         self.layer_panel.set_clip(self.selected_overlay())
         self.viewer.canvas.selected_overlay = self.tl.selected_overlay
         self.text_panel.refresh()
@@ -1981,10 +1990,12 @@ class MainWindow(QMainWindow):
 
         self.tasks.submit("Multicam switching", job, done, self._task_error("Multicam switching"))
 
-    def new_hook(self):
+    def new_hook(self, choose: bool = True):
         """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
-        with different strong moments: one clip in short-form, a 2-3 clip teaser in long-form. On a timeline
-        without a hook (or that starts with the opening) the hook is put in front."""
+        with other strong moments of the whole video: one clip in short-form, a 2-3 clip teaser in long-form (or
+        as many as the auto edit's Hook setting asks). `choose`: offer the strongest moments as thumbnails to
+        choose from (and how many clips the hook has); else take the next strongest ones not tried yet. On a
+        timeline without a hook (or that starts with the opening) the hook is put in front."""
         clips = self.project.clips
         ids = [fid for fid in (self._auto_ids or list(self.project.footage))
                if fid in self.project.footage and fid in self.analyses]
@@ -1997,30 +2008,50 @@ class MainWindow(QMainWindow):
         old = list(itertools.takewhile(lambda c: c.label == "hook", clips))
         if not old and clips and clips[0].label != "opening" and n == 1:
             old = [clips[0]]
-        if n == 1 and old:
-            length = old[0].duration
         footage = {fid: self.project.footage[fid] for fid in ids}
         analyses = {fid: self.analyses[fid] for fid in ids}
-        for o in old:
-            if not any(_same_moment(o, t) for t in self._tried_hooks):
-                self._tried_hooks.append(TimelineClip.from_dict(o.to_dict()))
         rest = [c for c in clips if c not in old]
 
-        def find(avoid):
-            if n > 1:
-                return find_hook_montage(footage, analyses, s, avoid)
-            hook = find_hook(footage, analyses, s, length, avoid)
-            return [hook] if hook else []
+        def length_for(k: int) -> float:
+            """Seconds each moment of a k-clip hook lasts (one clip keeps the length the hook has)."""
+            if k == 1 and len(old) == 1:
+                return old[0].duration
+            ss = copy.copy(s)
+            ss.hook_clips = k
+            return hook_plan(ss)[1]
 
-        hooks = find(rest + self._tried_hooks)
-        if len(hooks) < n and self._tried_hooks:
-            # Every strong moment has been shown once: start the round again (still avoiding the timeline).
-            self._tried_hooks = [TimelineClip.from_dict(o.to_dict()) for o in old]
+        if choose:
+            from .hook_picker import HookPicker, card_name, strip
+
+            def fetch(k: int, shown: list) -> list:
+                return hook_suggestions(footage, analyses, s, rest + shown, max(HOOK_SUGGESTIONS, k), length_for(k))
+
+            dlg = HookPicker(self, n, fetch,
+                             lambda c: strip(self.analyses.get(c.footage_id), c.src_in, c.src_out),
+                             lambda c: card_name(c, self.project.footage[c.footage_id].name), length_for)
+            if dlg.exec() != QDialog.Accepted or not dlg.chosen():
+                return
+            hooks = [TimelineClip.from_dict({**c.to_dict(), "id": new_id()}) for c in dlg.chosen()]
+            if dlg.count != n:                       # the hook's length is remembered for the next auto edit
+                self.last_auto.hook_clips = dlg.count
+                self.qs.setValue("auto/hook_clips", dlg.count)
+        else:
+            for o in old:
+                if not any(_same_moment(o, t) for t in self._tried_hooks):
+                    self._tried_hooks.append(TimelineClip.from_dict(o.to_dict()))
+
+            def find(avoid):
+                return hook_suggestions(footage, analyses, s, avoid, n, length_for(n))
+
             hooks = find(rest + self._tried_hooks)
-        if not hooks:
-            self.lbl_status.setText("No other hook moment found (every strong moment is already in the edit).")
-            return
-        self._tried_hooks += [TimelineClip.from_dict(h.to_dict()) for h in hooks]
+            if len(hooks) < n and self._tried_hooks:
+                # Every strong moment has been shown once: start the round again (still avoiding the timeline).
+                self._tried_hooks = [TimelineClip.from_dict(o.to_dict()) for o in old]
+                hooks = find(rest + self._tried_hooks)
+            if not hooks:
+                self.lbl_status.setText("No other hook moment found (every strong moment is already in the edit).")
+                return
+            self._tried_hooks += [TimelineClip.from_dict(h.to_dict()) for h in hooks]
         self.project_checkpoint()
         for k, h in enumerate(hooks):
             h.label = "hook"
@@ -2039,7 +2070,7 @@ class MainWindow(QMainWindow):
         if len(hooks) > 1:
             what = f"{len(hooks)} clips, {sum(h.duration for h in hooks):.1f} s"
         else:
-            what = f"{f.name} at {hooks[0].src_in:.1f} s (score {hooks[0].score * 100:.0f})"
+            what = f"{f.name} at {hooks[0].src_in:.1f} s (score {(hooks[0].score or 0) * 100:.0f})"
         self.lbl_status.setText(f"New hook: {what}")
 
     def _best_for(self, fid: str, duration: Optional[float] = None, existing=None,
@@ -2626,8 +2657,59 @@ class MainWindow(QMainWindow):
 
     def _on_select(self, clip_id: str):
         self.inspector.set_clip(self._inspected())
+        self._update_slip_text()
         if clip_id:
             self.right_tabs.setCurrentWidget(self.inspector)
+
+    def _update_slip_text(self, slipping: bool = False):
+        """In Slip mode (or while a clip is slipped), the transcript of the selected clip's footage, under the
+        timeline's buttons."""
+        panel = self.timeline.slip_text
+        show = slipping or self.timeline.btn_slip.isChecked()
+        panel.setVisible(show)
+        if not show:
+            self._slip_shown = None
+            return
+        clip = self.selected_clip()
+        f = self.project.footage.get(clip.footage_id) if clip is not None else None
+        key = (clip.id if clip else "", f.id if f else "", len(f.transcript) if f and f.transcript else -1)
+        if key != self._slip_shown:
+            self._slip_shown = key
+            panel.show_clip(clip, f)
+        elif clip is not None:
+            panel.follow(clip.id, clip.src_in, clip.src_out)
+
+    def _slip_follow(self, clip_id: str, _src_t: float):
+        """A clip is slipped or trimmed: its transcript follows (shown for the drag, also in Move mode)."""
+        i = self.project.index_of(clip_id)
+        if i < 0:
+            return
+        if self.timeline.slip_text.clip_id != clip_id or self.timeline.slip_text.isHidden():
+            self.tl.selected = clip_id
+            self._update_slip_text(slipping=True)
+        c = self.project.clips[i]
+        self.timeline.slip_text.follow(clip_id, c.src_in, c.src_out)
+
+    def slip_clip_to(self, clip_id: str, src_in: float):
+        """Slip a clip to start at source time src_in (a sentence of its transcript), keeping its length."""
+        i = self.project.index_of(clip_id)
+        if i < 0:
+            return
+        c = self.project.clips[i]
+        f = self.project.footage.get(c.footage_id)
+        if f is None:
+            return
+        length = c.src_dur
+        a = round(min(max(0.0, src_in), max(0.0, f.duration - length)), 3)
+        if abs(a - c.src_in) < 1e-3:
+            return
+        self.project_checkpoint()
+        c.src_in, c.src_out = a, round(a + length, 3)
+        multicam.follow(self.project)
+        self._on_timeline_edited()
+        self._on_timeline_finished()
+        self.viewer.seek(self.project.clip_starts()[i])
+        self.lbl_status.setText(f"Slipped the clip to {fmt_time(a, frames=False)} in {f.name}")
 
     def _on_timeline_edited(self):
         if multicam.follow(self.project):      # the angles follow a trim / slip while it is dragged
@@ -3364,7 +3446,8 @@ class MainWindow(QMainWindow):
                      "<b>new moments</b>, and moments with dead silence are left out.",
                      lambda: self.grp_auto),
             TourStep("Swap moments",
-                     "<b>🎣 Hook</b> gives the edit a new opening hook (a quick 2-3 clip teaser in long-form).<br>"
+                     "<b>🎣 Hook</b> chooses the opening hook from the strongest moments of the whole video, "
+                     "as thumbnails (1 quick clip, or a teaser of up to 5).<br>"
                      "<b>🔀 Other moment</b> (R) swaps the selected clip for the best moment close by in its "
                      "footage; the clip takes that moment's length. Press again for the next one; "
                      "<b>↶ Undo</b> brings the previous back.",
@@ -4089,7 +4172,7 @@ class MainWindow(QMainWindow):
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
-            "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\nH — new hook\n"
+            "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\nH — choose the hook\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Shift+R — reset the layout\n"

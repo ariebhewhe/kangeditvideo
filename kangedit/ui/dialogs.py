@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDial
                                QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
-from ..autoedit import (FORMAT_PRESETS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
+from ..autoedit import (FORMAT_PRESETS, MAX_HOOK_CLIPS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
                         suggest_duration)
 from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS, merged_transcript
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
@@ -198,8 +198,19 @@ class AutoEditDialog(QDialog):
                                   "runs longer than the target.")
         self.chk_replace = QCheckBox("Replace current timeline (otherwise append)")
         self.chk_replace.setChecked(last.replace_timeline)
+        self.cb_hook = QComboBox()
+        self.cb_hook.addItem("Automatic (1 short-form, 3 long-form)", 0)
+        for n in range(1, MAX_HOOK_CLIPS + 1):
+            self.cb_hook.addItem("1 clip" if n == 1 else f"{n} clips (a teaser of 2 s moments)", n)
+        self.cb_hook.setCurrentIndex(max(0, self.cb_hook.findData(last.hook_clips)))
+        self.cb_hook.setToolTip("How many strong moments open the video as its hook (Clip order: Hook first). "
+                                "🎣 Hook on the timeline then suggests others to choose from.")
+        self.cb_order.currentIndexChanged.connect(
+            lambda: self.cb_hook.setEnabled(self.cb_order.currentData() == "hook"))
+        self.cb_hook.setEnabled(last.order == "hook")
         f.addRow("Prioritize", self.cb_style)
         f.addRow("Clip order", self.cb_order)
+        f.addRow("Hook", self.cb_hook)
         f.addRow(self.chk_every)
         f.addRow(self.chk_replace)
         lay.addWidget(g)
@@ -540,6 +551,7 @@ class AutoEditDialog(QDialog):
             max_uses=self.sp_uses.value(),
             use_every_footage=self.chk_every.isChecked(),
             order=self.cb_order.currentData(),
+            hook_clips=int(self.cb_hook.currentData() or 0),
             style=self.cb_style.currentData(),
             replace_timeline=self.chk_replace.isChecked(),
             transitions=self.cb_trans.currentData(),
