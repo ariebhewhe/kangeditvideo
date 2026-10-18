@@ -144,12 +144,12 @@ def _batched(model):
     return pipe
 
 
-def load_model(name: str, progress: Optional[ProgressCb] = None) -> None:
+def load_model(name: str, progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None) -> None:
     """Load the speech model now (before a batch of files), saying so only when it isn't loaded yet."""
     if name == asr_qwen.MODEL:
         if not asr_qwen.available():
             raise RuntimeError("Qwen3-ASR needs sherpa-onnx: run the installer again (or pip install sherpa-onnx)")
-        asr_qwen.ensure_model(progress)
+        asr_qwen.ensure_model(progress, cancel)
         _get_model(asr_qwen.TIMING_MODEL)       # the Whisper model that times its words
         return
     if not model_ready(name):
@@ -312,6 +312,11 @@ def refine_word_times(words: list[dict], audio: np.ndarray, offset: float = 0.0,
     return out
 
 
+def model_note(model_name: str) -> str:
+    """" with Qwen3-ASR" when that model transcribes (the status says which is at work), else ""."""
+    return " with Qwen3-ASR" if model_name == asr_qwen.MODEL else ""
+
+
 def transcript_path(footage: Footage, model_name: str, language: str) -> str:
     """Where a file's transcript is kept for every project (by the file, the model and the language)."""
     from .config import cache_dir, file_key
@@ -372,7 +377,8 @@ def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
     else:
         load_model(model_name, progress)
         words, lang = transcribe_audio(audio, model_name, language,
-                                       (lambda p: progress(p, f"Transcribing {footage.name}")) if progress else None,
+                                       (lambda p: progress(p, f"Transcribing {footage.name}{model_note(model_name)}"))
+                                       if progress else None,
                                        cancel)
         words = refine_word_times(words, audio)
     save_transcript(footage, model_name, language, words, lang)

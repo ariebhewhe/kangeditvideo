@@ -36,7 +36,7 @@ from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import health, motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
-                        load_model, project_layout, transcribe, write_srt)
+                        load_model, model_note, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -3985,13 +3985,16 @@ class MainWindow(QMainWindow):
                 and not self.project.footage[fid].is_image
                 and (force or self.project.footage[fid].transcript is None)]
         if not todo:
+            if ids:
+                self.lbl_status.setText("Already transcribed. To transcribe again (with another speech model): "
+                                        "right-click it in Media → Transcribe for captions")
             return
         model, lang = s.whisper_model, s.whisper_language
 
         def job(progress, cancel):
             # The speech model is loaded once for the batch, and only when a file isn't transcribed already.
             if any(f.has_audio and (force or cached_transcript(f, model, lang) is None) for f in todo):
-                load_model(model, progress)
+                load_model(model, progress, cancel)
             done, errors = [], []
             for k, f in enumerate(todo):
                 if cancel.is_set():
@@ -4025,7 +4028,10 @@ class MainWindow(QMainWindow):
             if errors:
                 QMessageBox.warning(self, APP_NAME, "Some files could not be transcribed:\n\n" + "\n".join(errors))
 
-        name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
+        name = (f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files") \
+            + model_note(model)
+        waiting = self.tasks.current if self.tasks.busy else None
+        self.lbl_status.setText(f"{name}: starts after “{waiting}”" if waiting else f"{name}…")
         self.tasks.submit(name, job, finished, self._task_error("Transcription"))
 
     def _fill_transcripts(self, ids) -> int:

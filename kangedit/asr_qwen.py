@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -71,19 +72,64 @@ def ready() -> bool:
     return find_files(model_dir()) is not None
 
 
-def ensure_model(progress: Optional[Callable[[float, str], None]] = None) -> dict:
-    """The model's files, downloaded first when they aren't here."""
+PATTERNS = ["*.onnx", "*.data", "*.onnx_data", "*.json", "*.txt", "*.model", "*.tiktoken"]
+
+
+def _folder_bytes(folder: Path) -> int:
+    """Bytes in the folder so far (finished files and the ones still downloading)."""
+    total = 0
+    for root, _, names in os.walk(folder):
+        for n in names:
+            try:
+                total += os.path.getsize(os.path.join(root, n))
+            except OSError:
+                pass
+    return total
+
+
+def ensure_model(progress: Optional[Callable[[float, str], None]] = None,
+                 cancel: Optional[threading.Event] = None) -> dict:
+    """The model's files, downloaded first when they aren't here (saying how much is done; a cancelled or
+    broken download carries on where it stopped next time)."""
+    from fnmatch import fnmatch
+
+    from .ffmpeg import Cancelled
     files = find_files(model_dir())
     if files is not None:
         return files
-    if progress:
-        progress(0.0, f"Downloading the Qwen3-ASR speech model (about {DOWNLOAD_GB:g} GB, first use only)…")
-    from huggingface_hub import snapshot_download
-    snapshot_download(REPO, local_dir=str(model_dir()),
-                      allow_patterns=["*.onnx", "*.data", "*.onnx_data", "*.json", "*.txt", "*.model", "*.tiktoken"])
-    files = find_files(model_dir())
+    try:
+        from huggingface_hub import HfApi, snapshot_download
+        info = HfApi().model_info(REPO, files_metadata=True)
+        total = sum(s.size or 0 for s in info.siblings if any(fnmatch(s.rfilename, p) for p in PATTERNS))
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Can't download the Qwen3-ASR model ({e}). Check the internet connection, or "
+                           "choose a Whisper model.") from e
+    folder = model_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
+
+    def work():
+        try:
+            snapshot_download(REPO, local_dir=str(folder), allow_patterns=PATTERNS)
+        except BaseException as e:  # noqa: BLE001
+            out["error"] = e
+
+    t = threading.Thread(target=work, daemon=True, name="qwen3-asr download")
+    t.start()
+    while t.is_alive():
+        t.join(0.5)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()              # (the download goes on in the background, or resumes next time)
+        if progress and total:
+            done = min(_folder_bytes(folder), total)
+            progress(done / total, f"Downloading the Qwen3-ASR speech model: {done / 1e9:.1f} of "
+                                   f"{total / 1e9:.1f} GB (first use only)")
+    if "error" in out:
+        raise RuntimeError(f"The Qwen3-ASR model download failed ({out['error']}). Try again, or choose a "
+                           "Whisper model.") from out["error"]
+    files = find_files(folder)
     if files is None:
-        raise RuntimeError(f"The Qwen3-ASR model downloaded to {model_dir()} is incomplete")
+        raise RuntimeError(f"The Qwen3-ASR model downloaded to {folder} is incomplete")
     return files
 
 
@@ -207,44 +253,56 @@ def run_model(audio: np.ndarray, chunks: list[tuple[float, float]], files: dict,
         job = os.path.join(tmp, "job.json")
         with open(job, "w", encoding="utf-8") as fh:
             json.dump({"files": files, "audio": wav, "chunks": chunks, "threads": threads}, fh)
-        proc = subprocess.Popen(_worker_cmd() + [job], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                encoding="utf-8", creationflags=CREATE_NO_WINDOW)
-        stop = threading.Event()
-
-        def watch():
-            while not stop.wait(0.2):
-                if cancel is not None and cancel.is_set():
-                    proc.kill()
-                    return
-
-        threading.Thread(target=watch, daemon=True).start()
-        texts = [""] * len(chunks)
-        error = ""
-        try:
-            for line in proc.stdout:
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                if "error" in msg:
-                    error = msg["error"]
-                elif "k" in msg:
-                    texts[msg["k"]] = msg.get("text", "")
-                    if progress:
-                        progress((msg["k"] + 1) / max(1, len(chunks)))
-            proc.wait()
-        finally:
-            stop.set()
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()
+        # The helper answers in a file, not on its console: a packaged app without a console window may
+        # have no standard output at all.
+        out_path = os.path.join(tmp, "out.jsonl")
+        open(out_path, "w").close()
+        with open(os.path.join(tmp, "err.txt"), "w", encoding="utf-8") as err:
+            proc = subprocess.Popen(_worker_cmd() + [job, out_path], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=err, creationflags=CREATE_NO_WINDOW)
+            texts = [""] * len(chunks)
+            error, pos, buf = "", 0, ""
+            with open(out_path, encoding="utf-8") as fh:
+                while True:
+                    alive = proc.poll() is None
+                    fh.seek(pos)
+                    buf += fh.read()
+                    pos = fh.tell()
+                    *lines, buf = buf.split("\n")
+                    for line in lines:
+                        try:
+                            msg = json.loads(line)
+                        except ValueError:
+                            continue
+                        if "error" in msg:
+                            error = msg["error"]
+                        elif "k" in msg:
+                            texts[msg["k"]] = msg.get("text", "")
+                            if progress:
+                                progress((msg["k"] + 1) / max(1, len(chunks)))
+                    if not alive:
+                        break
+                    if cancel is not None and cancel.is_set():
+                        proc.kill()
+                        proc.wait()
+                        raise Cancelled()
+                    time.sleep(0.2)
         if proc.returncode != 0 or error:
-            tail = error or (proc.stderr.read() if proc.stderr else "").strip()[-500:]
+            with open(os.path.join(tmp, "err.txt"), encoding="utf-8", errors="replace") as fh:
+                tail = error or fh.read().strip()[-500:]
             raise RuntimeError(f"Qwen3-ASR failed: {tail or f'exit code {proc.returncode}'}")
         return texts
 
 
 def worker_main(args: list[str]) -> int:
-    """The helper process: load the model, decode each chunk, answer a JSON line per chunk."""
+    """The helper process (job file, answer file): load the model, decode each chunk, answer a JSON line per
+    chunk in the answer file."""
+    out = open(args[1], "a", encoding="utf-8") if len(args) > 1 else sys.stdout
+
+    def say(msg: dict) -> None:
+        out.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        out.flush()
+
     try:
         with open(args[0], encoding="utf-8") as fh:
             job = json.load(fh)
@@ -258,10 +316,10 @@ def worker_main(args: list[str]) -> int:
             st = rec.create_stream()
             st.accept_waveform(RATE, audio[int(a * RATE):int(b * RATE)])
             rec.decode_stream(st)
-            print(json.dumps({"k": k, "text": st.result.text}, ensure_ascii=False), flush=True)
+            say({"k": k, "text": st.result.text})
         return 0
     except Exception as e:  # noqa: BLE001 - said to the app, which shows it
-        print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
+        say({"error": f"{type(e).__name__}: {e}"})
         return 1
 
 
@@ -271,7 +329,7 @@ def transcribe(audio: np.ndarray, language: str = "", progress: Optional[Callabl
     """Words [{"s", "e", "w"}] (times + offset) and the language. timing(audio, language) -> Whisper's timed
     words of the same sound (captions.transcribe_audio with TIMING_MODEL)."""
     from .captions import cpu_threads
-    files = ensure_model()
+    files = ensure_model(cancel=cancel)
     chunks = speech_chunks(audio)
     if not chunks:
         return [], language

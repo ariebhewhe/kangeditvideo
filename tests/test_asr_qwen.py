@@ -142,3 +142,39 @@ def test_captions_panel_chooses_the_model(qapp):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_model_download_says_how_far_it_is(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import huggingface_hub
+    model = tmp_path / "m"
+    monkeypatch.setattr(asr_qwen, "model_dir", lambda: model)
+    names = ["conv_frontend.onnx", "encoder.onnx", "decoder.int8.onnx", "vocab.json"]
+
+    class Api:
+        def model_info(self, repo, files_metadata=False):
+            return SimpleNamespace(siblings=[SimpleNamespace(rfilename=n, size=1000) for n in names]
+                                   + [SimpleNamespace(rfilename="README.md", size=10 ** 9)])   # not downloaded
+
+    def download(repo, local_dir, allow_patterns):
+        for n in names:
+            time.sleep(0.3)
+            (model / n).write_bytes(b"x" * 1000)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", download)
+    said = []
+    files = asr_qwen.ensure_model(lambda p, m: said.append((p, m)))
+    assert files["decoder"].endswith("decoder.int8.onnx")
+    assert said and "of 0.0 GB" in said[-1][1] and all(0 <= p <= 1 for p, _ in said)
+    assert max(p for p, _ in said) > 0.2                                        # it moved
+
+    def offline(*a, **k):
+        raise OSError("no network")
+
+    monkeypatch.setattr(asr_qwen, "model_dir", lambda: tmp_path / "other")
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(model_info=offline))
+    with pytest.raises(RuntimeError, match="internet connection"):
+        asr_qwen.ensure_model()
