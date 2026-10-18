@@ -131,3 +131,24 @@ def test_toolbars_wrap_instead_of_hiding_buttons(qapp):
     finally:
         window.project.dirty = False
         window.close()
+
+
+def test_guided_tour_walks_every_step(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        w.resize(1400, 900)
+        w.show()
+        qapp.processEvents()
+        w.show_tour()
+        tour = w._tour
+        titles = [s.title for s in tour.steps]
+        assert "For YouTube and socials" in titles
+        for k in range(len(tour.steps)):
+            tour.show_step(k)
+            assert not tour._target_rect().isNull() or tour.steps[k].target is None
+        tour.close_tour(True)
+        assert w._tour is None
+    finally:
+        w.project.dirty = False
+        w.close()

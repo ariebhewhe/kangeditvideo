@@ -23,6 +23,24 @@ and the Release workflow uses that section as the GitHub release notes.
   ticked (the number on each card); the ticked ones stay when you ask for more suggestions.
 - **Hook clips** setting in ✨ Auto Edit: a hook of 1 to 5 clips (a teaser of 2 s moments), or automatic
   (1 in short-form, 3 in long-form).
+- **Hook preview**: pointing at a card in the hook picker plays its moment.
+- **Zoom in on / out from the face** (Dynamic zoom): the face is found in the clip's own moment.
+- **Dynamic zoom and stabilization on the video layers** too, in the preview as in the export.
+- **Voice clean-up** (Clip tab → Audio): background noise and wind rumble taken out of a clip's speech, tuned
+  to the clip's measured noise level, heard in playback as exported; *Clean up every clip with wind* switches
+  it on wherever the smarter analysis heard wind.
+- **Transcript of the edit** (🗒 Transcript tab): what is said in each clip, in timeline order. Click to go
+  there, drag to reorder the clips, find a clip by its words.
+- **Make a thumbnail** (Tools): the edit's best stills (or the frame at the playhead), framed on the face, with
+  big outlined text, saved as a 1280 × 720 (or vertical / square) JPG.
+- **YouTube chapters** (Tools): chapter lines for the description from the edit's scenes (or parts of it),
+  named by day and first words, to edit and copy, with optional title cards.
+- **Check before export**: a missing file, missing music, captions without transcripts, a silent video, titles
+  past the end, a draft from proxies… listed with a fix before the export starts (a missing file stops it).
+- **Clip icons on the timeline**: 🎣 hook, 🏞 scene opener, 👋 opening / closing, 🔍 dynamic zoom,
+  〰 stabilized, 🎙 voice cleaned up.
+- **♪ updating** beside the viewer's time while the preview sound is mixed again after a change.
+- The guided tour (?) and the keyboard shortcuts (F1) explain the new features.
 
 ### Fixed
 - Music just added to the timeline could stay silent in playback (the export had it): every proxy finished

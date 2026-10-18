@@ -370,12 +370,13 @@ class Viewer(QWidget):
 
         # Shown while the preview sound is being mixed again after a change (music, sounds, volume, trims):
         # playback has the sound from before the change until then.
-        self.lbl_audio = QLabel("♪ updating the sound…")
+        self.lbl_audio = QLabel("♪ updating")
         self.lbl_audio.setStyleSheet("color: #1e1f22; background: #f0b429; border-radius: 4px; padding: 1px 6px;")
         self.lbl_audio.setToolTip("The preview sound is being mixed again after your last change. Until it is "
                                   "ready, playback has the sound from before (a music track or sound just added "
                                   "is heard once it is). The export always has the latest.")
         self.lbl_audio.hide()
+        self.lbl_time.setMinimumWidth(self.lbl_time.sizeHint().width())   # the badge never squeezes the time
         bar = QHBoxLayout()
         bar.addWidget(self.lbl_time)
         bar.addWidget(self.lbl_audio)

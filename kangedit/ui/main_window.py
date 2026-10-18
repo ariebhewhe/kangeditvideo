@@ -34,7 +34,7 @@ from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
-from .. import motion, polish, scenes, stabilize, voice
+from .. import health, motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
                         load_model, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -3538,7 +3538,8 @@ class MainWindow(QMainWindow):
                      lambda: self.grp_auto),
             TourStep("Swap moments",
                      "<b>🎣 Hook</b> chooses the opening hook from the strongest moments of the whole video, "
-                     "as thumbnails (1 quick clip, or a teaser of up to 5).<br>"
+                     "as thumbnails (1 quick clip, or a teaser of up to 5): point at one to play it, tick them "
+                     "in the order the hook should play them.<br>"
                      "<b>🔀 Other moment</b> (R) swaps the selected clip for the best moment close by in its "
                      "footage; the clip takes that moment's length. Press again for the next one; "
                      "<b>↶ Undo</b> brings the previous back.",
@@ -3547,14 +3548,18 @@ class MainWindow(QMainWindow):
                      "<b>Space</b> plays and pauses. Titles can be <b>dragged here</b> to place them.<br>"
                      "<b>Double-click</b> the picture (or press <b>F11</b>) for full screen, <b>Esc</b> to leave.<br>"
                      "<b>View → App overlay</b> shows where Reels / TikTok buttons cover a vertical video.<br>"
-                     "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.",
+                     "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.<br>"
+                     "<b>♪ updating</b> next to the time: the preview sound is being mixed again after a "
+                     "change (music just added is heard once it is ready).",
                      lambda: self.viewer.canvas),
             TourStep("The timeline",
                      "From the top: <b>titles</b>, <b>video layers</b> (V2, V3… for picture in picture and "
                      "images on top), the <b>main video track</b>, <b>sound effects</b> and <b>captions</b>.<br>"
                      "Drag footage or images from Media onto them. Drag a lane's bottom edge to make it taller.<br>"
                      "Drag clips to reorder, drag their edges to trim, <b>Alt-drag</b> to slide which moment "
-                     "a clip shows.",
+                     "a clip shows: in <b>⇋ Slip</b> mode the clip's transcript shows, click a sentence to slip "
+                     "to it.<br>Icons on a clip say what it is and what is done to it: 🎣 hook, 🏞 scene opener, "
+                     "👋 opening / closing, 🔍 dynamic zoom, 〰 stabilized, 🎙 voice cleaned up.",
                      lambda: self.timeline),
             TourStep("Video layers",
                      "The lanes <b>V2, V3…</b> above the main track lay pictures <b>on top</b> of the edit: picture "
@@ -3575,14 +3580,26 @@ class MainWindow(QMainWindow):
                      "layers, <b>💬 Captions</b>, <b>🔤 Text</b> for animated titles, and <b>🔊 Sounds</b>. The <b>3. Refine</b> buttons in the toolbar jump "
                      "to each tab.<br>Select <b>several clips</b> (Ctrl / Shift+click) and every change here "
                      "applies to all of them. <b>🙂 Zoom to face</b> under Reframe punches in on a reaction; "
-                     "<b>Sharpness</b> and <b>Halation</b> sit below Vibrance.",
+                     "<b>Sharpness</b> and <b>Halation</b> sit below Vibrance.<br>"
+                     "In <b>🎨 Clip</b> (also for layer clips): <b>Dynamic zoom</b> (a slow zoom or pan, or in on "
+                     "the face), <b>Stabilize</b> for shaky handheld shots and, under Audio, <b>Clean up the "
+                     "voice</b> (noise, wind). <b>🗒 Transcript</b> shows what is said in the edit: click to go "
+                     "there, drag to reorder the clips.",
                      lambda: self.d_right),
             TourStep("Frame",
                      "The shape of the finished video (9:16 for Reels / TikTok, 16:9 for YouTube…), its "
                      "resolution and frame rate.",
                      lambda: self.grp_frame),
+            TourStep("For YouTube and socials",
+                     "<b>Tools → Make a thumbnail…</b>: the edit's best stills, framed on the face, with big text, "
+                     "saved as a JPG.<br><b>Tools → YouTube chapters…</b>: chapter timestamps for the description "
+                     "from the edit's scenes, and title cards for them.<br><b>Tools → Make a highlight reel</b>: "
+                     "a vertical 30-60 s reel of the best moments.",
+                     lambda: self.menuBar()),
             TourStep("4. Export",
-                     "Render the finished video. Captions can be burned in or saved as an .srt file.",
+                     "Render the finished video. Captions can be burned in or saved as an .srt file.<br>"
+                     "First a <b>check</b> lists what could spoil it (a missing file, missing music, captions "
+                     "without transcripts, a draft from proxies…), each with a fix.",
                      lambda: self.btn_export),
             TourStep("That's it!",
                      "Start with <b>1. Import</b>. If you get stuck, the hint at the bottom right says what to do "
@@ -4157,16 +4174,13 @@ class MainWindow(QMainWindow):
         if not self.project.clips:
             QMessageBox.information(self, APP_NAME, "The timeline is empty.")
             return
-        missing = {self.project.footage[c.footage_id].name for c in self.project.clips + self.project.overlays
-                   if not os.path.exists(self.project.footage[c.footage_id].path)}
-        if missing:
-            QMessageBox.warning(self, APP_NAME, "Missing source files:\n" + "\n".join(sorted(missing)))
-            return
         dlg = ExportDialog(self.project, bool(self.captions), self, self.qs.value("gpu_export", True, type=bool))
         if dlg.exec() != ExportDialog.Accepted:
             return
         es = dlg.settings()
         self.qs.setValue("gpu_export", es.use_gpu)
+        if not self.health_check(es):
+            return
         proj = self._clone_project()
 
         def done(path):
@@ -4181,6 +4195,60 @@ class MainWindow(QMainWindow):
 
         self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
                           lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
+
+    def health_check(self, es) -> bool:
+        """Check the project before exporting with settings `es`: when there are issues, show them with their
+        fixes. Returns whether to export."""
+        from .health_dialog import HealthDialog
+
+        def issues():
+            return health.check(self.project, es.captions, es.use_proxies)
+
+        if not issues():
+            return True
+        return HealthDialog(issues, lambda key: self._health_fix(key, es), self).exec() == QDialog.Accepted
+
+    def _health_fix(self, key: str, es) -> str:
+        """Apply a health check's fix (see health.check); returns what it did."""
+        p = self.project
+        if key.startswith("locate:"):
+            f = p.footage.get(key.split(":", 1)[1])
+            if f is None:
+                return ""
+            path, _ = QFileDialog.getOpenFileName(self, f"Where is {f.name}?", os.path.dirname(f.path))
+            if not path:
+                return ""
+            f.path = path
+            self.viewer.drop_decoders()
+            p.dirty = True
+            self.refresh_all()
+            self._schedule_audio()
+            return f"{f.name} found: {path}"
+        if key == "drop_sounds":
+            self.project_checkpoint()
+            p.sounds = [x for x in p.sounds if os.path.exists(x.path)]
+            self._sounds_changed()
+            self.tl.refresh()
+            return "The missing sounds are taken off (Undo brings them back)"
+        if key == "drop_texts":
+            self.project_checkpoint()
+            p.texts = [x for x in p.texts if x.start < p.duration - 0.05]
+            p.dirty = True
+            self.refresh_all()
+            return "The titles past the end are taken off (Undo brings them back)"
+        if key == "transcribe":
+            self._transcribe_edit()
+            return "Transcribing in the background: export once it is done for captions on all the speech"
+        if key == "measure":
+            self.measure_shake()
+            return "Measuring the shake in the background (the export would do it first otherwise)"
+        if key == "faces":
+            self._find_motion_faces(list(p.clips) + list(p.overlays))
+            return "Finding the faces in the background"
+        if key == "originals":
+            es.use_proxies = False
+            return "The export uses the original footage"
+        return ""
 
     def _clone_project(self) -> Project:
         """Frozen copy so edits during a long export don't change what is rendered."""
@@ -4355,7 +4423,8 @@ class MainWindow(QMainWindow):
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
-            "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\nH — choose the hook\n"
+            "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\n"
+            "H — choose the hook (point at a card to play it; ticked in the order it plays)\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
             "Ctrl+Shift+R — reset the layout\n"
@@ -4363,7 +4432,10 @@ class MainWindow(QMainWindow):
             "Ctrl+Shift+B — color adjustments in the viewer on / off\n"
             "Ctrl+wheel on timeline — zoom · on the Media thumbnails — thumbnail size\n\n"
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
-            "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
+            "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip (its transcript shows:\n"
+            "click a sentence to slip to it) ·\n"
+            "Clip icons: 🎣 hook · 🏞 scene opener · 👋 opening / closing · 🔍 dynamic zoom · 〰 stabilized ·\n"
+            "🎙 voice cleaned up · ♪ updating beside the time: the preview sound is being remade ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
             "Speed: right-click a clip → Speed (slow / fast motion, 0.1× to 8×) or Speed ramp (Hero moment,\n"
             "Bullet time, Slow → fast…), or the Inspector's Speed group · Sound at this speed: synced\n"
