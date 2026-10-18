@@ -509,7 +509,7 @@ class MediaBin(QWidget):
                            ("overlay", "Add on a video layer at the playhead (picture in picture)"),
                            (None, None),
                            ("proxy", "Generate proxy"), ("delete_proxy", "Delete proxy"),
-                           ("analyze", "Analyze (re-run)"), ("transcribe", "Transcribe for captions"),
+                           ("analyze", "Analyze (re-run)"), ("transcribe", "Transcribe (again) for captions"),
                            ("transcript", "Show the full transcript…"),
                            (None, None)):
             if key is None:

@@ -4057,7 +4057,7 @@ class MainWindow(QMainWindow):
         if not todo:
             if ids:
                 self.lbl_status.setText("Already transcribed. To transcribe again (with another speech model): "
-                                        "right-click it in Media → Transcribe for captions")
+                                        "right-click it in Media → Transcribe (again) for captions")
             return
         model, lang, cleanup = s.whisper_model, s.whisper_language, s.speech_cleanup
 
@@ -4161,25 +4161,11 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"{self.project.footage[fid].name} is selected in the Media panel")
 
     def transcribe_media(self, ids: list[str]):
-        """Media panel → Transcribe for captions: the selected files without a transcript; when they all have
-        one, ask before transcribing them again (manual caption edits would be lost)."""
+        """Media panel → Transcribe for captions: the selected files transcribed (again) with the speech model and
+        language set now (Captions panel, Captions → Style…), replacing any transcript they have (manual caption
+        edits on them too: Undo doesn't bring a transcript back, so this is what the menu item says it does)."""
         media = [fid for fid in ids if fid in self.project.footage and not self.project.footage[fid].is_image]
-        # An empty transcript is done again without asking (nothing to lose: speech an older version missed
-        # in loud noise, or with another model or noise setting).
-        todo = [fid for fid in media if not self.project.footage[fid].transcript]
-        if todo:
-            done = len(media) - len(todo)
-            self.lbl_status.setText(f"Transcribing {len(todo)} file(s)"
-                                    + (f" ({done} already transcribed, kept)" if done else ""))
-            redo = any(self.project.footage[fid].transcript is not None for fid in todo)
-            self.queue_transcription(todo, force=redo)
-            return
-        if not media:
-            return
-        r = QMessageBox.question(self, APP_NAME, ("The selected file is" if len(media) == 1 else
-                                                  f"All {len(media)} selected files are") + " already transcribed.\n"
-                                 "Transcribe again (manual caption edits will be lost)?")
-        if r == QMessageBox.Yes:
+        if media:
             self.queue_transcription(media, force=True)
 
     def generate_captions(self):
@@ -4223,7 +4209,7 @@ class MainWindow(QMainWindow):
         self.project.dirty = True
         self._update_title()
         self.lbl_status.setText("Background noise setting changed: files transcribed already keep their "
-                                "transcript (right-click in Media → Transcribe for captions to redo one)")
+                                "transcript (right-click in Media → Transcribe (again) for captions to redo one)")
 
     def _set_speech_model(self, key: str):
         """The speech model chosen in the Captions panel: for captions and every transcript from now on."""
