@@ -1669,7 +1669,7 @@ class TimelineView(QWidget):
                     a.triggered.connect(lambda _=False, tk=tk: self.context_action.emit(f"transition:{tk}", clip_id))
                     sub.addAction(a)
                 continue
-            if key == "split":
+            if key == "split" and label is None:          # (with a label: Split at playhead, below)
                 sub = m.addMenu("Audio edit (J / L cut)")
                 for sv, sl in ((0.0, "None (straight cut)"), (-0.5, "J-cut: sound starts 0.5 s early"),
                                (-1.0, "J-cut: sound starts 1 s early"), (0.5, "L-cut: sound runs on 0.5 s"),

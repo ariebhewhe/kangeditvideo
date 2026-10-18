@@ -72,6 +72,16 @@ and the Release workflow uses that section as the GitHub release notes.
   doesn't have, which stopped the download. Progress bars are off (the app shows its own), output with no
   console to go to is dropped instead of failing, and a download that receives nothing for 3 minutes stops
   with a message instead of waiting forever (it carries on where it stopped next time).
+- A clip with a dynamic zoom or stabilization was exported without its sound (cut from the wrong place in
+  its file), and the export failed when another clip followed it.
+- In Source mode, clicking a caption, a word in the 🗒 Transcript tab, a clip's "Other moment" or a timeline
+  menu item moved the file's playhead instead of the edit's: it now shows the edit there. Back from Source
+  mode after an Undo the playhead stays on the (shorter) edit; removing the file shown goes back to the edit;
+  I / O mark in and out in full screen too.
+- The timeline's right-click menu showed the J / L cut menu twice and no *Split at playhead*.
+- *Auto* uses Whisper when Qwen3-ASR can't be downloaded (no internet), instead of failing.
+- Closing KangEdit during a Qwen3-ASR transcription left its helper process running; it now ends with the
+  app. A long stretch of speech without pauses is cut for Qwen3-ASR where it is quietest, not mid-word.
 - The Refine panel could be made so narrow that its tabs (Layer, Caption, Text…) were cut off: its smallest
   width now shows every tab.
 

@@ -430,12 +430,12 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
         mv = motion.of_clip(clip, f, bw / bh)
         if mv is not None:                 # a dynamic zoom / stabilization: a window per frame, by command
             pl = reframe.place(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y)
-            ss = 2 if pl.crop_w * 2 <= 4096 else 1
-            mp = motion.export_plan(mv, clip, pl, sw, sh, cp.v_frames, cp.pre_f, s.fps, f"c{j}", ss)
+            sup = 2 if pl.crop_w * 2 <= 4096 else 1         # supersampled (not `ss`: the input's start, below)
+            mp = motion.export_plan(mv, clip, pl, sw, sh, cp.v_frames, cp.pre_f, s.fps, f"c{j}", sup)
             name = f"motion_{i}.txt"
             with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh:
                 fh.write("\n".join(mp.commands) + "\n")
-            moving = (name, ss, mp.rotates)
+            moving = (name, sup, mp.rotates)
         chain.append(reframe.ffmpeg_filter(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y,
                                            f"v{j}a", f"v{j}b", f"c{j}", convert, moving))
         post = f"[v{j}b]"

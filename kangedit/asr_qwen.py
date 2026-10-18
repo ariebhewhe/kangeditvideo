@@ -196,11 +196,12 @@ def _norm(s: str) -> str:
     return re.sub(r"[^\w]", "", s.lower())
 
 
-def fixed_chunks(audio: np.ndarray, chunk: float = CHUNK) -> list[tuple[float, float]]:
-    """The whole sound in pieces of up to `chunk` seconds, each cut at the quietest moment of its last 4 s (less
-    likely in the middle of a word)."""
-    dur = audio.size / RATE
-    out, a = [], 0.0
+def fixed_chunks(audio: np.ndarray, chunk: float = CHUNK, a: float = 0.0,
+                 dur: Optional[float] = None) -> list[tuple[float, float]]:
+    """The sound (from a to dur seconds: all of it) in pieces of up to `chunk` seconds, each cut at the quietest
+    moment of its last 4 s (less likely in the middle of a word)."""
+    dur = audio.size / RATE if dur is None else dur
+    out = []
     while dur - a > 0.3:
         b = min(dur, a + chunk)
         if b < dur:
@@ -226,9 +227,10 @@ def speech_chunks(audio: np.ndarray, chunk: float = CHUNK) -> list[tuple[float, 
         spans = [(0.0, audio.size / RATE)]
     out: list[tuple[float, float]] = []
     for a, b in spans:
-        while b - a > chunk:
-            out.append((a, a + chunk))
-            a += chunk
+        if b - a > chunk:                       # a long stretch without a pause: cut where it is quietest
+            pieces = fixed_chunks(audio, chunk, a, b)
+            out += pieces[:-1]
+            a = pieces[-1][0] if pieces else a
         if out and b - out[-1][0] <= chunk and a - out[-1][1] < 2.0:
             out[-1] = (out[-1][0], b)
         else:
@@ -314,7 +316,8 @@ def run_model(audio: np.ndarray, chunks: list[tuple[float, float]], files: dict,
         audio.astype(np.float32).tofile(wav)
         job = os.path.join(tmp, "job.json")
         with open(job, "w", encoding="utf-8") as fh:
-            json.dump({"files": files, "audio": wav, "chunks": chunks, "threads": threads}, fh)
+            json.dump({"files": files, "audio": wav, "chunks": chunks, "threads": threads,
+                       "parent": os.getpid()}, fh)
         # The helper answers in a file, not on its console: a packaged app without a console window may
         # have no standard output at all.
         out_path = os.path.join(tmp, "out.jsonl")
@@ -356,6 +359,37 @@ def run_model(audio: np.ndarray, chunks: list[tuple[float, float]], files: dict,
         return texts
 
 
+def parent_alive(pid: int) -> bool:
+    """Whether the app that started the helper still runs (it may have closed or crashed mid-transcription)."""
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return not ok or code.value == 259               # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def _watch_parent(pid: int) -> None:
+    """The helper ends itself when the app is gone: nothing else stops a windowless process using every core
+    and a few GB of memory."""
+    def watch():
+        while parent_alive(pid):
+            time.sleep(2.0)
+        os._exit(3)
+    threading.Thread(target=watch, daemon=True, name="parent watch").start()
+
+
 def worker_main(args: list[str]) -> int:
     """The helper process (job file, answer file): load the model, decode each chunk, answer a JSON line per
     chunk in the answer file."""
@@ -368,6 +402,8 @@ def worker_main(args: list[str]) -> int:
     try:
         with open(args[0], encoding="utf-8") as fh:
             job = json.load(fh)
+        if job.get("parent"):
+            _watch_parent(int(job["parent"]))
         import sherpa_onnx
         f = job["files"]
         rec = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(

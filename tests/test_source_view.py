@@ -118,3 +118,34 @@ def test_source_frames_are_the_files(window):
         QApplication.processEvents()
         time.sleep(0.02)
     assert got.get("img") is not None and np.asarray(got["img"]).std() > 5
+
+
+def test_timeline_jumps_leave_source_mode(window):
+    w, talk = window
+    w.bin_action("play", [talk.id])
+    w.viewer.seek(4.5)
+    w.caps_panel.seek.emit(2.0)                      # a caption clicked: a time on the timeline
+    assert w.viewer.mode == "timeline" and w.viewer.t == pytest.approx(2.0)
+    w.bin_action("play", [talk.id])
+    w.edit_text.seek.emit(1.0)                       # a word in the 🗒 Transcript tab
+    assert w.viewer.mode == "timeline" and w.viewer.t == pytest.approx(1.0)
+
+
+def test_back_to_a_shorter_edit_keeps_the_playhead_on_it(window):
+    w, talk = window
+    w.bin_action("play", [talk.id])
+    w.viewer.set_marks(5.0, 6.5)
+    w.use_source_part(talk.id, *w.viewer.marked_range(), "append")
+    assert w.viewer.timeline_time() > 6.0
+    w.undo()
+    w.viewer.show_timeline()
+    assert w.viewer.t < w.project.duration
+
+
+def test_removing_the_file_shown_goes_back_to_the_edit(window):
+    w, talk = window
+    w.bin_action("play", [talk.id])
+    w.bin_action("remove", [talk.id])
+    v = w.viewer
+    assert v.mode == "timeline" and not v.source_fid and not v.btn_source.isEnabled()
+    assert v.btn_timeline.isChecked() and not v.btn_source.isChecked()

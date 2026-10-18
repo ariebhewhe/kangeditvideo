@@ -234,3 +234,24 @@ def test_exported_layer_zoom_matches_the_preview(tmp_path):
         y0, x0 = (180 - h) // 2, (320 - w) // 2
         got = o[n][y0 + 2:y0 + h - 2, x0 + 2:x0 + w - 2].astype(float)
         assert np.abs(got - layer[2:-2, 2:-2, :3]).mean() < 10.0 < np.abs(got - plain[2:-2, 2:-2, :3]).mean()
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+@pytest.mark.parametrize("kw", [{"motion": "in"}, {"stabilize": 0.6}])
+def test_moving_clip_keeps_its_sound_next_to_another(tmp_path, kw):
+    """A dynamic zoom / stabilized clip later in its file, next to another clip: exported with its sound (its
+    sound was cut from the wrong place, past the end of its input: silent, and the export failed)."""
+    src = str(tmp_path / "talk.mp4")
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=12",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=12", "-shortest", "-pix_fmt", "yuv420p", "-y", src])
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    p = Project()
+    p.footage = {f.id: f}
+    p.clips = [TimelineClip(f.id, 6.0, 8.0, **kw), TimelineClip(f.id, 9.0, 10.0)]
+    out = str(tmp_path / "out.mp4")
+    export(p, ExportSettings(out, p.settings.aspect, "720p", 30.0, use_gpu=False))
+    pcm = subprocess.run([ffmpeg_bin(), "-v", "error", "-i", out, "-t", "1.8", "-f", "f32le", "-ac", "1", "-"],
+                         capture_output=True).stdout
+    sound = np.frombuffer(pcm, np.float32)
+    assert sound.size > 40000 and np.sqrt(np.mean(sound ** 2)) > 0.05           # the moving clip is heard

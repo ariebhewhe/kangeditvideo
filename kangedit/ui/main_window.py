@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
                           ("Shift+Left", lambda: self.viewer.step(-10)), ("Shift+Right", lambda: self.viewer.step(10)),
                           ("Up", self.viewer.prev_clip), ("Down", self.viewer.next_clip),
                           ("Home", lambda: self.viewer.seek(0)),
-                          ("End", lambda: self.viewer.seek(self.project.duration)),
+                          ("End", lambda: self.viewer.seek(self.viewer.project.duration)),
                           ("Ctrl+Y", self.redo)):
             QShortcut(QKeySequence(key), self, activated=slot)
 
@@ -615,7 +615,7 @@ class MainWindow(QMainWindow):
         self.timeline.btn_slip.toggled.connect(lambda _on: self._update_slip_text())
         self.timeline.slip_text.slip_to.connect(self.slip_clip_to)
         self.timeline.slip_text.transcribe.connect(lambda fid: self.queue_transcription([fid]))
-        self.edit_text.seek.connect(self.viewer.seek)
+        self.edit_text.seek.connect(self._timeline_seek)
         self.edit_text.reordered.connect(self._reorder_by_transcript)
         self.edit_text.transcribe.connect(self._transcribe_edit)
         self.viewer.time_changed.connect(lambda t: self.edit_text.show_time(t)
@@ -694,7 +694,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.export_srt.connect(self.save_srt)
         self.caps_panel.text_edited.connect(self._caption_edited)
         self.caps_panel.delete_requested.connect(self._delete_captions)
-        self.caps_panel.seek.connect(self.viewer.seek)
+        self.caps_panel.seek.connect(self._timeline_seek)
         self.caps_panel.toggled.connect(self._toggle_captions)
 
         self.audio_ready.connect(self._on_audio_ready)
@@ -866,6 +866,8 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def refresh_all(self, captions: bool = True):
+        if self.viewer.source_fid and self.viewer.source_fid not in self.project.footage:
+            self.viewer.close_source([self.viewer.source_fid])     # removed (or undone) while shown on its own
         # Synced camera angles follow every change to the main track (no-op without multicam).
         if multicam.follow(self.project):
             self._schedule_audio()
@@ -1636,7 +1638,7 @@ class MainWindow(QMainWindow):
             self.tl.selected = ""
             self.refresh_all()
             self.tl.fit()
-            self.viewer.seek(0)
+            self._timeline_seek(0)
             self._schedule_audio()
             self.lbl_status.setText(f"Highlight reel: {len(clips)} clips, {self.project.duration:.0f} s, 9:16 · "
                                     "Undo (Ctrl+Z) brings the full edit back" + (" · " + " · ".join(notes)
@@ -1660,7 +1662,7 @@ class MainWindow(QMainWindow):
         self.tl.selected = ""
         self.refresh_all()
         self.tl.fit()
-        self.viewer.seek(0)
+        self._timeline_seek(0)
         found = len(result.matches) - len(result.missing)
         self.lbl_status.setText(f"Script edit: {found} of {len(result.matches)} lines found, {len(result.clips)} "
                                 f"clip(s), {sum(c.duration for c in result.clips):.1f} s")
@@ -1873,7 +1875,7 @@ class MainWindow(QMainWindow):
             self.tl.selected = ""
             self.refresh_all()
             self.tl.fit()
-            self.viewer.seek(0)
+            self._timeline_seek(0)
             self._schedule_audio()
             msg = f"Auto edit: {len(clips)} clips, {self.project.duration:.1f} s"
             if (s.replace_timeline and self.project.duration < 0.85 * s.target_duration
@@ -2107,7 +2109,7 @@ class MainWindow(QMainWindow):
         self.tl.selected = hooks[0].id
         self.tl.update()
         self.inspector.set_clip(self._inspected())
-        self.viewer.seek(0)
+        self._timeline_seek(0)
         f = self.project.footage[hooks[0].footage_id]
         if len(hooks) > 1:
             what = f"{len(hooks)} clips, {sum(h.duration for h in hooks):.1f} s"
@@ -2244,7 +2246,7 @@ class MainWindow(QMainWindow):
         self._after_structure_change()
         if len(changes) == 1:
             x = changes[0][0]
-            self.viewer.seek(self.project.clip_starts()[self.project.index_of(x.id)] + 0.01)
+            self._timeline_seek(self.project.clip_starts()[self.project.index_of(x.id)] + 0.01)
             self.lbl_status.setText(f"Other moment: {fmt_time(x.src_in, frames=False)} of "
                                     f"{self.project.footage[x.footage_id].name}, {x.duration:.1f} s "
                                     "(R again for another)")
@@ -2312,6 +2314,7 @@ class MainWindow(QMainWindow):
         elif action == "proxy":
             self.queue_proxies(ids)
         elif action == "delete_proxy":
+            self.viewer.close_source(ids)          # (the file it plays is let go of: Windows can't delete an open one)
             for fid in ids:
                 f = self.project.footage[fid]
                 self.viewer.drop_decoders()
@@ -2765,7 +2768,10 @@ class MainWindow(QMainWindow):
         """Put the part of a file marked in the viewer's Source mode on the timeline: at the timeline's playhead
         (between the clips nearest to it) or at the end. The viewer stays on the file, to mark the next part."""
         f = self.project.footage.get(fid)
-        if f is None or b - a < 0.05:
+        if f is None:
+            self.lbl_status.setText("That file is no longer in the project")
+            return
+        if b - a < 0.05:
             return
         clip = TimelineClip(fid, round(a, 3), round(min(b, f.duration), 3))
         t = self.viewer.timeline_time()
@@ -2868,7 +2874,7 @@ class MainWindow(QMainWindow):
         multicam.follow(self.project)
         self._on_timeline_edited()
         self._on_timeline_finished()
-        self.viewer.seek(self.project.clip_starts()[i])
+        self._timeline_seek(self.project.clip_starts()[i])
         self.lbl_status.setText(f"Slipped the clip to {fmt_time(a, frames=False)} in {f.name}")
 
     def _on_timeline_edited(self):
@@ -2999,7 +3005,7 @@ class MainWindow(QMainWindow):
         elif action == "split":
             starts = self.project.clip_starts()
             if not (starts[i] < self.viewer.timeline_time() < starts[i] + c.duration):
-                self.viewer.seek(starts[i] + c.duration / 2)
+                self._timeline_seek(starts[i] + c.duration / 2)
             self.split_at_playhead()
         elif action == "alt_moment":
             self._replace_moments(targets)
@@ -3183,7 +3189,7 @@ class MainWindow(QMainWindow):
         self.project.clips[at:at] = new
         self.tl.selected = new[0].id
         self._after_structure_change()
-        self.viewer.seek(self.project.clip_starts()[at] + 0.01)
+        self._timeline_seek(self.project.clip_starts()[at] + 0.01)
         self.lbl_status.setText(f"Added {len(new)} clip(s) to the timeline")
 
     def _overlay_length(self, f: Footage) -> tuple[float, float]:
@@ -3229,7 +3235,7 @@ class MainWindow(QMainWindow):
         self.tl.refresh()
         self.tl.select_overlay(added[-1].id)
         self._overlays_changed()
-        self.viewer.seek(min(self.project.duration - 1e-3, added[-1].start + 0.01))
+        self._timeline_seek(min(self.project.duration - 1e-3, added[-1].start + 0.01))
         self.lbl_status.setText(f"Added {len(added)} clip(s) on video layer V{added[-1].track + 2}. Drag it in the "
                                 "viewer to place it, the Layer tab sizes and rotates it.")
 
@@ -3318,7 +3324,7 @@ class MainWindow(QMainWindow):
             self.tl.select_overlay(oid)
             self.show_refine(self.layer_panel)
             if not (c.start <= self.viewer.timeline_time() < c.end):
-                self.viewer.seek(c.start + 0.01)
+                self._timeline_seek(c.start + 0.01)
             return
         if action == "ov_auto_color":                 # in the background; one undo step when it's done
             self._auto_color([c])
@@ -3406,7 +3412,7 @@ class MainWindow(QMainWindow):
         self._texts_changed()
         self.tl.select_text(tc.id)
         self.show_refine(self.text_panel)
-        self.viewer.seek(min(self.project.duration - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
+        self._timeline_seek(min(self.project.duration - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
         self.lbl_status.setText(f"Added \"{TEXT_PRESETS[preset]['label']}\" — type your text in the Text tab, "
                                 "drag it in the viewer to place it")
         QTimer.singleShot(0, self.text_panel.focus_text)
@@ -3422,7 +3428,7 @@ class MainWindow(QMainWindow):
             self.tl.select_text(tid)
             self.show_refine(self.text_panel)
             if not (tc.start <= self.viewer.timeline_time() < tc.end):
-                self.viewer.seek(min(tc.end - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
+                self._timeline_seek(min(tc.end - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
             QTimer.singleShot(0, self.text_panel.focus_text)
             return
         self.project_checkpoint()
@@ -3489,7 +3495,7 @@ class MainWindow(QMainWindow):
         elif key == "open_sounds":
             self.show_refine(self.sfx_panel)
         elif key == "seek":
-            self.viewer.seek(float(payload))
+            self._timeline_seek(float(payload))
         elif key == "split_playhead":
             self.split_at_playhead()
         elif key == "fit":

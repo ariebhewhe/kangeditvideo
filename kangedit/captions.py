@@ -8,6 +8,7 @@ words, so manual fixes survive later edits too.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -21,6 +22,8 @@ from . import asr_qwen
 from .config import frame_size
 from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, run
 from .models import CaptionStyle, Footage, Project
+
+log = logging.getLogger("kangedit.captions")
 
 WHISPER_MODELS = {
     "auto": "Auto — follows the computer: Qwen3-ASR on a strong CPU (6+ cores, 12+ GB memory), else large-v3 on "
@@ -115,7 +118,11 @@ QWEN_MIN_RAM = 12.0      # GB: the 1.7B model takes about 3 GB while it works, n
 def qwen_suits() -> bool:
     """Whether this computer runs Qwen3-ASR well enough for Auto to pick it: sherpa-onnx installed, a CPU of
     QWEN_MIN_CORES physical cores or more and QWEN_MIN_RAM GB of memory."""
-    return asr_qwen.available() and cpu_threads() >= QWEN_MIN_CORES and total_ram_gb() >= QWEN_MIN_RAM
+    return (not _qwen_failed and asr_qwen.available() and cpu_threads() >= QWEN_MIN_CORES
+            and total_ram_gb() >= QWEN_MIN_RAM)
+
+
+_qwen_failed = ""        # why Qwen3-ASR couldn't be had under Auto (no internet for its download): Whisper then
 
 
 def resolve_model(name: str) -> str:
@@ -181,10 +188,19 @@ def _batched(model):
 
 def load_model(name: str, progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None) -> None:
     """Load the speech model now (before a batch of files), saying so only when it isn't loaded yet."""
+    global _qwen_failed
     if resolve_model(name) == asr_qwen.MODEL:
         if not asr_qwen.available():
             raise RuntimeError("Qwen3-ASR needs sherpa-onnx: run the installer again (or pip install sherpa-onnx)")
-        asr_qwen.ensure_model(progress, cancel)
+        try:
+            asr_qwen.ensure_model(progress, cancel)
+        except RuntimeError as e:
+            if name not in ("", "auto"):
+                raise                           # chosen by name: said as is
+            # Auto: Whisper for the rest of the session (it worked offline before Auto took Qwen3-ASR)
+            _qwen_failed = str(e)
+            log.warning("Qwen3-ASR unavailable, Auto uses Whisper: %s", e)
+            return load_model(name, progress, cancel)
         _get_model(asr_qwen.TIMING_MODEL)       # the Whisper model that times its words
         return
     if not model_ready(name):

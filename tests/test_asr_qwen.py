@@ -25,8 +25,28 @@ def test_speech_is_cut_into_chunks(monkeypatch):
                         lambda audio, opts: [{"start": int(a * 16000), "end": int(b * 16000)} for a, b in spans])
     got = asr_qwen.speech_chunks(np.zeros(16000 * 80, np.float32))
     assert got[0] == (0.5, 10.0)                                 # close stretches joined
-    assert all(b - a <= asr_qwen.CHUNK + 1e-6 for a, b in got)   # a long one cut in pieces
+    assert all(b - a <= asr_qwen.CHUNK + 0.3 for a, b in got)    # a long one cut in pieces
     assert got[1][0] == 14.0 and got[-1][1] == 72.0
+    assert all(x[1] == y[0] for x, y in zip(got[1:-1], got[2:-1]))  # with nothing left out
+
+
+def test_long_speech_is_cut_where_it_is_quiet(monkeypatch):
+    import faster_whisper.vad as vad
+    monkeypatch.setattr(vad, "get_speech_timestamps", lambda audio, opts: [{"start": 0, "end": 16000 * 50}])
+    t = np.arange(16000 * 50) / 16000
+    audio = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    audio[int(17.5 * 16000):int(17.6 * 16000)] = 0.0             # a breath, not long enough to count as a pause
+    got = asr_qwen.speech_chunks(audio)
+    assert 17.45 <= got[0][1] <= 17.65                           # cut in the breath, not in a word at 20 s
+
+
+def test_helper_ends_when_the_app_is_gone():
+    import os
+    import subprocess
+    assert asr_qwen.parent_alive(os.getpid())
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    assert not asr_qwen.parent_alive(p.pid)
 
 
 def test_words_take_whispers_times():
@@ -235,3 +255,23 @@ def test_language_is_whispers_when_qwen_names_none(monkeypatch):
     monkeypatch.setattr(asr_qwen, "run_model", lambda *a, **k: ["kita mau ke mana"])     # no "language X" tag
     words, lang = asr_qwen.transcribe(np.zeros(16000 * 2, np.float32), "", timing=lambda a, lang: ([], "id"))
     assert lang == "id" and len(words) == 4
+
+
+def test_auto_uses_whisper_when_qwen_cant_be_downloaded(monkeypatch):
+    monkeypatch.setattr(captions, "_qwen_failed", "")
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(captions, "cpu_threads", lambda: 8)
+    monkeypatch.setattr(captions, "total_ram_gb", lambda: 32.0)
+    monkeypatch.setattr(captions, "_cuda", False)
+
+    def offline(progress=None, cancel=None):
+        raise RuntimeError("Can't download the Qwen3-ASR model (no network)")
+    monkeypatch.setattr(asr_qwen, "ensure_model", offline)
+    loaded = []
+    monkeypatch.setattr(captions, "_get_model", loaded.append)
+    monkeypatch.setattr(captions, "model_ready", lambda name: False)
+    assert captions.resolve_model("auto") == asr_qwen.MODEL
+    captions.load_model("auto")
+    assert loaded == ["auto"] and captions.resolve_model("auto") == "large-v3-turbo"    # Whisper, loaded
+    with pytest.raises(RuntimeError, match="no network"):
+        captions.load_model(asr_qwen.MODEL)                      # chosen by name: said

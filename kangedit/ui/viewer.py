@@ -482,6 +482,8 @@ class Viewer(QWidget):
             self.seek(0)
         elif k == Qt.Key_End:
             self.seek(max(0.0, self.project.duration - 1e-3))
+        elif k in (Qt.Key_I, Qt.Key_O) and self.mode == "source":
+            self.mark("in" if k == Qt.Key_I else "out")
         else:
             super().keyPressEvent(e)
 
@@ -581,6 +583,8 @@ class Viewer(QWidget):
         """Play a file from the Media panel on its own (Source mode), from its mark in (or where it was left)."""
         f = footage if footage is not None else (self._timeline[0] if self._timeline else self.project).footage.get(fid)
         if f is None:
+            self.btn_source.setChecked(self.mode == "source")      # (a checkable button: as it was)
+            self.btn_timeline.setChecked(self.mode != "source")
             return
         self.stop()
         if self.mode == "timeline":
@@ -629,13 +633,24 @@ class Viewer(QWidget):
             return
         proj, t, path, valid = self._timeline
         self._timeline = None
-        self.mode, self.project, self.t = "timeline", proj, t
+        # (the edit may have got shorter meanwhile: an Undo after Insert)
+        self.mode, self.project, self.t = "timeline", proj, max(0.0, min(t, max(0.0, proj.duration - 1e-3)))
         self._audio_path, self.audio_valid = path, valid
         self.player.setSource(QUrl.fromLocalFile(path) if path and os.path.exists(path) else QUrl())
         self.source_panel.hide()
         self.btn_timeline.setChecked(True)
         self.btn_source.setChecked(False)
         self.lbl_audio.setVisible(getattr(self, "_audio_pending", False))
+
+    def close_source(self, fids) -> None:
+        """Files taken out of the project: Source mode stops showing them (back to the edit)."""
+        if self.source_fid not in fids:
+            return
+        self.show_timeline()
+        self.marks.pop(self.source_fid, None)
+        self.source_fid = ""
+        self.btn_source.setEnabled(False)
+        self.btn_source.setChecked(False)
 
     def timeline_time(self) -> float:
         """The timeline's playhead (kept while in Source mode)."""
