@@ -35,7 +35,8 @@ def _key(f: Footage) -> str:
         stamp = f"{st.st_size}:{int(st.st_mtime)}"
     except OSError:
         stamp = ""
-    return hashlib.sha1(f"{os.path.abspath(f.path)}|{stamp}".encode()).hexdigest()[:20]
+    # (v2: measured from every frame; v1 missed every other one in a clip that doesn't start the file)
+    return hashlib.sha1(f"v2|{os.path.abspath(f.path)}|{stamp}".encode()).hexdigest()[:20]
 
 
 def _cache_file(f: Footage):
@@ -157,6 +158,8 @@ def analyze(f: Footage, t0: float, t1: float, use_proxy: bool = True,
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
             t = float(frame.time or 0.0) - dec.start
+            if dec._skip_until is not None and t >= dec._skip_until:
+                dec._skip_nonref(None)      # caught up with the seek: every frame from here (each one's shake)
             if t < t0 - dec.frame_dur:
                 continue
             if t > t1 + dec.frame_dur:

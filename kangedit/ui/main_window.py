@@ -2103,9 +2103,13 @@ class MainWindow(QMainWindow):
                 # Keep the clip's look and audio settings; only the moment changes.
                 o = old[k]
                 o.footage_id, o.src_in, o.src_out, o.score, o.label = h.footage_id, h.src_in, h.src_out, h.score, "hook"
+                o.motion_face, o.voice_floor = None, 0.0      # (the old moment's face and noise: found again)
                 hooks[k] = o
         self.project.clips = hooks + rest
         self._after_structure_change()
+        self._measure_noise(hooks)
+        self._find_motion_faces(hooks)
+        self.measure_shake()
         self.tl.selected = hooks[0].id
         self.tl.update()
         self.inspector.set_clip(self._inspected())
@@ -2740,7 +2744,7 @@ class MainWindow(QMainWindow):
             return
         dlg = ChaptersDialog(self.project, self)
         dlg.exec()
-        if dlg.added:
+        if dlg.changed:
             self.refresh_all()
 
     def _timeline_seek(self, t: float):

@@ -97,6 +97,8 @@ def make(project: Project) -> tuple[list[Chapter], str]:
             if starts[i] - cuts[-1][1] >= MIN_CHAPTER and end - starts[i] >= MIN_CHAPTER:
                 cuts.append((i, starts[i]))
         how = "parts"
+        if len(cuts) < MIN_CHAPTERS:          # (too few clips to cut at): YouTube would ignore them
+            return [], ""
     out = []
     for k, (i, t) in enumerate(cuts):
         i1 = cuts[k + 1][0] if k + 1 < len(cuts) else len(clips)

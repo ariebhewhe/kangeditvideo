@@ -93,22 +93,30 @@ def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
     return canvas
 
 
-def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool, fill: str = "black") -> str:
+def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool, fill: str = "black",
+            cut: tuple = (0, 0)) -> str:
     """Scale and crop whose size and position follow a motion command file per frame (see motion.export_plan):
-    the crop is cut ss times larger and scaled down to the framed picture; turned when `rotates`."""
-    fg = (f"scale@{tag}s={p.scaled_w * ss}:{p.scaled_h * ss}:flags=lanczos{opts}{to},"
-          f"crop@{tag}c={p.crop_w * ss}:{p.crop_h * ss}:{p.crop_x * ss}:{p.crop_y * ss}")
+    the crop is cut ss times larger and scaled down to the framed picture; turned when `rotates`, from a window
+    `cut` (supersampled pixels) larger than the picture, whose middle is kept (the corners stay picture)."""
+    cw, ch = cut if cut[0] and cut[1] else (p.crop_w * ss, p.crop_h * ss)
+    fg = (f"scale@{tag}s={max(p.scaled_w * ss, cw)}:{max(p.scaled_h * ss, ch)}:flags=lanczos{opts}{to},"
+          f"crop@{tag}c={cw}:{ch}:{p.crop_x * ss}:{p.crop_y * ss}")
     if ss > 1:
-        fg += f",scale={p.crop_w}:{p.crop_h}:flags=lanczos"
+        fg += f",scale={cw // ss}:{ch // ss}:flags=lanczos"
     if rotates:
-        fg += f",rotate@{tag}r=0:ow=iw:oh=ih:c={fill}"
+        fg += f",rotate@{tag}r=0:ow={p.crop_w}:oh={p.crop_h}:c={fill}"
     return fg
+
+
+def _cut(motion: tuple) -> tuple:
+    return motion[3] if len(motion) > 3 else (0, 0)
 
 
 def ffmpeg_moving_layer(p: Placement, tag: str, motion: tuple) -> str:
     """A layer's picture scaled and cropped as Placement p, moving inside it by a command file per frame:
     motion (command file, supersampling, turns), see motion.export_plan. Ends with a comma."""
-    return f"sendcmd=f={motion[0]}," + _moving(p, tag, "", "", motion[1], motion[2], "none") + ","
+    return (f"sendcmd=f={motion[0]}," + _moving(p, tag, "", "", motion[1], motion[2], "none", _cut(motion))
+            + ",")
 
 
 def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox: float, oy: float,
@@ -125,11 +133,11 @@ def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox
     cmds = ""
     if motion:
         cmds = f"sendcmd=f={motion[0]},"
-        fg = _moving(p, tag, opts, to, motion[1], motion[2])
+        fg = _moving(p, tag, opts, to, motion[1], motion[2], cut=_cut(motion))
     if p.crop_w == tw and p.crop_h == th:
         return f"[{inp}]{cmds}{fg},setsar=1[{out}]"
     if mode == "blur":
-        fg = (_moving(p, tag, "", "", motion[1], motion[2]) if motion else
+        fg = (_moving(p, tag, "", "", motion[1], motion[2], cut=_cut(motion)) if motion else
               f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos,"
               f"crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y}")
         bp = place(sw, sh, tw, th, "fill")

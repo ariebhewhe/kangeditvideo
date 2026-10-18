@@ -195,9 +195,12 @@ class HookPicker(QDialog):
         if not got and not fresh:                # every strong moment was offered: start the round again
             self.shown = list(kept)
             got = self.fetch(self.count, kept)
+        if kept:                                 # as many cards as before: the ticked ones take some places
+            got = got[:max(1, len(got) - len(kept))]
+        # (only what is shown counts as offered: the rest comes with More suggestions)
         self.shown += [TimelineClip.from_dict(c.to_dict()) for c in got]
         self._length = self.length_for(self.count)
-        self._show(kept + got[:max(0, len(got) - len(kept))] if kept else got, len(kept))
+        self._show(kept + got, len(kept))
 
     def _show(self, clips: list, ticked: int = 0) -> None:
         """Cards for `clips`; the first `ticked` stay ticked in that order, else the strongest are ticked."""

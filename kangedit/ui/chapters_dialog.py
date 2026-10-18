@@ -16,11 +16,13 @@ class ChaptersDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("YouTube chapters")
         self.project = project
-        self.added = 0                      # title cards added (the main window refreshes the timeline)
+        self.added = 0                      # title cards added
+        self.changed = False                # the titles changed (cards added or taken off): the timeline refreshes
         found, how = chap.make(project)
         lay = QVBoxLayout(self)
         if not found:
-            note = "The edit is too short for chapters: YouTube needs at least 3 of 10 s or more."
+            note = ("No chapters for this edit: YouTube needs at least 3 of 10 s or more, each starting on a "
+                    "clip (too short, or too few clips).")
         elif how == "scenes":
             note = ("A chapter for each scene of the edit (another day or place), named by its day and what is "
                     "said first. Edit the names, then paste the lines into the video's description.")
@@ -69,5 +71,5 @@ class ChaptersDialog(QDialog):
             tc.duration = min(CARD_SECONDS, self.project.duration - c.start)
             self.project.texts.append(tc)
         self.project.dirty = True
-        self.added = len(found)
+        self.added, self.changed = len(found), True
         self.lbl.setText(f"{len(found)} title card(s) added (Undo takes them off)")

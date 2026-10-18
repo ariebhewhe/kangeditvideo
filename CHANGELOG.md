@@ -78,6 +78,14 @@ and the Release workflow uses that section as the GitHub release notes.
   menu item moved the file's playhead instead of the edit's: it now shows the edit there. Back from Source
   mode after an Undo the playhead stays on the (shorter) edit; removing the file shown goes back to the edit;
   I / O mark in and out in full screen too.
+- Stabilization did almost nothing on a clip that doesn't start its file: only every other frame's shake was
+  measured. Measured again (every frame) on first use.
+- An exported stabilized clip that turns showed black wedges at its edges (the preview didn't): the window is
+  cut larger, so its corners are picture.
+- 🎣 Hook: *More suggestions* skipped moments while some were ticked; a new hook clip kept the old moment's
+  face position and noise level.
+- YouTube chapters: an edit of only 1 or 2 clips gave fewer than the 3 chapters YouTube needs; taking the
+  title cards off didn't refresh the timeline.
 - The timeline's right-click menu showed the J / L cut menu twice and no *Split at playhead*.
 - *Auto* uses Whisper when Qwen3-ASR can't be downloaded (no internet), instead of failing.
 - Closing KangEdit during a Qwen3-ASR transcription left its helper process running; it now ends with the

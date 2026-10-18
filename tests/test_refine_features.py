@@ -354,9 +354,11 @@ def test_hook_button_offers_the_strongest_moments_as_thumbnails(window, monkeypa
         return HookPicker.Accepted
 
     monkeypatch.setattr(HookPicker, "exec", run)
+    window.project.clips[0].motion_face, window.project.clips[0].voice_floor = [0.9, 0.1], -30.0   # old moment's
     window.new_hook()
     clips = window.project.clips
     assert [c.label for c in clips[:2]] == ["hook", "hook"] and clips[2].label == ""
+    assert clips[0].motion_face is None and clips[0].voice_floor == 0.0            # not the old moment's
     assert [(c.footage_id, c.src_in) for c in clips[:2]] == seen["chosen"]
     assert len(clips) == 3 and clips[2].src_in == 12.0               # the hook replaced the first clip
     assert window.last_auto.hook_clips == 2                         # the next auto edit's hook has 2 clips
@@ -595,3 +597,24 @@ def test_moving_a_transcript_row_moves_the_clip(window):
     m = window.edit_text.list.model()
     assert m.moveRow(QModelIndex(), 2, QModelIndex(), 0)       # the row a drag moves
     assert [x.id for x in window.project.clips] == [c.id, a.id, b.id]
+
+
+def test_more_suggestions_shows_every_moment_in_turn(qapp):
+    from kangedit.ui.hook_picker import HookPicker
+    pool = [TimelineClip("f", 10.0 * k, 10.0 * k + 2.0) for k in range(20)]
+
+    def fetch(count, avoid):
+        taken = {c.src_in for c in avoid}
+        return [c for c in pool if c.src_in not in taken][:6]
+
+    dlg = HookPicker(None, 2, fetch, lambda c: None, lambda c: f"{c.src_in:g}", lambda n: 2.0)
+    seen = {c.src_in for _, c in dlg.cards}
+    for b, _ in dlg.cards[:2]:
+        b.setChecked(True)
+    for _ in range(5):
+        dlg.more()                                      # two ticked: they stay, new ones fill the rest
+        new = [c.src_in for _, c in dlg.cards[2:]]
+        assert new and not (set(new) & seen)
+        seen |= set(new)
+    assert seen == {c.src_in for c in pool}             # none skipped
+    dlg.deleteLater()

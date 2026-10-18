@@ -166,6 +166,9 @@ def test_stabilize_holds_a_shaky_camera_steady(tmp_path, monkeypatch):
     e = _frames(out)
     assert len(e) == 60 and _jitter(list(e)) < 0.25 * _jitter(orig)
     assert np.mean([np.abs(e[k].astype(float) - steady[k]).mean() for k in range(5, 55)]) < 12.0
+    full = _frames(out, 1280, 720)                       # turned, its corners are picture (no black wedges)
+    corners = [fr[a:a + 40, b:b + 40] for fr in full[5:55] for a in (0, 680) for b in (0, 1240)]
+    assert max(int((c.max(axis=2) < 16).sum()) for c in corners) < 20
 
 
 def test_zoom_on_the_face_goes_to_the_face():
@@ -255,3 +258,16 @@ def test_moving_clip_keeps_its_sound_next_to_another(tmp_path, kw):
                          capture_output=True).stdout
     sound = np.frombuffer(pcm, np.float32)
     assert sound.size > 40000 and np.sqrt(np.mean(sound ** 2)) > 0.05           # the moving clip is heard
+
+
+def test_shake_is_measured_on_every_frame_of_a_clip_later_in_its_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(stabilize, "cache_dir", lambda sub: tmp_path)
+    monkeypatch.setattr(stabilize, "_tracks", {})
+    monkeypatch.setattr(stabilize, "_corrections", {})
+    src = str(tmp_path / "shaky.mp4")
+    _shaky(src, n=300)                                   # 10 s, with B-frames
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    tr = stabilize.analyze(f, 5.0, 8.0, use_proxy=False)
+    got = int(np.sum((tr.t >= 5.0) & (tr.t <= 8.0)))
+    assert got >= 85                                     # 3 s at 30 fps: every frame, not every other one

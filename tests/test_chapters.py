@@ -51,6 +51,8 @@ def test_too_few_scenes_split_into_parts(tmp_path):
     assert got[0].title == "Part 1"
     p.clips = p.clips[:1]                                                           # 15 s: no chapters
     assert chapters.make(p) == ([], "")
+    p.clips = [TimelineClip(f.id, 0.0, 300.0), TimelineClip(f.id, 300.0, 600.0)]   # 10 minutes, 2 clips
+    assert chapters.make(p) == ([], "")                                             # 2 parts: YouTube ignores
 
 
 def test_title_cards(qapp, tmp_path):
@@ -67,3 +69,7 @@ def test_title_cards(qapp, tmp_path):
     assert len(p.texts) == 2
     p.undo()
     assert len(p.texts) == 2                          # the second add's undo brings back the first's cards
+    d = ChaptersDialog(p)
+    d.text.setPlainText("")                           # every line taken out: the cards go
+    d.add_cards()
+    assert not p.texts and d.added == 0 and d.changed  # (the main window refreshes the timeline)

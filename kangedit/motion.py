@@ -177,6 +177,9 @@ class Plan:
     tag: str
     commands: list = field(default_factory=list)   # sendcmd lines
     rotates: bool = False
+    # A turning clip's window, cut larger than the picture (supersampled pixels) so that turned, its corners
+    # are still picture (as the preview's), not black; (0, 0): as large as the picture.
+    cut: tuple = (0, 0)
 
 
 def export_plan(m: Motion, clip, p, sw: int, sh: int, frames: int, pre_f: int, fps: float, tag: str,
@@ -187,9 +190,15 @@ def export_plan(m: Motion, clip, p, sw: int, sh: int, frames: int, pre_f: int, f
     cut ss times larger, then scaled down, so it moves in steps of 1/ss pixel)."""
     plan = Plan(tag)
     cw, ch = p.crop_w * ss, p.crop_h * ss
-    for n in range(frames):
-        off = (n - pre_f) / fps
-        cx, cy, z, turn = m.at_placement(off, clip.src_at(off), p)
+    at = [m.at_placement((n - pre_f) / fps, clip.src_at((n - pre_f) / fps), p) for n in range(frames)]
+    most = max((abs(a[3]) for a in at), default=0.0)
+    if most > 1e-4:                        # the window turned by up to `most` degrees still covers the picture
+        c, s = abs(np.cos(np.radians(most))), abs(np.sin(np.radians(most)))
+        step = 2 * ss                      # (even, and whole pixels once scaled down)
+        cw = int(np.ceil((p.crop_w * c + p.crop_h * s) * ss / step)) * step
+        ch = int(np.ceil((p.crop_w * s + p.crop_h * c) * ss / step)) * step
+        plan.cut = (cw, ch)
+    for n, (cx, cy, z, turn) in enumerate(at):
         w = max(cw, int(round(p.scaled_w * z * ss / 2.0)) * 2)
         h = max(ch, int(round(p.scaled_h * z * ss / 2.0)) * 2)
         zx, zy = w / (p.scaled_w * ss), h / (p.scaled_h * ss)

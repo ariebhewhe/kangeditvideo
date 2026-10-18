@@ -306,7 +306,7 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                 name = f"motion_ov{j}_{c.id}.txt"
                 with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh_:
                     fh_.write("\n".join(mp.commands) + "\n")
-                chain += reframe.ffmpeg_moving_layer(pl, f"ovm{j}", (name, ss, mp.rotates))
+                chain += reframe.ffmpeg_moving_layer(pl, f"ovm{j}", (name, ss, mp.rotates, mp.cut))
             else:
                 chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
                 if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
@@ -435,7 +435,7 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
             name = f"motion_{i}.txt"
             with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh:
                 fh.write("\n".join(mp.commands) + "\n")
-            moving = (name, sup, mp.rotates)
+            moving = (name, sup, mp.rotates, mp.cut)
         chain.append(reframe.ffmpeg_filter(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y,
                                            f"v{j}a", f"v{j}b", f"c{j}", convert, moving))
         post = f"[v{j}b]"
