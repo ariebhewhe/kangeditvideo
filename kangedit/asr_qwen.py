@@ -23,9 +23,12 @@ from typing import Callable, Optional
 import numpy as np
 
 MODEL = "qwen3-asr"                        # the speech model setting that picks it (captions.WHISPER_MODELS)
-REPO = "shigedonsan/qwen3-asr-1.7b-sherpa-onnx-int8-4096"   # Qwen3-ASR-1.7B for sherpa-onnx (int8 decoder)
-DOWNLOAD_GB = 2.5
-CHUNK = 25.0                               # seconds of speech decoded at once (stretches of speech, joined)
+# Qwen3-ASR-1.7B in sherpa-onnx's layout, int8 (the same files in both; the second if the first is gone).
+REPOS = ("thieunv-asilla/sherpa-onnx-qwen3-asr-1.7B-int8", "ilmina/qwen3-asr-1.7b-sherpa-onnx")
+DOWNLOAD_GB = 2.4
+CHUNK = 20.0                               # seconds of speech decoded at once (stretches of speech, joined)
+MAX_TOTAL_LEN = 512                        # the model's limit (prompt + audio + text tokens): about 20 s at once
+MAX_NEW_TOKENS = 256
 TIMING_MODEL = "base"                      # the Whisper model that times the words
 RATE = 16000
 WORKER_FLAG = "--asr-worker"
@@ -97,20 +100,27 @@ def ensure_model(progress: Optional[Callable[[float, str], None]] = None,
     files = find_files(model_dir())
     if files is not None:
         return files
-    try:
-        from huggingface_hub import HfApi, snapshot_download
-        info = HfApi().model_info(REPO, files_metadata=True)
+    from huggingface_hub import HfApi, snapshot_download
+    repo, total, failed = None, 0, None
+    for rid in REPOS:
+        try:
+            info = HfApi().model_info(rid, files_metadata=True)
+        except Exception as e:  # noqa: BLE001 - gone or unreachable: the next one
+            failed = e
+            continue
+        repo = rid
         total = sum(s.size or 0 for s in info.siblings if any(fnmatch(s.rfilename, p) for p in PATTERNS))
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Can't download the Qwen3-ASR model ({e}). Check the internet connection, or "
-                           "choose a Whisper model.") from e
+        break
+    if repo is None:
+        raise RuntimeError(f"Can't download the Qwen3-ASR model ({failed}). Check the internet connection, or "
+                           "choose a Whisper model.") from failed
     folder = model_dir()
     folder.mkdir(parents=True, exist_ok=True)
     out: dict = {}
 
     def work():
         try:
-            snapshot_download(REPO, local_dir=str(folder), allow_patterns=PATTERNS)
+            snapshot_download(repo, local_dir=str(folder), allow_patterns=PATTERNS)
         except BaseException as e:  # noqa: BLE001
             out["error"] = e
 
@@ -141,7 +151,29 @@ def clean(text: str) -> tuple[str, str]:
     if m:
         lang = LANG_CODES.get(m.group(1).lower(), "")
         text = text[m.end():]
-    return re.sub(r"\s+", " ", _SPECIAL.sub(" ", text or "")).strip(), lang
+    return collapse_repeats(re.sub(r"\s+", " ", _SPECIAL.sub(" ", text or "")).strip()), lang
+
+
+def collapse_repeats(text: str, keep: int = 1) -> str:
+    """A phrase said over and over (a language model stuck in a loop over noise: "Ibu siapa? Ibu siapa? ...")
+    kept `keep` times: runs of 3 or more of the same 1-40 words (a whole sentence over and over too)."""
+    words = text.split()
+    norm = [_norm(w) for w in words]
+    for n in range(1, 41):
+        i = 0
+        while i + 3 * n <= len(words):
+            unit = norm[i:i + n]
+            if not any(unit):
+                i += 1
+                continue
+            k = 1
+            while norm[i + k * n:i + (k + 1) * n] == unit:
+                k += 1
+            if k >= 3:
+                del words[i + keep * n:i + k * n]
+                del norm[i + keep * n:i + k * n]
+            i += 1
+    return " ".join(words)
 
 
 def split_words(text: str) -> list[str]:
@@ -151,6 +183,25 @@ def split_words(text: str) -> list[str]:
 
 def _norm(s: str) -> str:
     return re.sub(r"[^\w]", "", s.lower())
+
+
+def fixed_chunks(audio: np.ndarray, chunk: float = CHUNK) -> list[tuple[float, float]]:
+    """The whole sound in pieces of up to `chunk` seconds, each cut at the quietest moment of its last 4 s (less
+    likely in the middle of a word)."""
+    dur = audio.size / RATE
+    out, a = [], 0.0
+    while dur - a > 0.3:
+        b = min(dur, a + chunk)
+        if b < dur:
+            lo, hop = int((b - 4.0) * RATE), RATE // 20
+            seg = audio[lo:int(b * RATE)]
+            n = seg.size // hop
+            if n > 2:
+                rms = np.sqrt(np.mean(seg[: n * hop].reshape(n, hop) ** 2, axis=1))
+                b = (lo + int(np.argmin(rms)) * hop + hop // 2) / RATE
+        out.append((round(a, 3), round(b, 3)))
+        a = b
+    return out
 
 
 def speech_chunks(audio: np.ndarray, chunk: float = CHUNK) -> list[tuple[float, float]]:
@@ -310,7 +361,7 @@ def worker_main(args: list[str]) -> int:
         f = job["files"]
         rec = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
             conv_frontend=f["conv_frontend"], encoder=f["encoder"], decoder=f["decoder"], tokenizer=f["tokenizer"],
-            num_threads=int(job.get("threads", 4)), max_total_len=4096, max_new_tokens=1024)
+            num_threads=int(job.get("threads", 4)), max_total_len=MAX_TOTAL_LEN, max_new_tokens=MAX_NEW_TOKENS)
         audio = np.fromfile(job["audio"], dtype=np.float32)
         for k, (a, b) in enumerate(job["chunks"]):
             st = rec.create_stream()
@@ -323,14 +374,29 @@ def worker_main(args: list[str]) -> int:
         return 1
 
 
+_CJK_RUN = re.compile(r"[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]+")
+
+
+def drop_odd_script(texts: list[str]) -> list[str]:
+    """When the speech is mostly in Latin letters, Chinese / Japanese / Korean in it is noise Qwen3-ASR heard as
+    words (a road's roar before anyone speaks: "宝宝好，再见。"), not speech: taken out."""
+    cjk = sum(len(m) for t in texts for m in _CJK_RUN.findall(t))
+    latin = sum(len(re.findall(r"[A-Za-z]", t)) for t in texts)
+    if latin <= cjk:
+        return texts
+    return [re.sub(r"\s+", " ", _CJK_RUN.sub(" ", t)).strip(" ,.") for t in texts]
+
+
 def transcribe(audio: np.ndarray, language: str = "", progress: Optional[Callable[[float], None]] = None,
                cancel: Optional[threading.Event] = None, offset: float = 0.0,
-               timing: Optional[Callable[[np.ndarray, str], list[dict]]] = None) -> tuple[list[dict], str]:
+               timing: Optional[Callable[[np.ndarray, str], tuple[list[dict], str]]] = None,
+               vad: bool = True) -> tuple[list[dict], str]:
     """Words [{"s", "e", "w"}] (times + offset) and the language. timing(audio, language) -> Whisper's timed
-    words of the same sound (captions.transcribe_audio with TIMING_MODEL)."""
+    words of the same sound and its language (captions.transcribe_audio with TIMING_MODEL): the language when
+    neither the setting nor Qwen3-ASR names one."""
     from .captions import cpu_threads
     files = ensure_model(cancel=cancel)
-    chunks = speech_chunks(audio)
+    chunks = speech_chunks(audio) if vad else fixed_chunks(audio)   # (noise: the whole sound, see captions)
     if not chunks:
         return [], language
     answers = run_model(audio, chunks, files, cpu_threads(),
@@ -341,8 +407,10 @@ def transcribe(audio: np.ndarray, language: str = "", progress: Optional[Callabl
         texts.append(t)
         if lang:
             langs.append(lang)
-    lang = language or (max(set(langs), key=langs.count) if langs else "")
-    ref = timing(audio, lang) if timing is not None else []
+    texts = drop_odd_script(texts)
+    # (timed in the language asked for, else Whisper's own guess: Qwen3-ASR may call Indonesian Malay)
+    ref, ref_lang = timing(audio, language) if timing is not None else ([], "")
+    lang = language or (max(set(langs), key=langs.count) if langs else "") or ref_lang
     if progress:
         progress(0.99)
     words: list[dict] = []

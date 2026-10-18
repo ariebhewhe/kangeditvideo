@@ -108,7 +108,7 @@ def test_media_panel_transcribes_only_what_is_missing(qapp, monkeypatch):
         p = Project()
         files = [Footage(f"m{k}.mp4", 30.0, 1920, 1080, 30.0, True) for k in range(3)]
         files[0].transcript = [{"s": 0.0, "e": 0.5, "w": "kept"}]
-        files[2].transcript = []                                         # transcribed: no speech in it
+        files[2].transcript = []                                         # "nobody speaks": done again
         p.footage = {f.id: f for f in files}
         w.set_project(p)
         queued = []
@@ -118,14 +118,33 @@ def test_media_panel_transcribes_only_what_is_missing(qapp, monkeypatch):
                             lambda *a: asked.append(a[2]) or QMessageBox.No)
         from kangedit.ui.main_window import QMessageBox
         w.bin_action("transcribe", [f.id for f in files])                 # all selected, right-click
-        assert queued == [([files[1].id], False)] and not asked
-        assert "2 already transcribed, kept" in w.lbl_status.text()
-        files[1].transcript = []
+        assert queued == [([files[1].id, files[2].id], True)] and not asked
+        assert "1 already transcribed, kept" in w.lbl_status.text()
+        files[1].transcript = files[2].transcript = [{"s": 0.0, "e": 0.5, "w": "hi"}]
         w.bin_action("transcribe", [f.id for f in files])                 # all done: ask first
         assert len(asked) == 1 and "already transcribed" in asked[0] and len(queued) == 1
         monkeypatch.setattr("kangedit.ui.main_window.QMessageBox.question", lambda *a: QMessageBox.Yes)
         w.bin_action("transcribe", [files[0].id])
         assert queued[-1] == ([files[0].id], True)
+    finally:
+        w.project.dirty = False
+        w.close()
+
+
+def test_empty_transcript_is_transcribed_again_without_asking(qapp, monkeypatch):
+    from kangedit.models import Footage, Project
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        f = Footage("noisy.mp4", 30.0, 1920, 1080, 30.0, True)
+        f.transcript = []                                      # "nobody speaks" (an older version, in loud noise)
+        p = Project()
+        p.footage = {f.id: f}
+        w.set_project(p)
+        asked = []
+        monkeypatch.setattr(w, "queue_transcription", lambda ids, force=False: asked.append((ids, force)))
+        w.bin_action("transcribe", [f.id])
+        assert asked == [([f.id], True)]
     finally:
         w.project.dirty = False
         w.close()

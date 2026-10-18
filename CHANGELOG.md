@@ -60,8 +60,20 @@ and the Release workflow uses that section as the GitHub release notes.
   in the background cancelled the preview sound being mixed and started it again, so on a big project, while
   proxies were being made, the new mix never finished and playback kept the sound from before the music. A
   finished proxy no longer mixes the sound again, and a mix taking a while is shown in the status bar.
+- Speech under loud constant noise (a car's road roar) gave no text at all: voice activity detection heard
+  no voice in it, so the file was cached as "nobody speaks". When the background is loud the recogniser now
+  hears the whole sound; a fake sign-off Whisper adds at the end of such a file ("Terima kasih telah
+  menonton!") and Chinese Qwen3-ASR hears in the noise of a non-Chinese video are dropped. Files cached
+  empty by an older version are transcribed again (Transcribe for captions no longer asks for them).
+- Qwen3-ASR did nothing: the model it downloaded from did not exist. It now downloads from a published
+  sherpa-onnx export (with a second one as fallback), hears the sound in 20 s pieces (its limit) and
+  collapses the phrase loops it can fall into over noise.
+- The Refine panel could be made so narrow that its tabs (Layer, Caption, Text…) were cut off: its smallest
+  width now shows every tab.
 
 ### Changed
+- The *Auto* speech model picks Qwen3-ASR on a computer that runs it well (6 or more CPU cores, 12 GB of
+  memory or more), else Whisper large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU.
 - A *Hook first* edit has its hook only at the beginning of the timeline. Long-form *Hook first* edits also
   opened every later scene with a scenic shot, with a dissolve and its sound leading in, which played like
   another hook in every scene; scene openers are now only added to edits in story order (*Chronological*).

@@ -72,7 +72,7 @@ from .viewer import ADJUST_MODES, Viewer
 log = logging.getLogger(__name__)
 
 AUDIO_SLOW_MS = 2500       # a preview mix taking longer than this is shown in the status bar
-REFINE_MIN_WIDTH = 300     # the Refine panel can be dragged this narrow (its tabs then scroll sideways)
+REFINE_MIN_WIDTH = 300     # the Refine panel can be dragged this narrow, or to its tabs' width when wider
 FACE_SAMPLES = 9           # frames of a clip searched for its main face (Zoom to face)
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 
@@ -84,6 +84,15 @@ class RefineTabs(QTabWidget):
     def __init__(self):
         super().__init__()
         self._pages: dict[QWidget, QWidget] = {}
+        # Every tab stays in sight (no scroll arrows hiding some): the panel is never narrower than its tabs,
+        # which are kept compact for it.
+        self.setUsesScrollButtons(False)
+        self.tabBar().setElideMode(Qt.ElideNone)
+        self.setStyleSheet("QTabBar::tab { padding: 6px 7px; }")
+
+    def tabs_width(self) -> int:
+        """The width every tab needs (the panel's narrowest)."""
+        return self.tabBar().sizeHint().width() + 6
 
     def add(self, panel: QWidget, label: str) -> None:
         page = panel
@@ -188,22 +197,23 @@ class MainWindow(QMainWindow):
         tabs.setTabToolTip(5, "What is said in the edit, clip by clip: click to go there, drag to reorder the clips")
         tabs.currentChanged.connect(lambda _i: self._refresh_edit_text())
         self.right_tabs = tabs
-        for panel in (self.inspector, self.layer_panel, self.caps_panel, self.text_panel, self.sfx_panel, self.viewer):
+        for panel in (self.inspector, self.layer_panel, self.caps_panel, self.text_panel, self.sfx_panel):
             compact_combos(panel)
+        compact_combos(self.viewer, 6)          # its controls row sets the window's narrowest
         d_right = QDockWidget("3. Refine", self)
         d_right.setObjectName("clip")
         d_right.setWidget(tabs)
         d_right.setFeatures(QDockWidget.NoDockWidgetFeatures)
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
-        # It starts wide enough for the widest tab (plus its scroll bar), and can be dragged narrower (to
-        # REFINE_MIN_WIDTH): the tabs then scroll sideways. The width chosen is remembered.
+        # It starts wide enough for the widest tab (plus its scroll bar), and can be dragged narrower, but never
+        # so narrow that a tab is hidden: the pages then scroll sideways. The width chosen is remembered.
         need = max(p.minimumSizeHint().width() for p in (self.inspector.widget(), self.text_panel.widget(),
                                                           self.layer_panel.widget(), self.caps_panel,
                                                           self.sfx_panel)) + 24
-        d_right.setMinimumWidth(REFINE_MIN_WIDTH)
-        self._right_width = max(370, need)
+        d_right.setMinimumWidth(max(REFINE_MIN_WIDTH, tabs.tabs_width()))
+        self._right_width = max(370, need, d_right.minimumWidth())
         saved = self.qs.value("refine_width", 0, type=int)
-        self.resizeDocks([d_bin, d_right], [430, saved if saved >= REFINE_MIN_WIDTH else self._right_width],
+        self.resizeDocks([d_bin, d_right], [430, saved if saved >= d_right.minimumWidth() else self._right_width],
                          Qt.Horizontal)
         self.d_bin, self.d_right = d_bin, d_right
 
@@ -4154,12 +4164,15 @@ class MainWindow(QMainWindow):
         """Media panel → Transcribe for captions: the selected files without a transcript; when they all have
         one, ask before transcribing them again (manual caption edits would be lost)."""
         media = [fid for fid in ids if fid in self.project.footage and not self.project.footage[fid].is_image]
-        todo = [fid for fid in media if self.project.footage[fid].transcript is None]
+        # An empty transcript is done again without asking (nothing to lose: speech an older version missed
+        # in loud noise, or with another model or noise setting).
+        todo = [fid for fid in media if not self.project.footage[fid].transcript]
         if todo:
             done = len(media) - len(todo)
             self.lbl_status.setText(f"Transcribing {len(todo)} file(s)"
                                     + (f" ({done} already transcribed, kept)" if done else ""))
-            self.queue_transcription(todo)
+            redo = any(self.project.footage[fid].transcript is not None for fid in todo)
+            self.queue_transcription(todo, force=redo)
             return
         if not media:
             return

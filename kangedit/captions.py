@@ -23,7 +23,8 @@ from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, run
 from .models import CaptionStyle, Footage, Project
 
 WHISPER_MODELS = {
-    "auto": "Auto — large-v3 on an NVIDIA GPU, large-v3-turbo otherwise (several times faster on the CPU)",
+    "auto": "Auto — follows the computer: Qwen3-ASR on a strong CPU (6+ cores, 12+ GB memory), else large-v3 on "
+            "an NVIDIA GPU or large-v3-turbo",
     "qwen3-asr": "Qwen3-ASR 1.7B — most accurate in many languages (Indonesian, English, Chinese…), slower; "
                  "2.5 GB download",
     "large-v3": "large-v3 — most accurate (slowest)",
@@ -63,7 +64,7 @@ MAX_MODELS = 2           # the captions model and the small one used to listen f
 
 def model_ready(name: str) -> bool:
     """Whether the speech model is loaded already (using it starts at once)."""
-    if name == asr_qwen.MODEL:
+    if resolve_model(name) == asr_qwen.MODEL:
         return asr_qwen.ready()
     return resolve_model(name) in _models
 
@@ -86,11 +87,45 @@ def _device() -> str:
     return "cuda" if _cuda else "cpu"
 
 
+def total_ram_gb() -> float:
+    """The computer's memory, GB (0 when it can't be read)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = Status()
+            st.dwLength = ctypes.sizeof(Status)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+            return st.ullTotalPhys / 1e9
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+
+
+QWEN_MIN_CORES = 6       # Qwen3-ASR on the CPU: about real time on 4 cores, well under on 6 or more
+QWEN_MIN_RAM = 12.0      # GB: the 1.7B model takes about 3 GB while it works, next to the editor
+
+
+def qwen_suits() -> bool:
+    """Whether this computer runs Qwen3-ASR well enough for Auto to pick it: sherpa-onnx installed, a CPU of
+    QWEN_MIN_CORES physical cores or more and QWEN_MIN_RAM GB of memory."""
+    return asr_qwen.available() and cpu_threads() >= QWEN_MIN_CORES and total_ram_gb() >= QWEN_MIN_RAM
+
+
 def resolve_model(name: str) -> str:
-    """The speech model to use for a setting: "auto" is large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU
+    """The speech model to use for a setting. "auto" follows the computer: Qwen3-ASR (the most accurate) on a
+    strong CPU with plenty of memory (qwen_suits), else large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU
     (CTranslate2 has no AMD or Intel GPU support: there, turbo's 4 decoder layers instead of 32 make it several
     times faster at nearly the same accuracy)."""
     if name in ("", "auto"):
+        if qwen_suits():
+            return asr_qwen.MODEL
         return "large-v3" if _device() == "cuda" else "large-v3-turbo"
     return name
 
@@ -146,7 +181,7 @@ def _batched(model):
 
 def load_model(name: str, progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None) -> None:
     """Load the speech model now (before a batch of files), saying so only when it isn't loaded yet."""
-    if name == asr_qwen.MODEL:
+    if resolve_model(name) == asr_qwen.MODEL:
         if not asr_qwen.available():
             raise RuntimeError("Qwen3-ASR needs sherpa-onnx: run the installer again (or pip install sherpa-onnx)")
         asr_qwen.ensure_model(progress, cancel)
@@ -209,25 +244,39 @@ def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = N
     return np.frombuffer(res.stdout, dtype=np.float32).copy()
 
 
+# Phrases Whisper is known to write over noise or silence (from the subtitles it learned on), dropped when it
+# isn't sure there is speech.
+_INVENTED = {"terima kasih", "terima kasih sudah menonton", "thank you", "thanks for watching",
+             "thank you for watching", "subscribe", "please subscribe", "you", "bye", "terima kasih telah menonton",
+             "sampai jumpa", "sous-titrage st' 501", "untertitel im auftrag des zdf"}
+
+
+def _invented(text: str) -> bool:
+    return re.sub(r"[^\w\s']", "", text.lower()).strip() in _INVENTED
+
+
 def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
                      progress=None, cancel: Optional[threading.Event] = None, offset: float = 0.0,
-                     quick: bool = False) -> tuple[list[dict], str]:
+                     quick: bool = False, vad: bool = True) -> tuple[list[dict], str]:
     """Words [{"s", "e", "w"}] (times + offset) and the detected language, decoded for accuracy:
     beam search with temperature fallback, voice-activity filtering, and hallucination guards.
-    quick decodes greedily without fallback, enough to spot a phrase. Qwen3-ASR (asr_qwen.MODEL) writes the
-    words and a quick Whisper pass times them (quick: Whisper small alone)."""
-    if model_name == asr_qwen.MODEL:
+    quick decodes greedily without fallback, enough to spot a phrase. vad=False hears all of the sound: voice
+    activity detection finds no voice in loud noise (a car, wind), where the speech is still clear enough to
+    recognise. Qwen3-ASR (asr_qwen.MODEL) writes the words and a quick Whisper pass times them (quick: Whisper
+    small alone)."""
+    if resolve_model(model_name) == asr_qwen.MODEL:
         if quick:
             model_name = "small"
         else:
             return asr_qwen.transcribe(
                 audio, language, progress, cancel, offset,
-                timing=lambda a, lang: transcribe_audio(a, asr_qwen.TIMING_MODEL, lang, None, cancel, quick=True)[0])
+                timing=lambda a, lang: transcribe_audio(a, asr_qwen.TIMING_MODEL, lang, None, cancel, quick=True,
+                                                        vad=vad), vad=vad)
     model = _get_model(model_name)
     opts = dict(
         language=language or None,
         word_timestamps=True,
-        vad_filter=True,
+        vad_filter=vad,
         vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
         beam_size=1 if quick else 5,
         best_of=1 if quick else 5,
@@ -255,6 +304,9 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
             raise Cancelled()
         if seg.no_speech_prob > 0.75 and seg.avg_logprob < -0.8:
             continue    # almost certainly noise transcribed as words
+        if _invented(seg.text) and (seg.no_speech_prob > 0.4 or not vad and seg.end > dur - 3.0):
+            continue    # a phrase Whisper is known to invent over noise or silence (in loud noise its
+            #             no-speech score stays 0: the sign-off it adds at the end of the file is dropped)
         for w in seg.words or []:
             text = w.word.strip()
             if text:
@@ -307,7 +359,7 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
 
 
 MIN_SPEECH = 0.8         # seconds of speech below which a file isn't worth transcribing (views, B-roll)
-TRANSCRIPT_VERSION = 1
+TRANSCRIPT_VERSION = 2   # 2: noisy sound heard whole (version 1 left some speech in loud noise untranscribed)
 
 
 def speech_seconds(audio: np.ndarray) -> float:
@@ -355,7 +407,7 @@ def refine_word_times(words: list[dict], audio: np.ndarray, offset: float = 0.0,
 
 def model_note(model_name: str) -> str:
     """" with Qwen3-ASR" when that model transcribes (the status says which is at work), else ""."""
-    return " with Qwen3-ASR" if model_name == asr_qwen.MODEL else ""
+    return " with Qwen3-ASR" if resolve_model(model_name) == asr_qwen.MODEL else ""
 
 
 def transcript_path(footage: Footage, model_name: str, language: str) -> str:
@@ -377,7 +429,8 @@ def cached_transcript(footage: Footage, model_name: str, language: str,
         try:
             with open(p, encoding="utf-8") as fh:
                 d = json.load(fh)
-            if d.get("version") == TRANSCRIPT_VERSION:
+            # An empty transcript from version 1 may be speech it missed in loud noise: transcribed again.
+            if d.get("version") == TRANSCRIPT_VERSION or (d.get("version") == 1 and d.get("words")):
                 return d["words"], d.get("language", language)
         except (OSError, ValueError, KeyError):
             continue
@@ -416,18 +469,21 @@ def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
     audio = _load_audio_16k(footage.path)   # the original's audio: proxies may be re-encoded
     heard = audio
     floor = needs_cleanup(audio, cleanup) if audio.size else None
+    # In loud noise (a car, wind, a crowd) voice activity detection finds no voice even where the speech is
+    # clear enough to recognise: such sound is heard whole, never skipped as "nobody speaks".
+    noisy = audio.size > 0 and needs_cleanup(audio, "auto") is not None
     if floor is not None:
         if progress:
             progress(0.0, f"Cleaning the background noise out of {footage.name}…")
         heard = _load_audio_16k(footage.path, filters=cleanup_filter(floor))
-    if audio.size == 0 or speech_seconds(heard) < MIN_SPEECH:
+    if audio.size == 0 or (not noisy and speech_seconds(heard) < MIN_SPEECH):
         words, lang = [], language
     else:
         load_model(model_name, progress)
         words, lang = transcribe_audio(heard, model_name, language,
                                        (lambda p: progress(p, f"Transcribing {footage.name}{model_note(model_name)}"))
                                        if progress else None,
-                                       cancel)
+                                       cancel, vad=not noisy)
         words = refine_word_times(words, heard)       # (on the cleaned sound the voice's edges stand out)
     save_transcript(footage, model_name, language, words, lang)
     footage.transcript = words

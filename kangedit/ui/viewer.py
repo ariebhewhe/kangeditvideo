@@ -354,7 +354,7 @@ class Viewer(QWidget):
                        (self.btn_play, "Play / Pause (Space)"), (self.btn_next, "Next clip (Down)"),
                        (self.btn_end, "Go to end (End)")):
             b.setToolTip(tip)
-            b.setFixedWidth(40)
+            b.setFixedWidth(34)
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_start.clicked.connect(lambda: self.seek(0))
         self.btn_end.clicked.connect(lambda: self.seek(max(0.0, self.project.duration - 1e-3)))
@@ -396,6 +396,7 @@ class Viewer(QWidget):
             b.setCheckable(True)
             b.setToolTip(tip)
             b.setFocusPolicy(Qt.NoFocus)
+            b.setStyleSheet("padding: 3px 6px;")
         self.btn_timeline.setChecked(True)
         self.btn_source.setEnabled(False)
         self.btn_timeline.clicked.connect(lambda: self.show_timeline())

@@ -56,7 +56,7 @@ FAKE_SHERPA = textwrap.dedent('''
         @classmethod
         def from_qwen3_asr(cls, conv_frontend, encoder, decoder, tokenizer, num_threads=1, max_total_len=512,
                            max_new_tokens=128, **kw):
-            assert conv_frontend.endswith("conv_frontend.onnx") and max_total_len == 4096
+            assert conv_frontend.endswith("conv_frontend.onnx") and max_total_len == 512
             return cls()
 
         def create_stream(self):
@@ -94,12 +94,12 @@ def test_helper_process_transcribes_and_words_are_timed(fake_sherpa, monkeypatch
 
     def timing(audio, lang):
         seen.append(lang)
-        return [{"s": 0.2, "e": 0.6, "w": "halo"}, {"s": 3.2, "e": 3.5, "w": "halo"}]
+        return [{"s": 0.2, "e": 0.6, "w": "halo"}, {"s": 3.2, "e": 3.5, "w": "halo"}], "ms"
 
     progress = []
     words, lang = asr_qwen.transcribe(np.zeros(16000 * 8, np.float32), "", progress.append, None, offset=10.0,
                                       timing=timing)
-    assert lang == "id" and seen == ["id"]                      # Qwen's language times the words
+    assert lang == "id" and seen == [""]                        # timed in the language asked for (or detected)
     assert [w["w"] for w in words] == ["halo", "2", "detik", "halo", "4", "detik"]
     assert words[0]["s"] == pytest.approx(10.2) and words[3]["s"] == pytest.approx(13.2)
     assert words[-1]["e"] == pytest.approx(17.0) and progress and progress[-1] > 0.9
@@ -110,13 +110,13 @@ def test_helper_failure_is_reported(fake_sherpa, monkeypatch):
     (fake_sherpa / "conv_frontend_fp16.onnx").write_bytes(b"x")     # found, but the fake insists on the name
     monkeypatch.setattr(asr_qwen, "speech_chunks", lambda audio, chunk=asr_qwen.CHUNK: [(0.0, 1.0)])
     with pytest.raises(RuntimeError, match="Qwen3-ASR failed"):
-        asr_qwen.transcribe(np.zeros(16000, np.float32), "", timing=lambda a, lang: [])
+        asr_qwen.transcribe(np.zeros(16000, np.float32), "", timing=lambda a, lang: ([], ""))
 
 
 def test_captions_use_it_when_chosen(monkeypatch):
     called = {}
 
-    def fake(audio, language, progress, cancel, offset, timing):
+    def fake(audio, language, progress, cancel, offset, timing, vad=True):
         called["timing"] = timing
         return [{"s": 0.0, "e": 0.5, "w": "hi"}], "en"
 
@@ -178,3 +178,46 @@ def test_model_download_says_how_far_it_is(tmp_path, monkeypatch):
     monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(model_info=offline))
     with pytest.raises(RuntimeError, match="internet connection"):
         asr_qwen.ensure_model()
+
+
+def test_auto_picks_qwen_on_a_strong_computer(monkeypatch):
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(captions, "_device", lambda: "cpu")
+    monkeypatch.setattr(captions, "cpu_threads", lambda: 8)
+    monkeypatch.setattr(captions, "total_ram_gb", lambda: 32.0)
+    assert captions.resolve_model("auto") == asr_qwen.MODEL
+    assert captions.model_note("auto") == " with Qwen3-ASR"
+    monkeypatch.setattr(captions, "total_ram_gb", lambda: 8.0)                 # little memory
+    assert captions.resolve_model("auto") == "large-v3-turbo"
+    monkeypatch.setattr(captions, "_device", lambda: "cuda")
+    assert captions.resolve_model("auto") == "large-v3"
+    monkeypatch.setattr(captions, "total_ram_gb", lambda: 32.0)
+    monkeypatch.setattr(captions, "cpu_threads", lambda: 4)                     # few cores
+    assert captions.resolve_model("auto") == "large-v3"
+    monkeypatch.setattr(asr_qwen, "available", lambda: False)
+    monkeypatch.setattr(captions, "cpu_threads", lambda: 8)
+    assert captions.resolve_model("auto") == "large-v3"                       # not installed
+    assert captions.resolve_model("small") == "small"
+    assert captions.total_ram_gb.__name__ and captions.total_ram_gb() >= 0
+
+
+def test_loops_are_collapsed():
+    loop = "Liburan ke mana? " + "Ia di dalam tanah. Terlihat, ada matahari. " * 5 + "Terus."
+    assert asr_qwen.collapse_repeats(loop) == "Liburan ke mana? Ia di dalam tanah. Terlihat, ada matahari. Terus."
+    assert asr_qwen.collapse_repeats("Ibu siapa? " * 30 + "Ibu si") == "Ibu siapa? Ibu si"
+    assert asr_qwen.collapse_repeats("terus terus ada mobil") == "terus terus ada mobil"      # twice is speech
+    assert asr_qwen.clean("language Malay<asr_text>ke mana? ke mana? ke mana? ke mana?") == ("ke mana?", "ms")
+
+
+def test_noise_heard_as_chinese_is_taken_out_of_latin_speech():
+    got = asr_qwen.drop_odd_script(["宝宝好，再见。好，再见", "Hello. Kita sekarang mau ke mana Pak?", "nggak tahu, ng 。"])
+    assert got == ["", "Hello. Kita sekarang mau ke mana Pak?", "nggak tahu, ng"]
+    assert asr_qwen.drop_odd_script(["你好，我们去哪里", "OK"]) == ["你好，我们去哪里", "OK"]   # Chinese speech stays
+
+
+def test_language_is_whispers_when_qwen_names_none(monkeypatch):
+    monkeypatch.setattr(asr_qwen, "ensure_model", lambda cancel=None: {})
+    monkeypatch.setattr(asr_qwen, "speech_chunks", lambda audio, chunk=asr_qwen.CHUNK: [(0.0, 2.0)])
+    monkeypatch.setattr(asr_qwen, "run_model", lambda *a, **k: ["kita mau ke mana"])     # no "language X" tag
+    words, lang = asr_qwen.transcribe(np.zeros(16000 * 2, np.float32), "", timing=lambda a, lang: ([], "id"))
+    assert lang == "id" and len(words) == 4
