@@ -6,6 +6,12 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+- The hook is for the whole video again, not one moment per scene: the long-form teaser takes the strongest
+  moments of all the footage scored together (still never the same moment twice, nor one the edit already
+  shows), strongest first, wherever they were filmed. Before, each of its moments came from another scene
+  and was only the best of that scene. *Find a new hook clip* works the same way.
+
 ## [0.6.9] - 2026-10-17
 
 ### Changed
