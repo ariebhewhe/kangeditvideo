@@ -68,6 +68,10 @@ and the Release workflow uses that section as the GitHub release notes.
 - Qwen3-ASR did nothing: the model it downloaded from did not exist. It now downloads from a published
   sherpa-onnx export (with a second one as fallback), hears the sound in 20 s pieces (its limit) and
   collapses the phrase loops it can fall into over noise.
+- Downloading Qwen3-ASR stayed at 0 % on Windows: the download's progress bar wrote to a console the app
+  doesn't have, which stopped the download. Progress bars are off (the app shows its own), output with no
+  console to go to is dropped instead of failing, and a download that receives nothing for 3 minutes stops
+  with a message instead of waiting forever (it carries on where it stopped next time).
 - The Refine panel could be made so narrow that its tabs (Layer, Caption, Text…) were cut off: its smallest
   width now shows every tab.
 

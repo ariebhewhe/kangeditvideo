@@ -1,6 +1,7 @@
 """Qwen3-ASR: its answers cleaned, the sound cut into chunks, its words timed against Whisper's, and the helper
 process (here with a stand-in for sherpa-onnx: the real model can't be downloaded in the tests)."""
 
+import sys
 import textwrap
 
 import numpy as np
@@ -154,17 +155,19 @@ def test_model_download_says_how_far_it_is(tmp_path, monkeypatch):
     names = ["conv_frontend.onnx", "encoder.onnx", "decoder.int8.onnx", "vocab.json"]
 
     class Api:
-        def model_info(self, repo, files_metadata=False):
+        def model_info(self, repo, files_metadata=False, **kw):
             return SimpleNamespace(siblings=[SimpleNamespace(rfilename=n, size=1000) for n in names]
                                    + [SimpleNamespace(rfilename="README.md", size=10 ** 9)])   # not downloaded
 
     def download(repo, local_dir, allow_patterns):
-        for n in names:
+        from huggingface_hub.utils import tqdm
+        for n in tqdm(names):                        # as snapshot_download: a progress bar on stderr
             time.sleep(0.3)
             (model / n).write_bytes(b"x" * 1000)
 
     monkeypatch.setattr(huggingface_hub, "HfApi", Api)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", download)
+    monkeypatch.setattr(sys, "stderr", None)             # the app without a console (pythonw.exe)
     said = []
     files = asr_qwen.ensure_model(lambda p, m: said.append((p, m)))
     assert files["decoder"].endswith("decoder.int8.onnx")
@@ -178,6 +181,17 @@ def test_model_download_says_how_far_it_is(tmp_path, monkeypatch):
     monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(model_info=offline))
     with pytest.raises(RuntimeError, match="internet connection"):
         asr_qwen.ensure_model()
+
+    def stuck(repo, local_dir, allow_patterns):
+        time.sleep(3)                                    # connected, but nothing arrives
+
+    monkeypatch.setattr(asr_qwen, "STALL", 1.0)
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", stuck)
+    t = time.monotonic()
+    with pytest.raises(RuntimeError, match="nothing arrived"):
+        asr_qwen.ensure_model()
+    assert time.monotonic() - t < 2.5                     # said, not waited out
 
 
 def test_auto_picks_qwen_on_a_strong_computer(monkeypatch):

@@ -29,6 +29,7 @@ DOWNLOAD_GB = 2.4
 CHUNK = 20.0                               # seconds of speech decoded at once (stretches of speech, joined)
 MAX_TOTAL_LEN = 512                        # the model's limit (prompt + audio + text tokens): about 20 s at once
 MAX_NEW_TOKENS = 256
+STALL = 180.0           # seconds without a byte downloaded before the download is given up
 TIMING_MODEL = "base"                      # the Whisper model that times the words
 RATE = 16000
 WORKER_FLAG = "--asr-worker"
@@ -101,10 +102,12 @@ def ensure_model(progress: Optional[Callable[[float, str], None]] = None,
     if files is not None:
         return files
     from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()             # (bars printed to a console the app may not have: the app shows its own)
     repo, total, failed = None, 0, None
     for rid in REPOS:
         try:
-            info = HfApi().model_info(rid, files_metadata=True)
+            info = HfApi().model_info(rid, files_metadata=True, timeout=30)
         except Exception as e:  # noqa: BLE001 - gone or unreachable: the next one
             failed = e
             continue
@@ -126,12 +129,20 @@ def ensure_model(progress: Optional[Callable[[float, str], None]] = None,
 
     t = threading.Thread(target=work, daemon=True, name="qwen3-asr download")
     t.start()
+    seen, since = _folder_bytes(folder), time.monotonic()
     while t.is_alive():
         t.join(0.5)
         if cancel is not None and cancel.is_set():
             raise Cancelled()              # (the download goes on in the background, or resumes next time)
+        now = _folder_bytes(folder)
+        if now != seen:
+            seen, since = now, time.monotonic()
+        elif time.monotonic() - since > STALL:
+            raise RuntimeError(f"The Qwen3-ASR model download stopped: nothing arrived for {STALL // 60:g} "
+                               "minutes. Check the internet connection and try again (it carries on where it "
+                               "stopped), or choose a Whisper model.")
         if progress and total:
-            done = min(_folder_bytes(folder), total)
+            done = min(now, total)
             progress(done / total, f"Downloading the Qwen3-ASR speech model: {done / 1e9:.1f} of "
                                    f"{total / 1e9:.1f} GB (first use only)")
     if "error" in out:
