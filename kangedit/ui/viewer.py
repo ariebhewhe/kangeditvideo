@@ -632,7 +632,10 @@ class Viewer(QWidget):
         for c in sorted(self.project.overlays, key=lambda x: x.track):
             f = self.project.footage.get(c.footage_id)
             if f is not None and c.duration > 0 and c.start < self.project.duration:
-                out.append(OverlayShot(OverlayClip.from_dict(c.to_dict()), f.log_profile, f.tonemap, f))
+                tw, th = self.preview_size()
+                w, h = reframe.overlay_size(*spherical.dims(f, c), tw, th, c.scale, c.box_w, c.box_h)
+                out.append(OverlayShot(OverlayClip.from_dict(c.to_dict()), f.log_profile, f.tonemap, f,
+                                       motion.of_clip(c, f, w / max(1, h))))
         return tuple(out)
 
     def overlay_boxes(self, t: float) -> list:

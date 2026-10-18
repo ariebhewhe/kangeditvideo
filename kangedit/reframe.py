@@ -93,7 +93,7 @@ def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
     return canvas
 
 
-def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool) -> str:
+def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool, fill: str = "black") -> str:
     """Scale and crop whose size and position follow a motion command file per frame (see motion.export_plan):
     the crop is cut ss times larger and scaled down to the framed picture; turned when `rotates`."""
     fg = (f"scale@{tag}s={p.scaled_w * ss}:{p.scaled_h * ss}:flags=lanczos{opts}{to},"
@@ -101,8 +101,14 @@ def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool) 
     if ss > 1:
         fg += f",scale={p.crop_w}:{p.crop_h}:flags=lanczos"
     if rotates:
-        fg += f",rotate@{tag}r=0:ow=iw:oh=ih:c=black"
+        fg += f",rotate@{tag}r=0:ow=iw:oh=ih:c={fill}"
     return fg
+
+
+def ffmpeg_moving_layer(p: Placement, tag: str, motion: tuple) -> str:
+    """A layer's picture scaled and cropped as Placement p, moving inside it by a command file per frame:
+    motion (command file, supersampling, turns), see motion.export_plan. Ends with a comma."""
+    return f"sendcmd=f={motion[0]}," + _moving(p, tag, "", "", motion[1], motion[2], "none") + ","
 
 
 def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox: float, oy: float,
@@ -197,14 +203,19 @@ def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float 
 
 
 def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float, box_w: float = 0.0,
-                  box_h: float = 0.0, pan_x: float = 0.0, pan_y: float = 0.0) -> np.ndarray:
+                  box_h: float = 0.0, pan_x: float = 0.0, pan_y: float = 0.0,
+                  window: Optional[tuple] = None) -> np.ndarray:
     """The overlay picture (RGBA) scaled (and cropped to its box) for a tw x th frame and rotated clockwise on
-    a transparent canvas just big enough for it."""
+    a transparent canvas just big enough for it. window: the part of its picture shown (see render)."""
     sh, sw = rgba.shape[:2]
     p = overlay_place(sw, sh, tw, th, scale, box_w, box_h, pan_x, pan_y)
-    img = cv2.resize(rgba, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA if p.scaled_w < sw
-                     else cv2.INTER_LINEAR)
-    img = np.ascontiguousarray(img[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w])
+    if not is_still(window):
+        img = cv2.warpAffine(rgba, window_matrix(sw, sh, p, window), (p.crop_w, p.crop_h),
+                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    else:
+        img = cv2.resize(rgba, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA if p.scaled_w < sw
+                         else cv2.INTER_LINEAR)
+        img = np.ascontiguousarray(img[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w])
     w, h = p.crop_w, p.crop_h
     if abs(rotation) < 0.01:
         return img

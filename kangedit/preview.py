@@ -89,6 +89,7 @@ class OverlayShot:
     log_profile: str
     tonemap: str
     footage: Footage = field(compare=False, hash=False)
+    motion: Optional[Motion] = None          # a dynamic zoom / stabilization inside its picture (motion.py)
 
     @property
     def grade(self) -> Grade:
@@ -445,8 +446,13 @@ class PreviewEngine:
             rgba = np.dstack([fn(np.ascontiguousarray(rgba[..., :3])), rgba[..., 3]])
         if c.key_color:
             rgba = keying.apply(rgba, c.key_color, c.key_similarity, c.key_blend, c.key_despill)
+        window = None
+        if ov.motion is not None:
+            p = reframe.overlay_place(rgba.shape[1], rgba.shape[0], look.width, look.height, c.scale, c.box_w,
+                                      c.box_h, c.pan_x, c.pan_y)
+            window = ov.motion.at_placement(t - c.start, c.src_at(t - c.start), p)
         layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
-                                      c.pan_x, c.pan_y)
+                                      c.pan_x, c.pan_y, window)
         layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
         reframe.composite(out, layer, c.x * look.width, c.y * look.height, c.alpha_at(t))
 
@@ -467,8 +473,7 @@ class PreviewEngine:
         window = None
         if shot.motion is not None and when is not None:
             p = reframe.place(img.shape[1], img.shape[0], tw, th, mode, shot.zoom, shot.ox, shot.oy)
-            window = shot.motion.window(when[0], when[1], p.scaled_w / max(1, p.crop_w),
-                                        p.scaled_h / max(1, p.crop_h))
+            window = shot.motion.at_placement(when[0], when[1], p)
         out = reframe.render(img, tw, th, mode, shot.zoom, shot.ox, shot.oy, fn, window)
         if look.color and has_spatial(shot.grade):
             out = apply_spatial(out, shot.grade)

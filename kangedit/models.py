@@ -114,7 +114,10 @@ class TimelineClip:
     motion: str = ""
     motion_amount: float = 0.12
     motion_ease: str = "both"
+    motion_face: Optional[list] = None   # where "zoom on the face" zooms: [x, y] in parts of the clip's picture
     stabilize: float = 0.0
+    voice_clean: float = 0.0       # take noise and wind out of the speech: 0 = off, up to 1 (see voice.py)
+    voice_floor: float = 0.0       # its background noise level, dBFS (0 = not known)
     id: str = field(default_factory=new_id)
 
     @property
@@ -202,6 +205,13 @@ class OverlayClip:
     view_roll: float = 0.0
     view_fov: float = 100.0
     view_tiny: bool = False        # the whole sphere as a "tiny planet"
+    motion: str = ""               # dynamic zoom and stabilization inside the layer's picture (see TimelineClip)
+    motion_amount: float = 0.12
+    motion_ease: str = "both"
+    motion_face: Optional[list] = None
+    stabilize: float = 0.0
+    voice_clean: float = 0.0
+    voice_floor: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property

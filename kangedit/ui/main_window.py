@@ -34,7 +34,7 @@ from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
-from .. import polish, scenes, stabilize
+from .. import motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
                         load_model, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -3571,10 +3571,16 @@ class MainWindow(QMainWindow):
             self.tl.refresh()
             self.viewer.refresh()
             self._schedule_audio()
+        if kind == "motion":
+            self._find_motion_faces(self.inspector.graded)
+        if kind == "audio":
+            self._measure_noise(self.inspector.graded)
         if self.selected_overlay() is not None and self.selected_clip() is None:
-            # A clip on a video layer: its grade, trim, speed or sound.
+            # A clip on a video layer: its grade, trim, speed, sound or movement.
             if kind == "footage_color":
                 self.bin.refresh()
+            if kind in ("stabilize", "trim"):
+                self.measure_shake()
             self._overlays_changed()
             return
         multicam.follow(self.project)      # a main-angle box on a layer shows the clip's grade and trim
@@ -3587,6 +3593,7 @@ class MainWindow(QMainWindow):
             self.bin.refresh()
             self.viewer.refresh()
         elif kind == "audio":
+            self._measure_noise(self.inspector.graded)
             self.tl.update()
             self._schedule_audio()
         elif kind == "stabilize":
@@ -3637,6 +3644,9 @@ class MainWindow(QMainWindow):
             if clip is not None:
                 self.detect_log(list(dict.fromkeys(c.footage_id for c in self.inspector.targets or [clip])))
             return
+        if req == "voice_auto":
+            self.clean_voices_with_wind()
+            return
         if req == "layer_tab":
             self.show_refine(self.layer_panel)
             return
@@ -3671,6 +3681,83 @@ class MainWindow(QMainWindow):
         self.layer_panel.set_clip(self.selected_overlay())
         self.viewer.refresh()
         self._update_title()
+
+    def _measure_noise(self, clips: list):
+        """The background noise level of the clips whose voice is cleaned up, from their analysis (the noise
+        reduction works on noise near it; see voice.py)."""
+        for c in clips:
+            if c.voice_clean > 0 and not c.voice_floor:
+                c.voice_floor = voice.noise_floor(self.analyses.get(c.footage_id), c.src_in, c.src_out)
+
+    def clean_voices_with_wind(self):
+        """Clean up the voice in every clip (main track and layers) where the smarter analysis heard wind."""
+        todo = []
+        for c in list(self.project.clips) + list(self.project.overlays):
+            f = self.project.footage.get(c.footage_id)
+            if f is None or not f.has_audio or f.is_image or c.voice_clean > 0:
+                continue
+            k = voice.suggest(c, self.analyses.get(c.footage_id))
+            if k is not None:
+                todo.append((c, k))
+        if not todo:
+            heard = any(getattr(a, "sound", None) is not None and len(a.sound) for a in self.analyses.values())
+            self.lbl_status.setText("No wind heard in the clips" if heard else
+                                    "No wind found: it is heard by the smarter analysis (Tools → Smarter analysis)")
+            return
+        self.project_checkpoint()
+        for c, k in todo:
+            c.voice_clean = k
+        self._measure_noise([c for c, _ in todo])
+        self.project.dirty = True
+        self.inspector.set_clip(self._inspected())
+        self.tl.refresh()
+        self._schedule_audio()
+        self.lbl_status.setText(f"Voice clean-up on in {len(todo)} clip(s) with wind")
+
+    def _find_motion_faces(self, clips: list):
+        """Find (in the background) where the face is in clips zooming on it ("Zoom in on the face"): its centre
+        in the clip's picture, from frames of the clip's own moment. None found: the zoom goes to the middle."""
+        todo = [c for c in clips if c.motion in motion.FACE_KINDS and c.motion_face is None
+                and c.footage_id in self.project.footage and not self.project.footage[c.footage_id].is_image]
+        for c in clips:                      # a photo: looked for at once (no decoding)
+            f = self.project.footage.get(c.footage_id)
+            if c.motion in motion.FACE_KINDS and c.motion_face is None and f is not None and f.is_image:
+                todo.append(c)
+        if not todo:
+            return
+        jobs = [(c.id, c.footage_id, c.src_in, c.src_dur, 0 if hasattr(c, "track") else
+                 reframe.split_rotation(c.rotation)[0]) for c in todo]
+        footage = {fid: self.project.footage[fid] for _, fid, *_ in jobs}
+        use_proxies = self.project.settings.use_proxies
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=4)
+            try:
+                out = {}
+                for k, (cid, fid, a, dur, quarters) in enumerate(jobs):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    progress(k / len(jobs), f"Finding the face: {k + 1}/{len(jobs)}")
+                    dec = pool.get(footage[fid], use_proxies, 720)
+                    frames = [reframe.rotate_quarters(img.copy(), quarters) for i in range(FACE_SAMPLES)
+                              if (img := dec.frame_at(a + dur * (i + 0.5) / FACE_SAMPLES)) is not None]
+                    face = reframe.find_face(frames) if frames else None
+                    out[cid] = [float(face[0]), float(face[1])] if face is not None else []
+                return out
+            finally:
+                pool.close()
+
+        def done(found: dict):
+            for c in list(self.project.clips) + list(self.project.overlays):
+                if c.id in found and c.motion_face is None:
+                    c.motion_face = found[c.id]
+            missed = sum(1 for v in found.values() if not v)
+            self.project.dirty = True
+            self.viewer.refresh()
+            self.lbl_status.setText("Zooming on the face" + (f" · no face found in {missed} clip(s): they zoom to "
+                                                              "the middle" if missed else ""))
+
+        self.tasks.submit("Find the face", job, done, self._task_error("Find the face"))
 
     def _face_zoom(self, clips: list[TimelineClip], size: str = "close"):
         """Zoom each clip in on its main face (in the background); applied in one undo step."""

@@ -105,10 +105,11 @@ def measured(f: Footage, t0: float, t1: float) -> bool:
 
 
 def missing(project) -> list[tuple[Footage, float, float]]:
-    """(footage, from, to) of the stabilized main-track clips whose camera movement isn't measured yet."""
+    """(footage, from, to) of the stabilized clips (main track and video layers) whose camera movement isn't
+    measured yet."""
     from . import spherical
     todo = []
-    for c in project.clips:
+    for c in list(project.clips) + list(project.overlays):
         f = project.footage.get(c.footage_id)
         if c.stabilize > 0 and f is not None and not f.is_image and not spherical.is_360(f):
             t0, t1 = c.src_in - HANDLE, c.src_out + HANDLE

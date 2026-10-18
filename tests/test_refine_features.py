@@ -406,3 +406,66 @@ def test_hook_plays_the_moments_in_the_order_they_were_ticked(window, monkeypatc
     window.new_hook()
     hooks = [c for c in window.project.clips if c.label == "hook"]
     assert [moment(c) for c in hooks] == picked and window.project.clips[:len(hooks)] == hooks
+
+
+def test_face_zoom_finds_the_face_and_layers_get_movement(window, monkeypatch):
+    import threading
+    from kangedit import reframe
+    from kangedit.models import OverlayClip
+    from kangedit.ui import main_window as mw
+    clip = _project_with_clip(window)
+    f = window.project.footage[clip.footage_id]
+
+    class Dec:
+        def frame_at(self, t):
+            return np.zeros((72, 128, 3), np.uint8)
+
+    class Pool:
+        def __init__(self, limit=4):
+            pass
+
+        def get(self, *a):
+            return Dec()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mw, "DecoderPool", Pool)
+    monkeypatch.setattr(reframe, "find_face", lambda frames: (0.7, 0.4, 0.2))
+    monkeypatch.setattr(window.tasks, "submit",
+                        lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+    ins = window.inspector
+    ins.set_clip(clip)
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("face"))
+    assert clip.motion == "face" and clip.motion_face == [0.7, 0.4]
+    # a clip on a video layer: the same groups, the movement on its picture
+    ov = OverlayClip(f.id, 0.0, 1.0, 3.0, scale=0.5)
+    window.project.overlays = [ov]
+    ins.set_clip(ov)
+    assert not ins.grp_motion.isHidden() and not ins.grp_stab.isHidden()
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("in"))
+    assert ov.motion == "in" and clip.motion == "face"
+    shots = window.viewer._overlay_shots()
+    assert shots[0].motion is not None and shots[0].motion.kind == "in"
+
+
+def test_voice_clean_up_from_the_inspector(window, monkeypatch):
+    from kangedit import voice
+    clip = _project_with_clip(window)
+    ins = window.inspector
+    ins.set_clip(clip)
+    assert not ins.voice_amt.isEnabled()
+    ins.chk_voice.setChecked(True)
+    assert clip.voice_clean == pytest.approx(voice.DEFAULT) and -60 < clip.voice_floor < -20   # its noise measured
+    ins.voice_amt.set_value(90.0, emit=True)
+    assert clip.voice_clean == pytest.approx(0.9)
+    ins.chk_voice.setChecked(False)
+    assert clip.voice_clean == 0.0
+    # every clip with wind, at once (undoable)
+    other = TimelineClip(clip.footage_id, 20.0, 22.0)
+    window.project.clips.append(other)
+    monkeypatch.setattr(voice, "wind_in", lambda a, x, y: 0.5 if x >= 20.0 else 0.0)
+    window.clean_voices_with_wind()
+    assert other.voice_clean == pytest.approx(voice.DEFAULT) and clip.voice_clean == 0.0
+    window.undo()
+    assert all(c.voice_clean == 0.0 for c in window.project.clips)

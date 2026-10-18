@@ -166,3 +166,71 @@ def test_stabilize_holds_a_shaky_camera_steady(tmp_path, monkeypatch):
     e = _frames(out)
     assert len(e) == 60 and _jitter(list(e)) < 0.25 * _jitter(orig)
     assert np.mean([np.abs(e[k].astype(float) - steady[k]).mean() for k in range(5, 55)]) < 12.0
+
+
+def test_zoom_on_the_face_goes_to_the_face():
+    x, y, z = motion.dynamic("face", 0.5, "linear", 1.0, target=(0.6, 0.2))
+    assert z == pytest.approx(1.5) and x == pytest.approx(0.6) and y == pytest.approx(1 / 3)   # (kept inside)
+    assert motion.dynamic("face", 0.5, "linear", 0.0, target=(0.6, 0.2)) == (0.5, 0.5, 1.0)
+    assert motion.dynamic("face_out", 0.5, "linear", 0.0, target=(0.6, 0.5))[:2] == pytest.approx((0.6, 0.5))
+    f = Footage("x.mp4", 10.0, 1920, 1080, 30.0, False)
+    c = TimelineClip(f.id, 0.0, 4.0, motion="face", motion_amount=0.5, motion_face=[0.6, 0.5])
+    m = motion.of_clip(c, f)
+    # framed 16:9 into 16:9: the face's place in the picture is where it is in the source
+    p = reframe.place(1920, 1080, 1280, 720, "fill")
+    assert m.at_placement(4.0, 4.0, p)[0] == pytest.approx(0.6, abs=1e-3)
+    # framed into 9:16 (a crop of the middle): the face right of the middle sits at the crop's right
+    p = reframe.place(1920, 1080, 720, 1280, "fill")
+    cx = m.at_placement(4.0, 4.0, p)[0]
+    want = (0.6 * p.scaled_w - p.crop_x) / p.crop_w
+    assert want > 0.6 and cx == pytest.approx(min(want, 1 - 0.5 / 1.5), abs=1e-3)
+    # no face found: to the middle
+    c.motion_face = []
+    assert motion.of_clip(c, f).at_placement(4.0, 4.0, p)[:2] == pytest.approx((0.5, 0.5))
+
+
+def test_layer_clips_move_inside_their_picture():
+    from kangedit.models import OverlayClip
+    f = Footage("x.mp4", 10.0, 1920, 1080, 30.0, False)
+    ov = OverlayClip(f.id, 2.0, 0.0, 4.0, scale=0.5, motion="in", motion_amount=0.3, rotation=90.0)
+    m = motion.of_clip(ov, f)
+    assert m is not None and m.quarters == 0                     # a layer's rotation turns the layer, not its picture
+    rgba = np.zeros((90, 160, 4), np.uint8)
+    rgba[..., 3] = 255
+    rgba[40:50, 75:85, :3] = 255                                 # a white square in the middle
+    still = reframe.overlay_layer(rgba, 320, 180, 0.5, 0.0)
+    zoomed = reframe.overlay_layer(rgba, 320, 180, 0.5, 0.0, window=(0.5, 0.5, 2.0, 0.0))
+    assert still.shape == zoomed.shape
+    assert (zoomed[..., 0] > 128).sum() > 3 * (still[..., 0] > 128).sum()   # twice as big: four times the area
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+def test_exported_layer_zoom_matches_the_preview(tmp_path):
+    from kangedit.models import OverlayClip
+    f = _clip_file(tmp_path)
+    bg = str(tmp_path / "bg.mp4")
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "color=c=0x202020:size=640x360:rate=30:duration=3",
+         "-pix_fmt", "yuv420p", "-y", bg])
+    i = probe(bg)
+    fb = Footage(bg, i.duration, i.width, i.height, i.fps, i.has_audio)
+    p = Project()
+    p.footage = {f.id: f, fb.id: fb}
+    p.clips = [TimelineClip(fb.id, 0.0, 2.0)]
+    ov = OverlayClip(f.id, 0.0, 0.0, 2.0, scale=0.6, motion="in_right", motion_amount=0.5, motion_ease="linear")
+    p.overlays = [ov]
+    out = str(tmp_path / "out.mp4")
+    try:
+        export(p, ExportSettings(out, p.settings.aspect, "720p", 30.0, use_gpu=False))
+    except FFmpegError as e:
+        pytest.skip(f"export needs a newer FFmpeg: {e}")
+    s, o = _frames(f.path, 640, 360), _frames(out)
+    m = motion.of_clip(ov, f)
+    pl = reframe.overlay_place(640, 360, 320, 180, 0.6)
+    for n in (20, 50):
+        rgba = np.dstack([s[n], np.full(s[n].shape[:2], 255, np.uint8)])
+        layer = reframe.overlay_layer(rgba, 320, 180, 0.6, 0.0, window=m.at_placement(n / 30, ov.src_at(n / 30), pl))
+        plain = reframe.overlay_layer(rgba, 320, 180, 0.6, 0.0)
+        h, w = layer.shape[:2]
+        y0, x0 = (180 - h) // 2, (320 - w) // 2
+        got = o[n][y0 + 2:y0 + h - 2, x0 + 2:x0 + w - 2].astype(float)
+        assert np.abs(got - layer[2:-2, 2:-2, :3]).mean() < 10.0 < np.abs(got - plain[2:-2, 2:-2, :3]).mean()

@@ -23,7 +23,10 @@ MOTIONS = {
     "in_right": "Zoom in, pan right",
     "out_left": "Zoom out, pan left",
     "out_right": "Zoom out, pan right",
+    "face": "Zoom in on the face",
+    "face_out": "Zoom out from the face",
 }
+FACE_KINDS = ("face", "face_out")
 EASES = {
     "both": "Ease in and out",
     "in": "Ease in",
@@ -45,13 +48,15 @@ def ease(u: float, kind: str) -> float:
     return u * u * (3.0 - 2.0 * u)
 
 
-def _ends(kind: str, amount: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+def _ends(kind: str, amount: float, target: tuple = (0.5, 0.5)) -> tuple[tuple[float, float, float],
+                                                                         tuple[float, float, float]]:
     """Start and end windows (centre x, centre y, zoom) of a dynamic zoom. A centre of 0 / 1 means against the
-    left / top or right / bottom edge (as far as the zoom leaves room)."""
+    left / top or right / bottom edge (as far as the zoom leaves room). target: where "face" zooms to."""
     z = 1.0 + max(0.0, amount)
     mid = (0.5, 0.5, 1.0)
     table = {
         "in": (mid, (0.5, 0.5, z)),
+        "face": (mid, (target[0], target[1], z)),
         "left": ((1.0, 0.5, z), (0.0, 0.5, z)),
         "right": ((0.0, 0.5, z), (1.0, 0.5, z)),
         "up": ((0.5, 1.0, z), (0.5, 0.0, z)),
@@ -61,6 +66,9 @@ def _ends(kind: str, amount: float) -> tuple[tuple[float, float, float], tuple[f
     }
     if kind in table:
         return table[kind]
+    if kind == "face_out":
+        a, b = _ends("face", amount, target)
+        return b, a
     if kind.startswith("out"):         # a zoom in played backwards (panning the other way)
         a, b = _ends("in" + {"_left": "_right", "_right": "_left"}.get(kind[3:], kind[3:]), amount)
         return b, a
@@ -73,11 +81,13 @@ def _fit(c: float, z: float) -> float:
     return float(np.clip(c, half, 1.0 - half))
 
 
-def dynamic(kind: str, amount: float, ease_kind: str, u: float) -> tuple[float, float, float]:
-    """The dynamic zoom's window (centre x, centre y, zoom) at `u` (0..1) of the clip."""
+def dynamic(kind: str, amount: float, ease_kind: str, u: float,
+            target: tuple = (0.5, 0.5)) -> tuple[float, float, float]:
+    """The dynamic zoom's window (centre x, centre y, zoom) at `u` (0..1) of the clip. target: the face, as parts
+    of the framed picture, for the "face" zooms."""
     if not kind:
         return 0.5, 0.5, 1.0
-    (x0, y0, z0), (x1, y1, z1) = _ends(kind, amount)
+    (x0, y0, z0), (x1, y1, z1) = _ends(kind, amount, target)
     e = ease(u, ease_kind)
     z = z0 * (z1 / z0) ** e                     # zooms at an even pace (not faster at the wide end)
     x0, y0, x1, y1 = _fit(x0, z0), _fit(y0, z0), _fit(x1, z1), _fit(y1, z1)
@@ -107,6 +117,7 @@ class Motion:
     quarters: int = 0                      # quarter turns the picture gets before it is framed
     stab: Optional[object] = None          # stabilize.Correction, or None
     stab_key: tuple = ()
+    face: tuple = ()                       # where a "face" zoom goes: (x, y) parts of the source picture
 
     @property
     def active(self) -> bool:
@@ -116,12 +127,15 @@ class Motion:
         z = 1.0 + max(0.0, self.amount) if self.kind else 1.0
         return z * (self.stab.zoom if self.stab is not None else 1.0)
 
-    def window(self, off: float, src_t: float, kx: float = 1.0, ky: float = 1.0) -> tuple[float, float, float, float]:
+    def window(self, off: float, src_t: float, kx: float = 1.0, ky: float = 1.0, x0: float = 0.0,
+               y0: float = 0.0) -> tuple[float, float, float, float]:
         """The window at `off` seconds into the clip (timeline), showing source time src_t: (centre x, centre y)
         as parts of the framed picture, zoom, and turn (degrees clockwise) to show it with. kx / ky: the source
         picture's size as multiples of the framed picture's (a crop shows part of it), so a shake measured on
-        the source moves the window as much on the picture."""
-        cx, cy, z = dynamic(self.kind, self.amount, self.ease, off / max(1e-6, self.dur))
+        the source moves the window as much on the picture; x0 / y0: where the crop starts, as parts of the
+        framed picture (see at_placement)."""
+        target = (self.face[0] * kx - x0, self.face[1] * ky - y0) if self.face else (0.5, 0.5)
+        cx, cy, z = dynamic(self.kind, self.amount, self.ease, off / max(1e-6, self.dur), target)
         turn = 0.0
         if self.stab is not None:
             sx, sy, sa = self.stab.at(src_t)
@@ -131,9 +145,15 @@ class Motion:
             turn = -sa
         return cx, cy, z, turn
 
+    def at_placement(self, off: float, src_t: float, p) -> tuple[float, float, float, float]:
+        """window() for a picture framed as reframe.Placement p."""
+        cw, ch = max(1, p.crop_w), max(1, p.crop_h)
+        return self.window(off, src_t, p.scaled_w / cw, p.scaled_h / ch, p.crop_x / cw, p.crop_y / ch)
+
 
 def of_clip(clip, footage, aspect: float = 16 / 9) -> Optional[Motion]:
-    """A main-track clip's Motion (None when it has neither a dynamic zoom nor stabilization)."""
+    """A clip's Motion, on the main track or a video layer (None when it has neither a dynamic zoom nor
+    stabilization). aspect: the shown picture's width / height."""
     from . import reframe, spherical, stabilize
     kind = getattr(clip, "motion", "") or ""
     strength = float(getattr(clip, "stabilize", 0.0) or 0.0)
@@ -143,9 +163,11 @@ def of_clip(clip, footage, aspect: float = 16 / 9) -> Optional[Motion]:
                                     strength, aspect)
     if not kind and stab is None:
         return None
-    quarters, _ = reframe.split_rotation(clip.rotation)
+    # A layer's rotation turns the whole layer: its picture isn't turned before it is framed.
+    quarters = 0 if hasattr(clip, "track") else reframe.split_rotation(clip.rotation)[0]
+    face = tuple(clip.motion_face[:2]) if kind in FACE_KINDS and clip.motion_face else ()
     return Motion(kind, float(clip.motion_amount), clip.motion_ease or "both", max(1e-3, clip.duration),
-                  clip.src_in, quarters, stab, stab.key if stab is not None else ())
+                  clip.src_in, quarters, stab, stab.key if stab is not None else (), face)
 
 
 # ----------------------------------------------------------------------------- export
@@ -164,11 +186,10 @@ def export_plan(m: Motion, clip, p, sw: int, sh: int, frames: int, pre_f: int, f
     p: the clip's static reframe.Placement of the sw x sh source; ss: supersampling of the crop (the window is
     cut ss times larger, then scaled down, so it moves in steps of 1/ss pixel)."""
     plan = Plan(tag)
-    kx, ky = p.scaled_w / max(1, p.crop_w), p.scaled_h / max(1, p.crop_h)
     cw, ch = p.crop_w * ss, p.crop_h * ss
     for n in range(frames):
         off = (n - pre_f) / fps
-        cx, cy, z, turn = m.window(off, clip.src_at(off), kx, ky)
+        cx, cy, z, turn = m.at_placement(off, clip.src_at(off), p)
         w = max(cw, int(round(p.scaled_w * z * ss / 2.0)) * 2)
         h = max(ch, int(round(p.scaled_h * z * ss / 2.0)) * 2)
         zx, zy = w / (p.scaled_w * ss), h / (p.scaled_h * ss)
