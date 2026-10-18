@@ -44,6 +44,15 @@ and the Release workflow uses that section as the GitHub release notes.
   1.7B, more accurate than Whisper large-v3 in many languages (Indonesian, English, Chinese…), for captions
   and every transcript. Runs offline with sherpa-onnx on the CPU (slower than Whisper turbo) in a helper
   process; the model (about 2.5 GB) downloads on first use. Its words are timed by a quick Whisper pass.
+- **Play media in the viewer (Source mode)**: double-click footage in Media to play it on its own, with its
+  sound and a bar of the whole file. Mark the part to use with In / Out (I / O) or by selecting its words in
+  the transcript under the viewer, then *Insert at playhead* or *Append* it to the timeline. *Timeline* (or a
+  click on the timeline) shows the edit again. Double-click in Media used to append the best moment: that is
+  now in its right-click menu only.
+- **Background noise before transcribing** (Captions panel): road, wind or crowd noise drowning the voice is
+  cleaned out of the sound before speech recognition (Auto when the background is loud; Always / Never).
+- Transcribing never starts silently: it says it started (and with which model), that it waits behind
+  another task, or that the files are transcribed already; the Qwen3-ASR download shows GB done.
 - The guided tour (?) and the keyboard shortcuts (F1) explain the new features.
 
 ### Fixed

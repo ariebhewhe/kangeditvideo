@@ -303,6 +303,10 @@ class MainWindow(QMainWindow):
                               "Ctrl+Shift+=", "Rebuild the automatic edit about a quarter longer than the timeline"))
         m.addAction(self._act("Regenerate auto edit at length…", lambda: self.regenerate_auto_edit(None), None,
                               "Rebuild the automatic edit with the same settings at a length you choose"))
+        m.addAction(self._act("Mark in (Source)", lambda: self._source_mark("in"), "I",
+                              "In the viewer's Source mode: the part to use starts at the playhead"))
+        m.addAction(self._act("Mark out (Source)", lambda: self._source_mark("out"), "O",
+                              "In the viewer's Source mode: the part to use ends at the playhead"))
         m.addAction(self._act("Choose the hook…", lambda: self.new_hook(), "H",
                               "Choose the opening hook from the strongest moments of the whole video, as thumbnails "
                               "(and how many clips it has)"))
@@ -586,7 +590,10 @@ class MainWindow(QMainWindow):
         self.viewer.time_changed.connect(lambda tt: self.tl.set_playhead(tt, follow=self.viewer.playing))
         self.viewer.play_state.connect(self._on_play_state)
 
-        self.tl.seek.connect(self.viewer.seek)
+        self.tl.seek.connect(self._timeline_seek)
+        self.viewer.use_source.connect(self.use_source_part)
+        self.viewer.transcribe_source.connect(lambda fid: self.queue_transcription([fid]))
+        self.viewer.mode_changed.connect(self._viewer_mode_changed)
         self.tl.selection_changed.connect(self._on_select)
         self.tl.edit_started.connect(self.project_checkpoint)
         self.tl.edited.connect(self._on_timeline_edited)
@@ -665,7 +672,7 @@ class MainWindow(QMainWindow):
         self.bin.edited.connect(self._bins_edited)
         self.inspector.selection = self.tl.selected_ids
         self.inspector.layer_selection = self.tl.selected_overlay_ids
-        self.text_panel.playhead = lambda: self.viewer.t
+        self.text_panel.playhead = lambda: self.viewer.timeline_time()
         self.inspector.before_change.connect(self._inspector_before)
         self.inspector.changed.connect(self._inspector_changed)
         self.inspector.request.connect(self.inspector_request)
@@ -2249,6 +2256,9 @@ class MainWindow(QMainWindow):
             self.inspector.set_clip(self.inspector.clip)
             self._update_title()
             return
+        if action == "play":
+            self.viewer.open_source(ids[0])
+            return
         if action == "remove":
             usage = self.project.usage()
             used = [fid for fid in ids if usage.get(fid)]
@@ -2703,7 +2713,7 @@ class MainWindow(QMainWindow):
         if not self.project.clips:
             QMessageBox.information(self, APP_NAME, "Make an edit first (✨ Auto Edit or clips on the timeline).")
             return
-        idx, off = self.project.clip_at(self.viewer.t)
+        idx, off = self.project.clip_at(self.viewer.timeline_time())
         here = None
         if idx is not None:
             c = self.project.clips[idx]
@@ -2720,11 +2730,57 @@ class MainWindow(QMainWindow):
         if dlg.added:
             self.refresh_all()
 
+    def _timeline_seek(self, t: float):
+        """The timeline was clicked: the viewer shows the edit again (it may be in Source mode)."""
+        if self.viewer.mode == "source":
+            self.viewer.show_timeline()
+        self.viewer.seek(t)
+
+    def _viewer_mode_changed(self, mode: str):
+        if mode == "source":
+            f = self.project.footage.get(self.viewer.source_fid)
+            self.lbl_status.setText(f"Playing {f.name if f else 'the file'} on its own: mark the part to use (I / O, "
+                                    "or select its words), then Insert at playhead or Append. Click the timeline "
+                                    "(or Timeline) to go back to the edit.")
+        else:
+            self.lbl_status.setText("Showing the edit")
+
+    def _source_mark(self, kind: str):
+        if self.viewer.mode == "source":
+            self.viewer.mark(kind)
+        else:
+            self.lbl_status.setText("Mark in / out are for a file played on its own: double-click it in Media")
+
+    def use_source_part(self, fid: str, a: float, b: float, how: str):
+        """Put the part of a file marked in the viewer's Source mode on the timeline: at the timeline's playhead
+        (between the clips nearest to it) or at the end. The viewer stays on the file, to mark the next part."""
+        f = self.project.footage.get(fid)
+        if f is None or b - a < 0.05:
+            return
+        clip = TimelineClip(fid, round(a, 3), round(min(b, f.duration), 3))
+        t = self.viewer.timeline_time()
+        starts = self.project.clip_starts()
+        if how == "insert" and self.project.clips:
+            i = min(range(len(starts) + 1),
+                    key=lambda k: abs((starts[k] if k < len(starts) else self.project.duration) - t))
+        else:
+            i = len(self.project.clips)
+        self.project_checkpoint()
+        self.project.clips.insert(i, clip)
+        self._after_structure_change()
+        self.tl.selected = clip.id
+        self.tl.update()
+        start = self.project.clip_starts()[i]
+        self.viewer.set_timeline_time(start + clip.duration)     # the next part goes after this one
+        self.tl.set_playhead(start + clip.duration)
+        self.lbl_status.setText(f"{f.name} {fmt_time(a, frames=False)}–{fmt_time(b, frames=False)} put on the "
+                                f"timeline at {fmt_time(start, frames=False)} ({clip.duration:.1f} s)")
+
     def _refresh_edit_text(self):
         """The edit's transcript follows the timeline while its tab shows."""
         if self.right_tabs.shows(self.edit_text):
             self.edit_text.refresh()
-            self.edit_text.show_time(self.viewer.t)
+            self.edit_text.show_time(self.viewer.timeline_time())
 
     def _reorder_by_transcript(self, ids: list):
         """Clips dragged into another order in the edit's transcript: the timeline follows."""
@@ -2858,7 +2914,7 @@ class MainWindow(QMainWindow):
                                 f"{'the ramp' if c.ramp else 'the clip'} now runs {c.duration:.1f} s.")
 
     def split_at_playhead(self):
-        idx, off = self.project.clip_at(self.viewer.t)
+        idx, off = self.project.clip_at(self.viewer.timeline_time())
         if idx is None:
             return
         c = self.project.clips[idx]
@@ -2932,7 +2988,7 @@ class MainWindow(QMainWindow):
             self._after_structure_change()
         elif action == "split":
             starts = self.project.clip_starts()
-            if not (starts[i] < self.viewer.t < starts[i] + c.duration):
+            if not (starts[i] < self.viewer.timeline_time() < starts[i] + c.duration):
                 self.viewer.seek(starts[i] + c.duration / 2)
             self.split_at_playhead()
         elif action == "alt_moment":
@@ -2973,7 +3029,7 @@ class MainWindow(QMainWindow):
     # ================================================================== sound effects
     def add_sounds(self, paths: list[str], t: Optional[float] = None, names: Optional[list[str]] = None):
         """Put audio files on the SFX layer at timeline time t (default: the playhead), one after another."""
-        t = self.viewer.t if t is None else t
+        t = self.viewer.timeline_time() if t is None else t
         added, bad = [], []
         for k, path in enumerate(paths):
             if os.path.normcase(os.path.dirname(os.path.abspath(path))) != os.path.normcase(str(sfx_dir())):
@@ -3056,7 +3112,7 @@ class MainWindow(QMainWindow):
             self.project.sounds.remove(x)
             self.tl.selected_sound = ""
         elif action == "sound_to_playhead":
-            x.start = round(self.viewer.t, 3)
+            x.start = round(self.viewer.timeline_time(), 3)
         elif action.startswith("sound_volume:"):
             x.volume = float(action.split(":", 1)[1])
         elif action.startswith("sound_fade_in:"):
@@ -3143,7 +3199,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Put something on the main track first: video layers show on "
                                                     "top of it.")
             return
-        t = self.viewer.t if t is None else t
+        t = self.viewer.timeline_time() if t is None else t
         added = []
         self.project_checkpoint()
         for fid in ids:
@@ -3251,7 +3307,7 @@ class MainWindow(QMainWindow):
         if action == "ov_edit":
             self.tl.select_overlay(oid)
             self.show_refine(self.layer_panel)
-            if not (c.start <= self.viewer.t < c.end):
+            if not (c.start <= self.viewer.timeline_time() < c.end):
                 self.viewer.seek(c.start + 0.01)
             return
         if action == "ov_auto_color":                 # in the background; one undo step when it's done
@@ -3275,14 +3331,14 @@ class MainWindow(QMainWindow):
             if self.tl.selected_overlay == oid:
                 self.tl.select_overlay("")
         elif action == "ov_to_playhead":
-            c.start = round(self.viewer.t, 3)
+            c.start = round(self.viewer.timeline_time(), 3)
         elif action == "ov_duplicate":
             d = OverlayClip.from_dict(c.to_dict())
             d.id, d.start = new_id(), c.end
             self.project.overlays.append(d)
             self.tl.select_overlay(d.id)
         elif action == "ov_split":
-            cut = self.viewer.t - c.start
+            cut = self.viewer.timeline_time() - c.start
             if not (0.1 < cut < c.duration - 0.1):
                 self.lbl_status.setText("Put the playhead inside the layer clip to split it.")
                 return
@@ -3333,7 +3389,7 @@ class MainWindow(QMainWindow):
         if not self.project.clips:
             QMessageBox.information(self, APP_NAME, "Put some clips on the timeline first (2. ✨ Auto Edit).")
             return
-        t = self.viewer.t if t is None else t
+        t = self.viewer.timeline_time() if t is None else t
         tc = make_text(preset, t, self.project.duration)
         self.project_checkpoint()
         self.project.texts.append(tc)
@@ -3355,7 +3411,7 @@ class MainWindow(QMainWindow):
         if action == "text_edit":
             self.tl.select_text(tid)
             self.show_refine(self.text_panel)
-            if not (tc.start <= self.viewer.t < tc.end):
+            if not (tc.start <= self.viewer.timeline_time() < tc.end):
                 self.viewer.seek(min(tc.end - 1e-3, tc.start + anim_lengths(tc)[0] + 0.05))
             QTimer.singleShot(0, self.text_panel.focus_text)
             return
@@ -3365,7 +3421,7 @@ class MainWindow(QMainWindow):
             if self.tl.selected_text == tid:
                 self.tl.select_text("")
         elif action == "text_to_playhead":
-            tc.start = round(self.viewer.t, 3)
+            tc.start = round(self.viewer.timeline_time(), 3)
         elif action == "text_duplicate":
             d = TextClip.from_dict(tc.to_dict())
             d.id, d.start = new_id(), tc.end
@@ -3509,7 +3565,7 @@ class MainWindow(QMainWindow):
         rect = cv._frame_rect.toAlignedRect()
         if rect.isEmpty():
             return
-        start = os.path.splitext(self.project.path)[0] + f"_{self.viewer.t:.1f}s.png" if self.project.path else "frame.png"
+        start = os.path.splitext(self.project.path)[0] + f"_{self.viewer.timeline_time():.1f}s.png" if self.project.path else "frame.png"
         path, _ = QFileDialog.getSaveFileName(self, "Save frame", start, "PNG image (*.png);;JPEG image (*.jpg)")
         if path:
             cv.grab(rect).save(path)
@@ -3552,6 +3608,9 @@ class MainWindow(QMainWindow):
                      "<b>Double-click</b> the picture (or press <b>F11</b>) for full screen, <b>Esc</b> to leave.<br>"
                      "<b>View → App overlay</b> shows where Reels / TikTok buttons cover a vertical video.<br>"
                      "<b>Right-click</b> the picture to add a title, change the colour view or save a frame.<br>"
+                     "<b>Double-click footage in Media</b> to play it here on its own (<b>Source</b>): mark the part "
+                     "to use (<b>I</b> / <b>O</b>, or select its words under the picture) and <b>Insert</b> it; "
+                     "<b>Timeline</b> shows the edit again.<br>"
                      "<b>♪ updating</b> next to the time: the preview sound is being mixed again after a "
                      "change (music just added is heard once it is ready).",
                      lambda: self.viewer.canvas),
@@ -4022,6 +4081,7 @@ class MainWindow(QMainWindow):
                 ff = self.project.footage.get(fid)
                 if ff is not None:
                     ff.transcript = words
+                    self.viewer.update_source(ff)
             if done:
                 self.project.dirty = True
                 self.update_captions()
@@ -4456,6 +4516,7 @@ class MainWindow(QMainWindow):
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
             "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\n"
+            "Double-click footage in Media — play it in the viewer (Source) · I / O — mark in / out there\n"
             "H — choose the hook (point at a card to play it; ticked in the order it plays)\n"
             "F11 — full screen preview (Esc to leave)\n"
             "Ctrl+Shift+− / Ctrl+Shift+= — regenerate the auto edit shorter / longer\n"
