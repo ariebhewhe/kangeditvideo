@@ -158,11 +158,52 @@ def load_model(name: str, progress: Optional[ProgressCb] = None, cancel: Optiona
         _get_model(name)
 
 
-def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = None) -> np.ndarray:
-    """Decode audio (or the part from `start`) to 16 kHz mono float32 with ffmpeg."""
+CLEANUPS = {
+    "auto": "Auto: clean up loud background noise (road, wind, crowd)",
+    "on": "Always clean up the sound first",
+    "off": "Never (the sound as recorded)",
+}
+NOISY_FLOOR = -45.0       # dBFS: background noise this loud (the quiet moments' level)...
+NOISY_GAP = 30.0          # ...with the voice less than this far above it: cleaned up before transcribing
+
+
+def noise_profile(audio: np.ndarray, rate: int = 16000) -> tuple[float, float]:
+    """(background noise level, voice level) of 16 kHz audio, dBFS: its quietest and loudest moments (50 ms)."""
+    hop = rate // 20
+    n = audio.size // hop
+    if n < 10:
+        return -90.0, -90.0
+    rms = np.sqrt(np.mean(audio[: n * hop].reshape(n, hop).astype(np.float32) ** 2, axis=1) + 1e-12)
+    db = 20 * np.log10(rms)
+    return float(np.percentile(db, 10)), float(np.percentile(db, 95))
+
+
+def needs_cleanup(audio: np.ndarray, mode: str = "auto") -> Optional[float]:
+    """The background noise level to clean the sound at before transcribing (see cleanup_filter), or None to
+    transcribe it as recorded: always with "on", never with "off", with "auto" when the noise is loud and the
+    voice doesn't stand far above it (a car, a road, wind, a crowd)."""
+    if mode == "off":
+        return None
+    floor, voice = noise_profile(audio)
+    if mode == "on" or (floor > NOISY_FLOOR and voice - floor < NOISY_GAP):
+        return float(np.clip(floor, -80.0, -20.0))
+    return None
+
+
+def cleanup_filter(floor: float) -> str:
+    """FFmpeg filters that bring a voice out of steady noise for speech recognition: the rumble below and the
+    hiss above the voice cut, the noise at its measured level taken down, the voice evened out."""
+    return (f"highpass=f=100:p=2,lowpass=f=7600,afftdn=nr=18:nf={floor:.1f}:tn=1,"
+            "dynaudnorm=f=150:g=15:p=0.9")
+
+
+def _load_audio_16k(path: str, start: float = 0.0, duration: Optional[float] = None,
+                    filters: str = "") -> np.ndarray:
+    """Decode audio (or the part from `start`) to 16 kHz mono float32 with ffmpeg (through `filters`)."""
     rng = (["-ss", f"{start:.3f}"] if start > 0 else []) + (["-t", f"{duration:.3f}"] if duration else [])
-    res = run([ffmpeg_bin(), "-v", "error", "-nostdin"] + rng + ["-i", path, "-vn", "-ac", "1", "-ar", "16000",
-               "-f", "f32le", "-"])
+    af = ["-af", filters] if filters else []
+    res = run([ffmpeg_bin(), "-v", "error", "-nostdin"] + rng + ["-i", path, "-vn"] + af + ["-ac", "1", "-ar",
+               "16000", "-f", "f32le", "-"])
     if res.returncode != 0:
         raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or "audio decode failed")
     return np.frombuffer(res.stdout, dtype=np.float32).copy()
@@ -357,10 +398,11 @@ def save_transcript(footage: Footage, model_name: str, language: str, words: lis
 
 def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
                progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None,
-               use_cache: bool = True) -> list[dict]:
+               use_cache: bool = True, cleanup: str = "auto") -> list[dict]:
     """Transcribe a file (words with times in source seconds): from the transcript cache when it was
     transcribed before (unless not `use_cache`), as nothing when it holds no speech (a view, B-roll), else
-    with Whisper, its word times then set on the sound (refine_word_times)."""
+    with Whisper (or Qwen3-ASR), its word times then set on the sound (refine_word_times). cleanup (CLEANUPS):
+    whether loud background noise is cleaned out of the sound first."""
     if not footage.has_audio:
         footage.transcript = []
         return []
@@ -372,15 +414,21 @@ def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
     if progress:
         progress(0.0, f"Reading the sound of {footage.name}…")
     audio = _load_audio_16k(footage.path)   # the original's audio: proxies may be re-encoded
-    if audio.size == 0 or speech_seconds(audio) < MIN_SPEECH:
+    heard = audio
+    floor = needs_cleanup(audio, cleanup) if audio.size else None
+    if floor is not None:
+        if progress:
+            progress(0.0, f"Cleaning the background noise out of {footage.name}…")
+        heard = _load_audio_16k(footage.path, filters=cleanup_filter(floor))
+    if audio.size == 0 or speech_seconds(heard) < MIN_SPEECH:
         words, lang = [], language
     else:
         load_model(model_name, progress)
-        words, lang = transcribe_audio(audio, model_name, language,
+        words, lang = transcribe_audio(heard, model_name, language,
                                        (lambda p: progress(p, f"Transcribing {footage.name}{model_note(model_name)}"))
                                        if progress else None,
                                        cancel)
-        words = refine_word_times(words, audio)
+        words = refine_word_times(words, heard)       # (on the cleaned sound the voice's edges stand out)
     save_transcript(footage, model_name, language, words, lang)
     footage.transcript = words
     footage.transcript_lang = lang

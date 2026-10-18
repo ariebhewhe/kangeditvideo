@@ -673,6 +673,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.generate.connect(self.generate_captions)
         self.caps_panel.style_requested.connect(self.caption_style_dialog)
         self.caps_panel.model_changed.connect(self._set_speech_model)
+        self.caps_panel.cleanup_changed.connect(self._set_speech_cleanup)
         self.caps_panel.export_srt.connect(self.save_srt)
         self.caps_panel.text_edited.connect(self._caption_edited)
         self.caps_panel.delete_requested.connect(self._delete_captions)
@@ -698,7 +699,7 @@ class MainWindow(QMainWindow):
         self.chk_proxy.blockSignals(True)
         self.chk_proxy.setChecked(s.use_proxies)
         self.chk_proxy.blockSignals(False)
-        self.caps_panel.set_model(s.whisper_model)
+        self.caps_panel.set_model(s.whisper_model, s.speech_cleanup)
         self.caps_panel.chk_show.blockSignals(True)
         self.caps_panel.chk_show.setChecked(s.captions.enabled)
         self.caps_panel.chk_show.blockSignals(False)
@@ -3989,7 +3990,7 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Already transcribed. To transcribe again (with another speech model): "
                                         "right-click it in Media → Transcribe for captions")
             return
-        model, lang = s.whisper_model, s.whisper_language
+        model, lang, cleanup = s.whisper_model, s.whisper_language, s.speech_cleanup
 
         def job(progress, cancel):
             # The speech model is loaded once for the batch, and only when a file isn't transcribed already.
@@ -4004,7 +4005,7 @@ class MainWindow(QMainWindow):
                 def step(p, msg="", k=k, tag=tag):
                     progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
                 try:
-                    words = transcribe(f, model, lang, step, cancel, use_cache=not force)
+                    words = transcribe(f, model, lang, step, cancel, use_cache=not force, cleanup=cleanup)
                 except Cancelled:          # the files finished before the cancel are kept
                     return done, errors, True
                 except Exception as e:  # noqa: BLE001
@@ -4138,9 +4139,18 @@ class MainWindow(QMainWindow):
         if dlg.exec() == CaptionStyleDialog.Accepted:
             dlg.apply()
             self.project.dirty = True
-            self.caps_panel.set_model(self.project.settings.whisper_model)
+            self.caps_panel.set_model(self.project.settings.whisper_model, self.project.settings.speech_cleanup)
             self.update_captions()
             self._update_title()
+
+    def _set_speech_cleanup(self, key: str):
+        """Captions panel → Background noise: for the transcriptions from now on (Transcribe again for the files
+        transcribed already)."""
+        self.project.settings.speech_cleanup = key
+        self.project.dirty = True
+        self._update_title()
+        self.lbl_status.setText("Background noise setting changed: files transcribed already keep their "
+                                "transcript (right-click in Media → Transcribe for captions to redo one)")
 
     def _set_speech_model(self, key: str):
         """The speech model chosen in the Captions panel: for captions and every transcript from now on."""

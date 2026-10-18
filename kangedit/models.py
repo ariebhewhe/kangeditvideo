@@ -396,6 +396,7 @@ class ProjectSettings:
     proxy_height: int = 540
     whisper_model: str = "auto"         # captions.resolve_model: large-v3 on an NVIDIA GPU, else turbo
     whisper_language: str = ""     # "" = auto detect
+    speech_cleanup: str = "auto"   # captions.CLEANUPS key: clean road / wind noise out before transcribing
     captions: CaptionStyle = field(default_factory=CaptionStyle)
     video_format: str = "short"    # short | long | custom (auto-edit preset)
     # Fade from / to black and silence at the start / end of the timeline (seconds, 0 = off).
