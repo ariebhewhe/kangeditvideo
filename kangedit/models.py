@@ -50,6 +50,7 @@ class Footage:
     # Word-level transcript in source time: [{"s": start, "e": end, "w": text}, ...]
     transcript: Optional[list] = None
     transcript_lang: str = ""
+    transcript_model: str = ""     # what made it: "speech model|language" (see captions.transcript_key)
     kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
     bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
     projection: str = ""           # 360° footage: "equirect" | "dfisheye" ("" = a normal picture; see spherical.py)

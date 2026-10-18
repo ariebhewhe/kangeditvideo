@@ -433,6 +433,21 @@ def transcript_path(footage: Footage, model_name: str, language: str) -> str:
                                           f"{language or 'auto'}.json")
 
 
+def transcript_key(model_name: str, language: str) -> str:
+    """The speech model (as resolved: Auto's choice) and language setting a transcript is made with."""
+    return f"{resolve_model(model_name)}|{language or 'auto'}"
+
+
+def transcribed_with(footage: Footage, model_name: str, language: str) -> bool:
+    """Whether the file's transcript was made with this speech model and language (a project from before
+    transcripts recorded it: whether the transcript cache has this model's)."""
+    if footage.transcript is None:
+        return False
+    if footage.transcript_model:
+        return footage.transcript_model == transcript_key(model_name, language)
+    return cached_transcript(footage, model_name, language) is not None
+
+
 def cached_transcript(footage: Footage, model_name: str, language: str,
                       any_model: bool = False) -> Optional[tuple[list[dict], str]]:
     """(words, language) of this file transcribed before (in any project), or None. `any_model`: another
@@ -479,6 +494,7 @@ def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
         hit = cached_transcript(footage, model_name, language)
         if hit is not None:
             footage.transcript, footage.transcript_lang = hit[0], hit[1]
+            footage.transcript_model = transcript_key(model_name, language)
             return hit[0]
     if progress:
         progress(0.0, f"Reading the sound of {footage.name}…")
@@ -504,6 +520,7 @@ def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
     save_transcript(footage, model_name, language, words, lang)
     footage.transcript = words
     footage.transcript_lang = lang
+    footage.transcript_model = transcript_key(model_name, language)
     return words
 
 

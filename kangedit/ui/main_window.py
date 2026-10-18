@@ -36,7 +36,8 @@ from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import health, motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
-                        load_model, model_note, project_layout, transcribe, write_srt)
+                        load_model, model_note, project_layout, resolve_model, transcribe, transcribed_with,
+                        write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -4057,7 +4058,7 @@ class MainWindow(QMainWindow):
         self.viewer.set_captions(self.captions)
         self.caps_panel.set_captions(self.captions)
 
-    def queue_transcription(self, ids: list[str], force: bool = False):
+    def queue_transcription(self, ids: list[str], force: bool = False, use_cache: Optional[bool] = None):
         """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
         then the files are transcribed one after the other. A file that fails doesn't stop the others."""
         s = self.project.settings
@@ -4084,7 +4085,8 @@ class MainWindow(QMainWindow):
                 def step(p, msg="", k=k, tag=tag):
                     progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
                 try:
-                    words = transcribe(f, model, lang, step, cancel, use_cache=not force, cleanup=cleanup)
+                    words = transcribe(f, model, lang, step, cancel,
+                                       use_cache=(not force) if use_cache is None else use_cache, cleanup=cleanup)
                 except Cancelled:          # the files finished before the cancel are kept
                     return done, errors, True
                 except Exception as e:  # noqa: BLE001
@@ -4171,12 +4173,27 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"{self.project.footage[fid].name} is selected in the Media panel")
 
     def transcribe_media(self, ids: list[str]):
-        """Media panel → Transcribe for captions: the selected files transcribed (again) with the speech model and
-        language set now (Captions panel, Captions → Style…), replacing any transcript they have (manual caption
-        edits on them too: Undo doesn't bring a transcript back, so this is what the menu item says it does)."""
+        """Media panel → Transcribe (again) for captions: the selected files not yet transcribed with the speech
+        model and language set now (Captions panel, Captions → Style…), with them (their transcript replaced);
+        the ones already transcribed with them are kept (their manual caption edits too)."""
+        s = self.project.settings
         media = [fid for fid in ids if fid in self.project.footage and not self.project.footage[fid].is_image]
-        if media:
-            self.queue_transcription(media, force=True)
+        todo = [fid for fid in media
+                if not transcribed_with(self.project.footage[fid], s.whisper_model, s.whisper_language)]
+        kept = len(media) - len(todo)
+        name = resolve_model(s.whisper_model)
+        if not todo:
+            if media:
+                self.lbl_status.setText(("The selected file is" if len(media) == 1 else
+                                         f"All {len(media)} selected files are") +
+                                        f" already transcribed with {name}: kept. To transcribe again, choose "
+                                        "another speech model or language (Captions panel)")
+            return
+        if kept:
+            self.lbl_status.setText(f"Transcribing {len(todo)} file(s) with {name} "
+                                    f"({kept} already transcribed with it, kept)")
+        # (from the transcript cache when the file was transcribed with this model before: no waiting)
+        self.queue_transcription(todo, force=True, use_cache=True)
 
     def generate_captions(self):
         used = list(dict.fromkeys(c.footage_id for c in self.project.clips))

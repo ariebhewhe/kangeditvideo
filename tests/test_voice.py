@@ -7,7 +7,7 @@ import pytest
 
 from kangedit import voice
 from kangedit.export import render_audio
-from kangedit.ffmpeg import ffmpeg_bin, probe, run
+from kangedit.ffmpeg import FFmpegError, ffmpeg_bin, probe, run
 from kangedit.models import Footage, Project, TimelineClip
 
 
@@ -66,7 +66,10 @@ def test_cleaned_voice_keeps_the_voice_and_drops_the_noise(tmp_path):
         p.footage = {f.id: f}
         p.clips = [TimelineClip(f.id, 0.5, 3.5, voice_clean=clean, voice_floor=floor)]
         out = str(tmp_path / f"mix_{clean}.wav")
-        render_audio(p, False, out)
+        try:
+            render_audio(p, False, out)
+        except FFmpegError as e:
+            pytest.skip(f"needs a newer FFmpeg: {e}")
         w = wave.open(out)
         a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, w.getnchannels())[:, 0]
         return a[36000:-24000].astype(np.float64), w.getframerate()

@@ -73,10 +73,10 @@ and the Release workflow uses that section as the GitHub release notes.
   width now shows every tab.
 
 ### Changed
-- Media panel → right-click → *Transcribe (again) for captions* always transcribes the selected files again,
-  with the speech model and language set now (Captions panel, *Captions → Style…*), replacing their
-  transcripts, without asking. (The transcripts offered after an import and for captions still only do the
-  files without one.)
+- Media panel → right-click → *Transcribe (again) for captions* transcribes the selected files that aren't
+  transcribed yet with the speech model and language set now (Captions panel, *Captions → Style…*), replacing
+  their transcripts, without asking; the ones already transcribed with them are kept (with their caption
+  edits). Each file's transcript remembers the model and language it was made with.
 - The *Auto* speech model picks Qwen3-ASR on a computer that runs it well (6 or more CPU cores, 12 GB of
   memory or more), else Whisper large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU.
 - A *Hook first* edit has its hook only at the beginning of the timeline. Long-form *Hook first* edits also
