@@ -3,10 +3,11 @@ strongest ticked, as many as the hook has clips. Tick others, or ask for more su
 
 from __future__ import annotations
 
+import threading
 from typing import Callable, Optional
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QToolButton, QVBoxLayout, QWidget)
@@ -16,6 +17,88 @@ from ..models import TimelineClip
 from .theme import fmt_time
 
 FRAME_W = 112          # each of a card's three frames
+PREVIEW_FPS = 12       # a moment's preview plays this many frames a second (decoded small, in the background)
+PREVIEW_W = 360
+
+
+def _pixmap(rgb: np.ndarray) -> QPixmap:
+    arr = np.ascontiguousarray(rgb)
+    img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB888).copy()
+    return QPixmap.fromImage(img)
+
+
+class MomentPreview(QLabel):
+    """Plays a moment over and over: its frames decoded (decode(clip, cancel) -> RGB frames at PREVIEW_FPS)
+    on a background thread, shown as they are ready."""
+
+    _ready = Signal(object, object)          # (clip id, frames) from the decoding thread
+
+    def __init__(self, decode: Callable, parent=None):
+        super().__init__(parent)
+        self.decode = decode
+        self.setFixedSize(PREVIEW_W, PREVIEW_W * 9 // 16)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background: #111; color: #9aa0ab;")
+        self.setText("Point at a moment to play it")
+        self.clip_id = ""
+        self.frames: list = []
+        self._k = 0
+        self._cancel = threading.Event()
+        self._timer = QTimer(self, interval=int(1000 / PREVIEW_FPS))
+        self._timer.timeout.connect(self._next)
+        self._ready.connect(self._got)
+
+    def play(self, clip: TimelineClip) -> None:
+        if clip.id == self.clip_id:
+            return
+        self.stop()
+        self.clip_id = clip.id
+        self.setText("Loading…")
+        cancel = self._cancel = threading.Event()
+
+        def work(c=TimelineClip.from_dict(clip.to_dict())):
+            try:
+                frames = self.decode(c, cancel)
+            except Exception:  # noqa: BLE001 - a moment that can't be decoded just isn't previewed
+                frames = []
+            if not cancel.is_set():
+                self._ready.emit(c.id, frames)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def stop(self) -> None:
+        self._cancel.set()
+        self._timer.stop()
+        self.frames, self.clip_id = [], ""
+
+    def _got(self, clip_id: str, frames: list) -> None:
+        if clip_id != self.clip_id:
+            return
+        self.frames = [_pixmap(f).scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation) for f in frames]
+        self._k = 0
+        if self.frames:
+            self._next()
+            self._timer.start()
+        else:
+            self.setText("Can't play this moment")
+
+    def _next(self) -> None:
+        if self.frames:
+            self.setPixmap(self.frames[self._k % len(self.frames)])
+            self._k += 1
+
+
+class _Hover(QObject):
+    """Plays a card's moment in the preview when the pointer comes onto it."""
+
+    def __init__(self, picker: "HookPicker"):
+        super().__init__(picker)
+        self.picker = picker
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Enter:
+            self.picker.preview_card(obj)
+        return False
 
 
 def strip(analysis, a: float, b: float, width: int = FRAME_W) -> Optional[QPixmap]:
@@ -36,14 +119,18 @@ def strip(analysis, a: float, b: float, width: int = FRAME_W) -> Optional[QPixma
 class HookPicker(QDialog):
     """fetch(count, avoid) -> candidate moments for a `count`-clip hook not overlapping `avoid` (moments
     already offered), strongest first. names(clip) -> a card's text; thumbs(clip) -> its picture;
-    length_for(count) -> how long each moment of a `count`-clip hook is."""
+    length_for(count) -> how long each moment of a `count`-clip hook is; decode(clip, cancel) -> its frames,
+    played in the preview when the pointer is on its card (None: no preview)."""
 
     def __init__(self, parent, count: int, fetch: Callable[[int, list], list],
                  thumbs: Callable[[TimelineClip], Optional[QPixmap]], names: Callable[[TimelineClip], str],
-                 length_for: Callable[[int], float]):
+                 length_for: Callable[[int], float], decode: Optional[Callable] = None):
         super().__init__(parent)
         self.setWindowTitle("🎣 Choose the hook")
         self.fetch, self.thumbs, self.names, self.length_for = fetch, thumbs, names, length_for
+        # decode(clip, cancel) -> frames: point at a card to play its moment (None: no preview)
+        self.preview = MomentPreview(decode) if decode is not None else None
+        self._hover = _Hover(self)
         self.shown: list[TimelineClip] = []      # every moment offered (More suggestions offers others)
         self.cards: list[tuple[QToolButton, TimelineClip]] = []
         self.order: list[QToolButton] = []       # the ticked cards, in the order they were ticked
@@ -70,7 +157,18 @@ class HookPicker(QDialog):
         self.grid_box = QWidget()
         self.grid = QGridLayout(self.grid_box)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.grid_box, 1)
+        body = QHBoxLayout()
+        body.addWidget(self.grid_box, 1)
+        if self.preview is not None:
+            side = QVBoxLayout()
+            side.addWidget(self.preview)
+            self.lbl_preview = QLabel("")
+            self.lbl_preview.setWordWrap(True)
+            self.lbl_preview.setMaximumWidth(PREVIEW_W)
+            side.addWidget(self.lbl_preview)
+            side.addStretch(1)
+            body.addLayout(side)
+        lay.addLayout(body, 1)
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color: #9aa0ab;")
         lay.addWidget(self.lbl)
@@ -120,14 +218,32 @@ class HookPicker(QDialog):
             b.setText(self.names(c))
             b.setToolTip("Start · middle · end of the moment. Click to tick or untick it.")
             b.toggled.connect(lambda on, b=b: self._toggled(b, on))
+            b.installEventFilter(self._hover)
             self.grid.addWidget(b, k // cols, k % cols)
             self.cards.append((b, c))
         if ticked:
             self._tick([b for b, _ in self.cards[:ticked]])
         else:
             self._tick_best()
+        if self.cards:
+            self.preview_card(self.cards[0][0])
         if not clips:
             self.lbl.setText("No strong moment left that the edit doesn't already show.")
+
+    def preview_card(self, button) -> None:
+        """Play a card's moment in the preview."""
+        if self.preview is None:
+            return
+        for b, c in self.cards:
+            if b is button:
+                self.preview.play(c)
+                self.lbl_preview.setText(self.names(c).replace("\n", " · "))
+                return
+
+    def done(self, r: int) -> None:
+        if self.preview is not None:
+            self.preview.stop()
+        super().done(r)
 
     def _tick_best(self) -> None:
         """Tick the strongest moments, as many as the hook has clips (strongest first)."""

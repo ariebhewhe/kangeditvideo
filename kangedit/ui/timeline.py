@@ -43,6 +43,33 @@ HEIGHT_RANGES = {"video": (48, 300), "layer": (24, 220), "sound": (14, 100)}
 FOOTAGE_MIME = "application/x-kangedit-footage"   # footage ids dragged from the media bin, one per line
 
 
+ROLES = {"hook": ("🎣", "hook", "#ff9f43"), "scene": ("🏞", "scene opener", "#4cd08a"),
+         "opening": ("👋", "opening", "#7aa7ff"), "closing": ("👋", "closing", "#7aa7ff")}
+
+
+def clip_marks(c) -> list[tuple[str, str]]:
+    """What a clip is and what is done to it, as (icon, words): its role in an auto edit (hook, scene opener,
+    opening / closing) and its dynamic zoom, stabilization and voice clean-up."""
+    from ..motion import MOTIONS
+    out = []
+    role = ROLES.get(getattr(c, "label", ""))
+    if role:
+        out.append(role[:2])
+    if getattr(c, "motion", ""):
+        out.append(("🔍", MOTIONS.get(c.motion, "dynamic zoom").lower()))
+    if getattr(c, "stabilize", 0) > 0:
+        out.append(("〰", "stabilized"))
+    if getattr(c, "voice_clean", 0) > 0:
+        out.append(("🎙", "voice cleaned up"))
+    return out
+
+
+def marks_text(c) -> str:
+    """The clip's marks for a tooltip line ("" when none)."""
+    m = clip_marks(c)
+    return " · ".join(f"{icon} {words}" for icon, words in m)
+
+
 class TimelineView(QWidget):
     seek = Signal(float)
     selection_changed = Signal(str)
@@ -523,12 +550,16 @@ class TimelineView(QWidget):
 
         # Header
         p.fillRect(QRectF(r.left(), r.top(), r.width(), 16), col)
+        role = ROLES.get(c.label)
+        if role:                           # its role in the edit: a coloured line under the name
+            p.fillRect(QRectF(r.left(), r.top() + 16, r.width(), 2), QColor(role[2]))
         if r.width() > 30 and f is not None:
             fnt = QFont()
             fnt.setPixelSize(10)
             p.setFont(fnt)
             p.setPen(QColor("white"))
-            label = f"{f.name}  {c.duration:.1f}s"
+            icons = "".join(icon for icon, _ in clip_marks(c))
+            label = f"{icons + ' ' if icons else ''}{f.name}  {c.duration:.1f}s"
             if speed_label(c.speed, c.ramp):
                 label += f"  ⏱{speed_label(c.speed, c.ramp)}"
             if abs(c.rotation) > 0.05:
@@ -669,7 +700,8 @@ class TimelineView(QWidget):
             if r.width() > 24 and ft is not None:
                 p.setPen(QColor("white"))
                 link = ("🔗 " if c.linked else "⛓ unlinked · ") if c.link else ""
-                label = f"{link}{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
+                icons = "".join(icon for icon, _ in clip_marks(c))
+                label = f"{link}{icons + ' ' if icons else ''}{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
                 if speed_label(c.speed, c.ramp):
                     label += f"  ⏱{speed_label(c.speed, c.ramp)}"
                 if c.opacity < 0.999:
@@ -1398,8 +1430,9 @@ class TimelineView(QWidget):
                 f = self.project.footage.get(oc.footage_id)
                 linked = self._linked_main(oc) is not None
                 what = f" · camera angle {oc.angle}, linked to the main clip" if linked else ""
+                marks = marks_text(oc)
                 self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}{what}\n"
-                                f"{oc.start:.2f}s, {oc.duration:.2f}s long\n"
+                                f"{oc.start:.2f}s, {oc.duration:.2f}s long\n" + (marks + "\n" if marks else "")
                                 + ("Drag: slip every angle together · Edges: trim every angle · R: other moment\n"
                                    if linked else "Drag: move (also up / down to another layer) · Edges: trim\n")
                                 + "In the viewer: drag to place it, wheel to resize\n"
@@ -1425,9 +1458,10 @@ class TimelineView(QWidget):
                 self.setCursor(Qt.OpenHandCursor if slip else Qt.PointingHandCursor)
                 f = self.project.footage.get(c.footage_id)
                 spd = speed_label(c.speed, c.ramp)
+                marks = marks_text(c)
                 self.setToolTip(f"{f.name if f else ''}\nSource {c.src_in:.2f}s → {c.src_out:.2f}s"
-                                + (f" · speed {spd}" if spd else "") + "\n"
-                                "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
+                                + (f" · speed {spd}" if spd else "") + "\n" + (marks + "\n" if marks else "")
+                                + "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
             else:
                 self.setCursor(Qt.ArrowCursor)
             return

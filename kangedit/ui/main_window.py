@@ -2028,7 +2028,8 @@ class MainWindow(QMainWindow):
 
             dlg = HookPicker(self, n, fetch,
                              lambda c: strip(self.analyses.get(c.footage_id), c.src_in, c.src_out),
-                             lambda c: card_name(c, self.project.footage[c.footage_id].name), length_for)
+                             lambda c: card_name(c, self.project.footage[c.footage_id].name), length_for,
+                             self._moment_frames)
             if dlg.exec() != QDialog.Accepted or not dlg.chosen():
                 return
             hooks = [TimelineClip.from_dict({**c.to_dict(), "id": new_id()}) for c in dlg.chosen()]
@@ -2072,6 +2073,27 @@ class MainWindow(QMainWindow):
         else:
             what = f"{f.name} at {hooks[0].src_in:.1f} s (score {(hooks[0].score or 0) * 100:.0f})"
         self.lbl_status.setText(f"New hook: {what}")
+
+    def _moment_frames(self, c: TimelineClip, cancel: threading.Event) -> list:
+        """A moment's frames for a preview: small, PREVIEW_FPS a second (on a background thread)."""
+        from .hook_picker import PREVIEW_FPS
+        f = self.project.footage[c.footage_id]
+        if f.is_image:
+            img = images.thumbnail(f.path, 240)
+            return [img] if img is not None else []
+        proxy = self.project.settings.use_proxies and f.has_proxy()
+        dec = FrameDecoder(f.proxy_path if proxy else f.path, 0 if proxy else f.rotation,
+                           "bt709" if proxy else f.color_space, 240)
+        try:
+            out, t = [], c.src_in
+            while t < c.src_out and not cancel.is_set():
+                img = dec.frame_at(t)
+                if img is not None:
+                    out.append(img)
+                t += 1.0 / PREVIEW_FPS
+            return out
+        finally:
+            dec.close()
 
     def _best_for(self, fid: str, duration: Optional[float] = None, existing=None,
                   relaxed: bool = False, free_length: bool = False) -> Optional[TimelineClip]:
@@ -4105,12 +4127,15 @@ class MainWindow(QMainWindow):
     # ================================================================== preview audio
     def _schedule_audio(self, delay: int = 700):
         self.viewer.invalidate_audio()
+        self.viewer.set_audio_pending(bool(self.project.clips))
         self._audio_timer.start(delay)
 
     def _render_audio(self):
         if not self.project.clips:
             self.viewer.set_audio(None)
+            self.viewer.set_audio_pending(False)
             return
+        self.viewer.set_audio_pending(True)
         self._audio_cancel.set()
         self._audio_cancel = threading.Event()
         cancel = self._audio_cancel
@@ -4147,6 +4172,7 @@ class MainWindow(QMainWindow):
     def _on_audio_ready(self, ver: int, path: str):
         if ver == self._audio_version:
             self._audio_done = True
+            self.viewer.set_audio_pending(False)
             self.viewer.set_audio(path)   # also while playing: sound edits are heard right away
             if self._audio_said:
                 self._audio_said = False
@@ -4155,6 +4181,7 @@ class MainWindow(QMainWindow):
     def _on_audio_failed(self, ver: int, reason: str):
         if ver == self._audio_version:
             self._audio_done, self._audio_said = True, False
+            self.viewer.set_audio_pending(False)
             self.lbl_status.setText(f"Playback has no sound: the preview sound couldn't be made ({reason[:200]})")
 
     def _on_play_state(self, playing: bool):

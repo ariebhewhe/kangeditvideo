@@ -469,3 +469,87 @@ def test_voice_clean_up_from_the_inspector(window, monkeypatch):
     assert other.voice_clean == pytest.approx(voice.DEFAULT) and clip.voice_clean == 0.0
     window.undo()
     assert all(c.voice_clean == 0.0 for c in window.project.clips)
+
+
+def test_clip_marks_on_the_timeline(window):
+    from kangedit.ui.timeline import clip_marks, marks_text
+    clip = _project_with_clip(window)
+    assert clip_marks(clip) == []
+    clip.label, clip.motion, clip.stabilize, clip.voice_clean = "hook", "in", 0.5, 0.6
+    icons = [i for i, _ in clip_marks(clip)]
+    assert icons == ["🎣", "🔍", "〰", "🎙"]
+    assert marks_text(clip) == "🎣 hook · 🔍 zoom in · 〰 stabilized · 🎙 voice cleaned up"
+    clip.label = "scene"
+    assert clip_marks(clip)[0] == ("🏞", "scene opener")
+    window.tl.refresh()
+    window.tl.repaint()                                  # paints the marks without trouble
+
+
+def test_viewer_shows_while_the_sound_is_mixed_again(window, monkeypatch):
+    clip = _project_with_clip(window)
+    badge = window.viewer.lbl_audio
+    window._audio_timer.stop()
+    window.viewer.set_audio_pending(False)
+    assert badge.isHidden()
+    window._schedule_audio()                       # a change: the badge until the new mix is ready
+    assert not badge.isHidden()
+    window._audio_timer.stop()
+    ver = window._audio_version
+    window._on_audio_ready(ver, "")                # an older mix finishing doesn't hide it...
+    window._audio_version += 1
+    window._on_audio_ready(window._audio_version - 1, "")
+    window.viewer.set_audio_pending(True)
+    window._on_audio_ready(window._audio_version, "")   # ...the latest does
+    assert badge.isHidden()
+    window.viewer.set_audio_pending(True)
+    window._on_audio_failed(window._audio_version, "boom")
+    assert badge.isHidden() and clip is not None
+
+
+def test_pointing_at_a_hook_card_plays_its_moment(qapp):
+    import time
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+    from kangedit.ui.hook_picker import HookPicker
+    moments = [TimelineClip("f", float(k * 5), float(k * 5 + 2), score=1.0 - k / 10) for k in range(4)]
+    asked = []
+
+    def decode(c, cancel):
+        asked.append(c.src_in)
+        return [np.full((90, 160, 3), int(c.src_in * 10), np.uint8) for _ in range(6)]
+
+    dlg = HookPicker(None, 1, lambda k, avoid: [m for m in moments if m not in avoid][:4], lambda c: None,
+                     lambda c: f"moment {c.src_in:g}", lambda k: 2.0, decode)
+
+    def wait_for(cond):
+        end = time.time() + 3
+        while not cond() and time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        return cond()
+
+    assert wait_for(lambda: len(dlg.preview.frames) == 6)          # the strongest plays first
+    assert asked == [0.0] and dlg.preview.clip_id == dlg.cards[0][1].id
+    QApplication.sendEvent(dlg.cards[2][0], QEvent(QEvent.Enter))   # point at the third card
+    assert wait_for(lambda: dlg.preview.clip_id == dlg.cards[2][1].id and len(dlg.preview.frames) == 6)
+    assert asked == [0.0, 10.0] and "moment 10" in dlg.lbl_preview.text()
+    QApplication.sendEvent(dlg.cards[2][0], QEvent(QEvent.Enter))   # again: not decoded again
+    assert asked == [0.0, 10.0]
+    dlg.reject()
+    assert dlg.preview.frames == []
+
+
+def test_moment_frames_decodes_a_real_clip(window, tmp_path):
+    import threading
+    from kangedit.ffmpeg import ffmpeg_bin, probe, run
+    if not ffmpeg_bin():
+        pytest.skip("needs FFmpeg")
+    src = str(tmp_path / "m.mp4")
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4",
+         "-pix_fmt", "yuv420p", "-y", src])
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    window.project.footage = {f.id: f}
+    frames = window._moment_frames(TimelineClip(f.id, 1.0, 3.0), threading.Event())
+    assert len(frames) == 24 and frames[0].shape[0] == 240
+    assert np.abs(frames[0].astype(int) - frames[-1].astype(int)).mean() > 5      # it moves
