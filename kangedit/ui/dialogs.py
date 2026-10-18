@@ -707,14 +707,16 @@ class CaptionStyleDialog(QDialog):
         st = project.settings.captions
         lay = QVBoxLayout(self)
 
-        g = QGroupBox("Speech recognition (Whisper, offline)")
+        g = QGroupBox("Speech recognition (offline)")
         f = QFormLayout(g)
         self.cb_model = QComboBox()
         for m, label in WHISPER_MODELS.items():
             self.cb_model.addItem(label, m)
         self.cb_model.setCurrentIndex(max(0, self.cb_model.findData(project.settings.whisper_model)))
-        self.cb_model.setToolTip("large-v3 gives the most accurate captions; large-v3-turbo is almost as accurate and "
-                                 "several times faster.\nThe model is downloaded once on first use.")
+        self.cb_model.setToolTip("Qwen3-ASR 1.7B is the most accurate in many languages (Indonesian, English, Chinese…) "
+                                 "but slower: it writes the words, a quick Whisper pass times them.\nOf Whisper's, "
+                                 "large-v3 is the most accurate; large-v3-turbo is almost as accurate and several "
+                                 "times faster.\nThe model is downloaded once on first use.")
         self.cb_lang = QComboBox()
         for code, name in LANGUAGES:
             self.cb_lang.addItem(name, code)

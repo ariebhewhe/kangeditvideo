@@ -17,12 +17,15 @@ from typing import Optional
 
 import numpy as np
 
+from . import asr_qwen
 from .config import frame_size
 from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, run
 from .models import CaptionStyle, Footage, Project
 
 WHISPER_MODELS = {
     "auto": "Auto — large-v3 on an NVIDIA GPU, large-v3-turbo otherwise (several times faster on the CPU)",
+    "qwen3-asr": "Qwen3-ASR 1.7B — most accurate in many languages (Indonesian, English, Chinese…), slower; "
+                 "2.5 GB download",
     "large-v3": "large-v3 — most accurate (slowest)",
     "large-v3-turbo": "large-v3-turbo — nearly as accurate, much faster",
     "medium": "medium",
@@ -60,6 +63,8 @@ MAX_MODELS = 2           # the captions model and the small one used to listen f
 
 def model_ready(name: str) -> bool:
     """Whether the speech model is loaded already (using it starts at once)."""
+    if name == asr_qwen.MODEL:
+        return asr_qwen.ready()
     return resolve_model(name) in _models
 
 
@@ -141,6 +146,12 @@ def _batched(model):
 
 def load_model(name: str, progress: Optional[ProgressCb] = None) -> None:
     """Load the speech model now (before a batch of files), saying so only when it isn't loaded yet."""
+    if name == asr_qwen.MODEL:
+        if not asr_qwen.available():
+            raise RuntimeError("Qwen3-ASR needs sherpa-onnx: run the installer again (or pip install sherpa-onnx)")
+        asr_qwen.ensure_model(progress)
+        _get_model(asr_qwen.TIMING_MODEL)       # the Whisper model that times its words
+        return
     if not model_ready(name):
         if progress:
             progress(0.0, f"Loading speech model '{name}' (first run downloads it)…")
@@ -162,7 +173,15 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
                      quick: bool = False) -> tuple[list[dict], str]:
     """Words [{"s", "e", "w"}] (times + offset) and the detected language, decoded for accuracy:
     beam search with temperature fallback, voice-activity filtering, and hallucination guards.
-    quick decodes greedily without fallback, enough to spot a phrase."""
+    quick decodes greedily without fallback, enough to spot a phrase. Qwen3-ASR (asr_qwen.MODEL) writes the
+    words and a quick Whisper pass times them (quick: Whisper small alone)."""
+    if model_name == asr_qwen.MODEL:
+        if quick:
+            model_name = "small"
+        else:
+            return asr_qwen.transcribe(
+                audio, language, progress, cancel, offset,
+                timing=lambda a, lang: transcribe_audio(a, asr_qwen.TIMING_MODEL, lang, None, cancel, quick=True)[0])
     model = _get_model(model_name)
     opts = dict(
         language=language or None,

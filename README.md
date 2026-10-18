@@ -2,7 +2,7 @@
 
 KangEdit is a desktop video editor for Windows, macOS and Linux. It analyzes your footage, picks the best moments and builds a short-form or long-form edit for you. You then fine-tune the edit, color, captions and sound effects, and export.
 
-Everything runs on your own computer. Analysis, speech recognition and rendering work offline. The only network use is the one-time FFmpeg and Whisper model downloads, the optional sound-effect search and the optional background-music download.
+Everything runs on your own computer. Analysis, speech recognition and rendering work offline. The only network use is the one-time FFmpeg and speech model (Whisper, Qwen3-ASR) downloads, the optional sound-effect search and the optional background-music download.
 
 ---
 
@@ -93,6 +93,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | | |
 |---|---|
 | **Automatic captions** | Offline speech recognition with faster-whisper. The default model, **Auto**, is `large-v3` (the most accurate) on an NVIDIA GPU and `large-v3-turbo` (almost as accurate, several times faster) on the CPU, which is where it runs on AMD and Intel graphics. On the CPU it uses one thread per physical core and decodes several stretches of speech at once. Each word's start and end are then set on the sound (Whisper's own times are often 0.1-0.3 s off), so cuts between words, on whole sentences and around fillers land in the pauses. Footage with no speech (views, B-roll) is skipped in seconds. Transcripts are kept in the cache by file, so the same footage in another project is never transcribed again. Captions follow every trim and reorder, and manual fixes are kept. |
+| **Qwen3-ASR** | A second speech model, chosen in the **💬 Captions** panel (*Speech model*) or *Style… → Speech recognition*, for the captions and every transcript: **Qwen3-ASR 1.7B** (Alibaba Qwen, Apache-2.0), more accurate than Whisper large-v3 in many languages, Indonesian, English and Chinese among them (Qwen3-ASR technical report: FLEURS 4.90 % vs 5.27 % word errors, Common Voice 9.18 % vs 10.77 %; with Indonesian, Malay, Thai, Vietnamese… 6.62 % vs 6.85 %). It runs offline with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) on the CPU, slower than Whisper turbo, in a helper process that lets go of the model when done; the model (about 2.5 GB) downloads on first use. Qwen3-ASR writes the words and a quick Whisper pass times them (lined up letter by letter), then the times are set on the sound like Whisper's. |
 | **Word animations** | Karaoke highlight, highlight box, pop, reveal, or one word at a time, timed to the speech. They look the same in the viewer and in the burned-in export. |
 | **Automatic placement** | Size and position follow the frame ratio and format. 9:16: lower middle, clear of the app buttons. 1:1 / 4:5: lower third. 16:9: subtitles at the bottom. |
 | **Output** | Burn in, save as `.srt`, or both. |
@@ -149,7 +150,7 @@ Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64
 You need **Python 3.10 or newer**. The launcher sets up everything else on the first start:
 
 1. a private Python environment in `.venv`;
-2. the Python packages from `requirements.txt` (PySide6, NumPy, OpenCV, PyAV, faster-whisper);
+2. the Python packages from `requirements.txt` (PySide6, NumPy, OpenCV, PyAV, faster-whisper, sherpa-onnx);
 3. **FFmpeg**, downloaded into the `ffmpeg/` folder if it isn't already on your `PATH`.
 
 The first start takes a few minutes and needs about 1.5 GB of disk space. Later starts are instant. When `requirements.txt` changes, the packages are updated automatically.
@@ -210,7 +211,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 4. **✨ Auto Edit**: choose *Short-form* or *Long-form*, check the transitions, J/L cuts and opening/closing options, then click *Create edit*. Use **− Shorter** / **+ Longer** to try other lengths.
 5. Refine the timeline: reorder, trim, slip, transitions (right-click a clip), and sound effects (**Sounds** tab).
 6. **Auto color all clips**, then fine-tune the selected clip in the Inspector.
-7. **Generate captions**. The first run downloads the Whisper model. Choose the model, language, animation and placement under *Captions → Style…*.
+7. **Generate captions**. The first run downloads the speech model. Choose the model in the Captions panel (*Speech model*: Whisper or the more accurate Qwen3-ASR) and the language, animation and placement under *Captions → Style…*.
 8. **⬆ Export**: choose the ratio, resolution, codec, GPU encoding and caption mode.
 
 ---
@@ -400,6 +401,7 @@ DJI cameras record D-Log M (Mini 4/5 Pro, Air 3/3S, Avata 2/360, Flip, Osmo Pock
 | Downloaded FFmpeg | `ffmpeg/` in the KangEdit folder |
 | LUT library and sound library | User data folder: `%LOCALAPPDATA%\KangEdit` (Windows), `~/Library/Application Support/KangEdit` (macOS), `~/.local/share/KangEdit` (Linux) |
 | Whisper models | The Hugging Face cache (`~/.cache/huggingface`) |
+| Qwen3-ASR model | The cache folder's `models/qwen3-asr-1.7b` |
 | Settings | The system settings store (registry on Windows, `~/Library/Preferences` on macOS, `~/.config` on Linux) |
 
 Caches are keyed by file, so they're reused across projects. **Tools → Cache folder & clearing…** shows how much space each kind uses, clears them, and changes the cache folder. When you change the folder, KangEdit offers to **copy** the existing proxies and analysis into the new one; the old folder is left untouched. Clearing the cache never affects the LUT or sound libraries.
@@ -487,6 +489,7 @@ kangedit/
   bookends.py           story order and opening / closing detection
   edits.py              transitions and split edits shared by preview, export and preview audio
   captions.py           Whisper transcription, caption building, layouts, animations, SRT/ASS
+  asr_qwen.py           Qwen3-ASR transcription (sherpa-onnx, helper process), its words timed against Whisper's
   color.py              log curves, gamut matrices, gamut compression, tone map, grading, preview LUTs, auto color
   camera.py             camera identification and log-profile choice
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
@@ -538,7 +541,7 @@ used by KangEdit keeps its own license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY
 
 ## Third-party software
 
-KangEdit is written in Python and uses [PySide6 / Qt](https://www.qt.io/qt-for-python), [NumPy](https://numpy.org), [OpenCV](https://opencv.org), [PyAV](https://pyav.org) and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (OpenAI Whisper models via CTranslate2).
+KangEdit is written in Python and uses [PySide6 / Qt](https://www.qt.io/qt-for-python), [NumPy](https://numpy.org), [OpenCV](https://opencv.org), [PyAV](https://pyav.org) [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (OpenAI Whisper models via CTranslate2) and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Qwen3-ASR).
 
 Face detection uses the [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) model by Shiqi Yu et al. (MIT licence), included as `kangedit/assets/face_detection_yunet_2023mar.onnx`.
 

@@ -672,6 +672,7 @@ class MainWindow(QMainWindow):
 
         self.caps_panel.generate.connect(self.generate_captions)
         self.caps_panel.style_requested.connect(self.caption_style_dialog)
+        self.caps_panel.model_changed.connect(self._set_speech_model)
         self.caps_panel.export_srt.connect(self.save_srt)
         self.caps_panel.text_edited.connect(self._caption_edited)
         self.caps_panel.delete_requested.connect(self._delete_captions)
@@ -697,6 +698,7 @@ class MainWindow(QMainWindow):
         self.chk_proxy.blockSignals(True)
         self.chk_proxy.setChecked(s.use_proxies)
         self.chk_proxy.blockSignals(False)
+        self.caps_panel.set_model(s.whisper_model)
         self.caps_panel.chk_show.blockSignals(True)
         self.caps_panel.chk_show.setChecked(s.captions.enabled)
         self.caps_panel.chk_show.blockSignals(False)
@@ -4130,8 +4132,22 @@ class MainWindow(QMainWindow):
         if dlg.exec() == CaptionStyleDialog.Accepted:
             dlg.apply()
             self.project.dirty = True
+            self.caps_panel.set_model(self.project.settings.whisper_model)
             self.update_captions()
             self._update_title()
+
+    def _set_speech_model(self, key: str):
+        """The speech model chosen in the Captions panel: for captions and every transcript from now on."""
+        from .. import asr_qwen
+        self.project.settings.whisper_model = key
+        self.project.dirty = True
+        self._update_title()
+        if key == asr_qwen.MODEL and not asr_qwen.available():
+            self.lbl_status.setText("Qwen3-ASR needs sherpa-onnx, which isn't installed: run the installer again "
+                                    "(or pip install sherpa-onnx)")
+        elif key == asr_qwen.MODEL and not asr_qwen.ready():
+            self.lbl_status.setText(f"Qwen3-ASR: the model (about {asr_qwen.DOWNLOAD_GB:g} GB) is downloaded on the "
+                                    "first transcription")
 
     def _caption_edited(self, row: int, text: str):
         if 0 <= row < len(self.captions):

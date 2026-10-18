@@ -40,6 +40,10 @@ and the Release workflow uses that section as the GitHub release notes.
 - **Clip icons on the timeline**: 🎣 hook, 🏞 scene opener, 👋 opening / closing, 🔍 dynamic zoom,
   〰 stabilized, 🎙 voice cleaned up.
 - **♪ updating** beside the viewer's time while the preview sound is mixed again after a change.
+- **Qwen3-ASR** speech model (Captions panel → *Speech model*, or *Style… → Speech recognition*): Qwen3-ASR
+  1.7B, more accurate than Whisper large-v3 in many languages (Indonesian, English, Chinese…), for captions
+  and every transcript. Runs offline with sherpa-onnx on the CPU (slower than Whisper turbo) in a helper
+  process; the model (about 2.5 GB) downloads on first use. Its words are timed by a quick Whisper pass.
 - The guided tour (?) and the keyboard shortcuts (F1) explain the new features.
 
 ### Fixed

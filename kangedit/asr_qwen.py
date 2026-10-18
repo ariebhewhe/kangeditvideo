@@ -1,0 +1,299 @@
+"""Qwen3-ASR 1.7B speech recognition, offline: more accurate than Whisper large-v3 in many languages (Indonesian,
+English, Chinese and others; Qwen3-ASR technical report, Apache-2.0), run with sherpa-onnx on the CPU.
+
+It writes the words; their times come from a quick Whisper pass over the same sound, the two lined up letter by
+letter (Qwen3-ASR's own aligner covers only 11 languages, Indonesian not among them). The model runs in a
+helper process: sherpa-onnx brings its own ONNX Runtime, kept apart from the one the smarter analysis uses, and
+the 2.5 GB model is let go of when the transcription is done. The model is downloaded once from Hugging Face."""
+
+from __future__ import annotations
+
+import difflib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Callable, Optional
+
+import numpy as np
+
+MODEL = "qwen3-asr"                        # the speech model setting that picks it (captions.WHISPER_MODELS)
+REPO = "shigedonsan/qwen3-asr-1.7b-sherpa-onnx-int8-4096"   # Qwen3-ASR-1.7B for sherpa-onnx (int8 decoder)
+DOWNLOAD_GB = 2.5
+CHUNK = 25.0                               # seconds of speech decoded at once (stretches of speech, joined)
+TIMING_MODEL = "base"                      # the Whisper model that times the words
+RATE = 16000
+WORKER_FLAG = "--asr-worker"
+
+# Language names Qwen3-ASR answers with, as Whisper's codes (to time the words in the same language).
+LANG_CODES = {"english": "en", "indonesian": "id", "malay": "ms", "chinese": "zh", "cantonese": "yue",
+              "japanese": "ja", "korean": "ko", "spanish": "es", "french": "fr", "german": "de", "italian": "it",
+              "portuguese": "pt", "dutch": "nl", "russian": "ru", "arabic": "ar", "hindi": "hi", "thai": "th",
+              "vietnamese": "vi", "turkish": "tr", "polish": "pl", "filipino": "tl"}
+_TAG = re.compile(r"^\s*language\s+([A-Za-z]+)\s*<asr_text>", re.I)
+_SPECIAL = re.compile(r"<\|[^|>]*\|>|<asr_text>|</?asr_text>")
+_CJK = r"぀-ヿ㐀-鿿가-힯"
+
+
+def available() -> bool:
+    """sherpa-onnx is installed (it runs the model)."""
+    import importlib.util
+    return importlib.util.find_spec("sherpa_onnx") is not None
+
+
+def model_dir() -> Path:
+    from .config import cache_dir
+    return cache_dir("models") / "qwen3-asr-1.7b"
+
+
+def find_files(folder: Path) -> Optional[dict]:
+    """The model's files in `folder`: conv_frontend / encoder / decoder .onnx and the tokenizer's folder, or None
+    when some are missing (not downloaded, or an unfinished download)."""
+    if not folder.is_dir():
+        return None
+
+    def pick(prefix: str) -> Optional[str]:
+        got = sorted(p for p in folder.rglob(f"{prefix}*.onnx"))
+        int8 = [p for p in got if "int8" in p.name]
+        return str((int8 or got)[0]) if got else None
+
+    vocab = next(iter(sorted(folder.rglob("vocab.json"))), None)
+    files = dict(conv_frontend=pick("conv_frontend"), encoder=pick("encoder"), decoder=pick("decoder"),
+                 tokenizer=str(vocab.parent) if vocab is not None else None)
+    return files if all(files.values()) else None
+
+
+def ready() -> bool:
+    return find_files(model_dir()) is not None
+
+
+def ensure_model(progress: Optional[Callable[[float, str], None]] = None) -> dict:
+    """The model's files, downloaded first when they aren't here."""
+    files = find_files(model_dir())
+    if files is not None:
+        return files
+    if progress:
+        progress(0.0, f"Downloading the Qwen3-ASR speech model (about {DOWNLOAD_GB:g} GB, first use only)…")
+    from huggingface_hub import snapshot_download
+    snapshot_download(REPO, local_dir=str(model_dir()),
+                      allow_patterns=["*.onnx", "*.data", "*.onnx_data", "*.json", "*.txt", "*.model", "*.tiktoken"])
+    files = find_files(model_dir())
+    if files is None:
+        raise RuntimeError(f"The Qwen3-ASR model downloaded to {model_dir()} is incomplete")
+    return files
+
+
+# ----------------------------------------------------------------------------- the words
+def clean(text: str) -> tuple[str, str]:
+    """(transcript, language code) from Qwen3-ASR's answer ("language Indonesian<asr_text>…")."""
+    lang = ""
+    m = _TAG.match(text or "")
+    if m:
+        lang = LANG_CODES.get(m.group(1).lower(), "")
+        text = text[m.end():]
+    return re.sub(r"\s+", " ", _SPECIAL.sub(" ", text or "")).strip(), lang
+
+
+def split_words(text: str) -> list[str]:
+    """Words of a transcript: by spaces, and each Chinese / Japanese / Korean character on its own."""
+    return re.findall(rf"[{_CJK}]|[^\s{_CJK}]+", text)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^\w]", "", s.lower())
+
+
+def speech_chunks(audio: np.ndarray, chunk: float = CHUNK) -> list[tuple[float, float]]:
+    """(start, end) seconds of the stretches of speech (voice activity), joined into pieces of up to `chunk`
+    seconds (a longer stretch is cut in pieces)."""
+    try:
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        spans = [(sp["start"] / RATE, sp["end"] / RATE) for sp in
+                 get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=200))]
+    except Exception:  # noqa: BLE001 - no voice activity detection: the whole sound
+        spans = [(0.0, audio.size / RATE)]
+    out: list[tuple[float, float]] = []
+    for a, b in spans:
+        while b - a > chunk:
+            out.append((a, a + chunk))
+            a += chunk
+        if out and b - out[-1][0] <= chunk and a - out[-1][1] < 2.0:
+            out[-1] = (out[-1][0], b)
+        else:
+            out.append((a, b))
+    return out
+
+
+def align(text: str, a: float, b: float, ref: list[dict]) -> list[dict]:
+    """Words of `text` (said between a and b seconds) with times taken from `ref`, timed words of the same
+    sound (Whisper's), lined up letter by letter. Words Whisper didn't hear share the time between their
+    neighbours (or the stretch, by length)."""
+    hyp = split_words(text)
+    if not hyp:
+        return []
+    ref = [w for w in ref if (w["s"] + w["e"]) / 2 >= a - 0.3 and (w["s"] + w["e"]) / 2 <= b + 0.3]
+    # each reference letter's time: spread over its word
+    r_chars, r_times = [], []
+    for w in ref:
+        n = _norm(w["w"])
+        for j, ch in enumerate(n):
+            r_chars.append(ch)
+            r_times.append((w["s"] + (w["e"] - w["s"]) * j / len(n), w["s"] + (w["e"] - w["s"]) * (j + 1) / len(n)))
+    h_chars, owner = [], []
+    for k, w in enumerate(hyp):
+        for ch in _norm(w):
+            h_chars.append(ch)
+            owner.append(k)
+    times: list[Optional[list[float]]] = [None] * len(hyp)
+    if r_chars and h_chars:
+        sm = difflib.SequenceMatcher(None, "".join(h_chars), "".join(r_chars), autojunk=False)
+        for blk in sm.get_matching_blocks():
+            for d in range(blk.size):
+                k = owner[blk.a + d]
+                s, e = r_times[blk.b + d]
+                if times[k] is None:
+                    times[k] = [s, e]
+                else:
+                    times[k][0], times[k][1] = min(times[k][0], s), max(times[k][1], e)
+    # words without a time: share the gap between the timed neighbours, by length
+    k = 0
+    while k < len(hyp):
+        if times[k] is not None:
+            k += 1
+            continue
+        j = k
+        while j < len(hyp) and times[j] is None:
+            j += 1
+        lo = times[k - 1][1] if k > 0 else a
+        hi = times[j][0] if j < len(hyp) else b
+        if hi - lo < 0.05 * (j - k):
+            hi = lo + 0.05 * (j - k)
+        lens = [max(1, len(hyp[i])) for i in range(k, j)]
+        t = lo
+        for i, n in zip(range(k, j), lens):
+            d = (hi - lo) * n / sum(lens)
+            times[i] = [t, t + d]
+            t += d
+        k = j
+    out, last = [], a
+    for w, (s, e) in zip(hyp, times):
+        s = max(s, last)
+        e = max(e, s + 0.05)
+        out.append({"s": round(s, 3), "e": round(e, 3), "w": w})
+        last = e
+    return out
+
+
+# ----------------------------------------------------------------------------- the helper process
+def _worker_cmd() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, WORKER_FLAG]
+    main = Path(__file__).resolve().parent.parent / "main.py"
+    return [sys.executable, str(main), WORKER_FLAG]
+
+
+def run_model(audio: np.ndarray, chunks: list[tuple[float, float]], files: dict, threads: int,
+              progress: Optional[Callable[[float], None]] = None,
+              cancel: Optional[threading.Event] = None) -> list[str]:
+    """Qwen3-ASR's answer for each chunk of the sound, from the helper process."""
+    from .ffmpeg import CREATE_NO_WINDOW, Cancelled
+    with tempfile.TemporaryDirectory(prefix="asr_") as tmp:
+        wav = os.path.join(tmp, "audio.f32")
+        audio.astype(np.float32).tofile(wav)
+        job = os.path.join(tmp, "job.json")
+        with open(job, "w", encoding="utf-8") as fh:
+            json.dump({"files": files, "audio": wav, "chunks": chunks, "threads": threads}, fh)
+        proc = subprocess.Popen(_worker_cmd() + [job], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", creationflags=CREATE_NO_WINDOW)
+        stop = threading.Event()
+
+        def watch():
+            while not stop.wait(0.2):
+                if cancel is not None and cancel.is_set():
+                    proc.kill()
+                    return
+
+        threading.Thread(target=watch, daemon=True).start()
+        texts = [""] * len(chunks)
+        error = ""
+        try:
+            for line in proc.stdout:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if "error" in msg:
+                    error = msg["error"]
+                elif "k" in msg:
+                    texts[msg["k"]] = msg.get("text", "")
+                    if progress:
+                        progress((msg["k"] + 1) / max(1, len(chunks)))
+            proc.wait()
+        finally:
+            stop.set()
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        if proc.returncode != 0 or error:
+            tail = error or (proc.stderr.read() if proc.stderr else "").strip()[-500:]
+            raise RuntimeError(f"Qwen3-ASR failed: {tail or f'exit code {proc.returncode}'}")
+        return texts
+
+
+def worker_main(args: list[str]) -> int:
+    """The helper process: load the model, decode each chunk, answer a JSON line per chunk."""
+    try:
+        with open(args[0], encoding="utf-8") as fh:
+            job = json.load(fh)
+        import sherpa_onnx
+        f = job["files"]
+        rec = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+            conv_frontend=f["conv_frontend"], encoder=f["encoder"], decoder=f["decoder"], tokenizer=f["tokenizer"],
+            num_threads=int(job.get("threads", 4)), max_total_len=4096, max_new_tokens=1024)
+        audio = np.fromfile(job["audio"], dtype=np.float32)
+        for k, (a, b) in enumerate(job["chunks"]):
+            st = rec.create_stream()
+            st.accept_waveform(RATE, audio[int(a * RATE):int(b * RATE)])
+            rec.decode_stream(st)
+            print(json.dumps({"k": k, "text": st.result.text}, ensure_ascii=False), flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001 - said to the app, which shows it
+        print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
+        return 1
+
+
+def transcribe(audio: np.ndarray, language: str = "", progress: Optional[Callable[[float], None]] = None,
+               cancel: Optional[threading.Event] = None, offset: float = 0.0,
+               timing: Optional[Callable[[np.ndarray, str], list[dict]]] = None) -> tuple[list[dict], str]:
+    """Words [{"s", "e", "w"}] (times + offset) and the language. timing(audio, language) -> Whisper's timed
+    words of the same sound (captions.transcribe_audio with TIMING_MODEL)."""
+    from .captions import cpu_threads
+    files = ensure_model()
+    chunks = speech_chunks(audio)
+    if not chunks:
+        return [], language
+    answers = run_model(audio, chunks, files, cpu_threads(),
+                        (lambda p: progress(0.85 * p)) if progress else None, cancel)
+    texts, langs = [], []
+    for ans in answers:
+        t, lang = clean(ans)
+        texts.append(t)
+        if lang:
+            langs.append(lang)
+    lang = language or (max(set(langs), key=langs.count) if langs else "")
+    ref = timing(audio, lang) if timing is not None else []
+    if progress:
+        progress(0.99)
+    words: list[dict] = []
+    for (a, b), t in zip(chunks, texts):
+        words += align(t, a, b, ref)
+    for w in words:
+        w["s"], w["e"] = round(w["s"] + offset, 3), round(w["e"] + offset, 3)
+    return words, lang
+
+
+if __name__ == "__main__":
+    sys.exit(worker_main(sys.argv[2:] if len(sys.argv) > 1 and sys.argv[1] == WORKER_FLAG else sys.argv[1:]))
