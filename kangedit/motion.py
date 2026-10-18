@@ -1,0 +1,187 @@
+"""Movement inside a clip's framed picture: a dynamic zoom (a slow zoom in or out, or a pan across the picture,
+as DaVinci Resolve's Dynamic Zoom) and stabilization (stabilize.py). Both choose, frame by frame, a window of
+the clip's picture as it is framed for the export ratio (after its zoom, pan and crop), shown enlarged to the
+picture's size: a centre and a zoom (1 = the whole picture), and a turn. The viewer warps the picture to it
+(reframe.render) and the export drives FFmpeg's scale / crop / rotate with a command per frame (sendcmd)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+MOTIONS = {
+    "": "Off",
+    "in": "Zoom in",
+    "out": "Zoom out",
+    "left": "Pan left",
+    "right": "Pan right",
+    "up": "Pan up",
+    "down": "Pan down",
+    "in_left": "Zoom in, pan left",
+    "in_right": "Zoom in, pan right",
+    "out_left": "Zoom out, pan left",
+    "out_right": "Zoom out, pan right",
+}
+EASES = {
+    "both": "Ease in and out",
+    "in": "Ease in",
+    "out": "Ease out",
+    "linear": "Linear",
+}
+DEFAULT_AMOUNT = 0.12      # how much a dynamic zoom zooms (12 %): slight, as most edits use it
+MAX_AMOUNT = 0.6
+
+
+def ease(u: float, kind: str) -> float:
+    u = float(np.clip(u, 0.0, 1.0))
+    if kind == "linear":
+        return u
+    if kind == "in":           # starts slowly
+        return u * u
+    if kind == "out":          # ends slowly
+        return 1.0 - (1.0 - u) ** 2
+    return u * u * (3.0 - 2.0 * u)
+
+
+def _ends(kind: str, amount: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Start and end windows (centre x, centre y, zoom) of a dynamic zoom. A centre of 0 / 1 means against the
+    left / top or right / bottom edge (as far as the zoom leaves room)."""
+    z = 1.0 + max(0.0, amount)
+    mid = (0.5, 0.5, 1.0)
+    table = {
+        "in": (mid, (0.5, 0.5, z)),
+        "left": ((1.0, 0.5, z), (0.0, 0.5, z)),
+        "right": ((0.0, 0.5, z), (1.0, 0.5, z)),
+        "up": ((0.5, 1.0, z), (0.5, 0.0, z)),
+        "down": ((0.5, 0.0, z), (0.5, 1.0, z)),
+        "in_left": (mid, (0.0, 0.5, z)),
+        "in_right": (mid, (1.0, 0.5, z)),
+    }
+    if kind in table:
+        return table[kind]
+    if kind.startswith("out"):         # a zoom in played backwards (panning the other way)
+        a, b = _ends("in" + {"_left": "_right", "_right": "_left"}.get(kind[3:], kind[3:]), amount)
+        return b, a
+    return mid, mid
+
+
+def _fit(c: float, z: float) -> float:
+    """A window centre kept so a window 1/z wide stays inside the picture."""
+    half = 0.5 / max(1.0, z)
+    return float(np.clip(c, half, 1.0 - half))
+
+
+def dynamic(kind: str, amount: float, ease_kind: str, u: float) -> tuple[float, float, float]:
+    """The dynamic zoom's window (centre x, centre y, zoom) at `u` (0..1) of the clip."""
+    if not kind:
+        return 0.5, 0.5, 1.0
+    (x0, y0, z0), (x1, y1, z1) = _ends(kind, amount)
+    e = ease(u, ease_kind)
+    z = z0 * (z1 / z0) ** e                     # zooms at an even pace (not faster at the wide end)
+    x0, y0, x1, y1 = _fit(x0, z0), _fit(y0, z0), _fit(x1, z1), _fit(y1, z1)
+    return _fit(x0 + (x1 - x0) * e, z), _fit(y0 + (y1 - y0) * e, z), z
+
+
+def _quarter(dx: float, dy: float, q: int) -> tuple[float, float]:
+    """A shift (parts of the picture) as it shows once the picture is turned q quarter turns clockwise."""
+    q %= 4
+    if q == 1:
+        return -dy, dx
+    if q == 2:
+        return -dx, -dy
+    if q == 3:
+        return dy, -dx
+    return dx, dy
+
+
+@dataclass(frozen=True)
+class Motion:
+    """A clip's movement (a private snapshot). Equal when it would show the same."""
+    kind: str = ""
+    amount: float = DEFAULT_AMOUNT
+    ease: str = "both"
+    dur: float = 1.0                       # the clip's length on the timeline
+    src_in: float = 0.0
+    quarters: int = 0                      # quarter turns the picture gets before it is framed
+    stab: Optional[object] = None          # stabilize.Correction, or None
+    stab_key: tuple = ()
+
+    @property
+    def active(self) -> bool:
+        return bool(self.kind) or self.stab is not None
+
+    def max_zoom(self) -> float:
+        z = 1.0 + max(0.0, self.amount) if self.kind else 1.0
+        return z * (self.stab.zoom if self.stab is not None else 1.0)
+
+    def window(self, off: float, src_t: float, kx: float = 1.0, ky: float = 1.0) -> tuple[float, float, float, float]:
+        """The window at `off` seconds into the clip (timeline), showing source time src_t: (centre x, centre y)
+        as parts of the framed picture, zoom, and turn (degrees clockwise) to show it with. kx / ky: the source
+        picture's size as multiples of the framed picture's (a crop shows part of it), so a shake measured on
+        the source moves the window as much on the picture."""
+        cx, cy, z = dynamic(self.kind, self.amount, self.ease, off / max(1e-6, self.dur))
+        turn = 0.0
+        if self.stab is not None:
+            sx, sy, sa = self.stab.at(src_t)
+            sx, sy = _quarter(sx, sy, self.quarters)
+            z *= self.stab.zoom
+            cx, cy = _fit(cx + sx * kx, z), _fit(cy + sy * ky, z)
+            turn = -sa
+        return cx, cy, z, turn
+
+
+def of_clip(clip, footage, aspect: float = 16 / 9) -> Optional[Motion]:
+    """A main-track clip's Motion (None when it has neither a dynamic zoom nor stabilization)."""
+    from . import reframe, spherical, stabilize
+    kind = getattr(clip, "motion", "") or ""
+    strength = float(getattr(clip, "stabilize", 0.0) or 0.0)
+    stab = None
+    if strength > 0 and footage is not None and not footage.is_image and not spherical.is_360(footage):
+        stab = stabilize.correction(footage, clip.src_in - stabilize.HANDLE, clip.src_out + stabilize.HANDLE,
+                                    strength, aspect)
+    if not kind and stab is None:
+        return None
+    quarters, _ = reframe.split_rotation(clip.rotation)
+    return Motion(kind, float(clip.motion_amount), clip.motion_ease or "both", max(1e-3, clip.duration),
+                  clip.src_in, quarters, stab, stab.key if stab is not None else ())
+
+
+# ----------------------------------------------------------------------------- export
+@dataclass
+class Plan:
+    """The export's FFmpeg commands for one clip's movement."""
+    tag: str
+    commands: list = field(default_factory=list)   # sendcmd lines
+    rotates: bool = False
+
+
+def export_plan(m: Motion, clip, p, sw: int, sh: int, frames: int, pre_f: int, fps: float, tag: str,
+                ss: int = 1) -> Plan:
+    """Per output frame (0..frames-1, the first pre_f before the clip's start) the size the source is scaled to,
+    where the crop window sits in it, and the turn: commands to scale@{tag}s, crop@{tag}c and rotate@{tag}r.
+    p: the clip's static reframe.Placement of the sw x sh source; ss: supersampling of the crop (the window is
+    cut ss times larger, then scaled down, so it moves in steps of 1/ss pixel)."""
+    plan = Plan(tag)
+    kx, ky = p.scaled_w / max(1, p.crop_w), p.scaled_h / max(1, p.crop_h)
+    cw, ch = p.crop_w * ss, p.crop_h * ss
+    for n in range(frames):
+        off = (n - pre_f) / fps
+        cx, cy, z, turn = m.window(off, clip.src_at(off), kx, ky)
+        w = max(cw, int(round(p.scaled_w * z * ss / 2.0)) * 2)
+        h = max(ch, int(round(p.scaled_h * z * ss / 2.0)) * 2)
+        zx, zy = w / (p.scaled_w * ss), h / (p.scaled_h * ss)
+        # The window's centre in the scaled source, then its top-left corner in the source scaled by z.
+        x = int(round(((p.crop_x + cx * p.crop_w) * ss) * zx - cw / 2.0))
+        y = int(round(((p.crop_y + cy * p.crop_h) * ss) * zy - ch / 2.0))
+        x, y = min(max(0, x), w - cw), min(max(0, y), h - ch)
+        t = max(0.0, (n - 0.25) / fps)
+        line = f"{t:.4f} scale@{tag}s w {w}, scale@{tag}s h {h}, crop@{tag}c x {x}, crop@{tag}c y {y}"
+        if abs(turn) > 1e-4:
+            plan.rotates = True
+        line += f", rotate@{tag}r a {np.radians(turn):.6f};"
+        plan.commands.append(line)
+    if not plan.rotates:
+        plan.commands = [c.rsplit(", rotate@", 1)[0] + ";" for c in plan.commands]
+    return plan

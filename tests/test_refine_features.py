@@ -260,3 +260,28 @@ def test_autosave_saves_in_place_and_keeps_untitled_work(window, tmp_path):
     assert len(autosave.backups(path)) == 1                      # the version before the change
     window.set_project(Project())
     assert not autosave.recovery_path().exists()
+
+
+def test_inspector_sets_dynamic_zoom_and_stabilize(window, monkeypatch):
+    clip = _project_with_clip(window)
+    measured = []
+    monkeypatch.setattr(window, "measure_shake", lambda: measured.append(1))
+    ins = window.inspector
+    ins.set_clip(clip)
+    assert ins.grp_motion.isVisibleTo(ins) and ins.grp_stab.isVisibleTo(ins)
+    assert not ins.mo_amount.isEnabled()                     # off: nothing to set
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("in_left"))
+    assert clip.motion == "in_left" and ins.mo_amount.isEnabled()
+    ins.mo_amount.set_value(20.0, emit=True)
+    assert clip.motion_amount == pytest.approx(0.2)
+    ins.cb_ease.setCurrentIndex(ins.cb_ease.findData("linear"))
+    assert clip.motion_ease == "linear"
+    ins.chk_stab.setChecked(True)
+    assert clip.stabilize == pytest.approx(0.5) and measured
+    assert "Measuring" in ins.lbl_stab.text()
+    ins.st_strength.set_value(80.0, emit=True)
+    assert clip.stabilize == pytest.approx(0.8)
+    ins.chk_stab.setChecked(False)
+    assert clip.stabilize == 0.0
+    window.undo()
+    assert window.project.clips[0].stabilize == pytest.approx(0.8)

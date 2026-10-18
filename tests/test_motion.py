@@ -1,0 +1,168 @@
+"""Dynamic zoom (a slow zoom / pan inside the picture) and stabilization: the window each frame shows, the same
+in the preview and the export, and a shaky camera held steady."""
+
+import subprocess
+
+import av
+import cv2
+import numpy as np
+import pytest
+
+from kangedit import motion, reframe, stabilize
+from kangedit.export import ExportSettings, build_export, export
+from kangedit.ffmpeg import FFmpegError, ffmpeg_bin, probe, run
+from kangedit.models import Footage, Project, TimelineClip
+
+
+def test_dynamic_zoom_presets():
+    assert motion.dynamic("", 0.2, "both", 0.5) == (0.5, 0.5, 1.0)
+    x, y, z = motion.dynamic("in", 0.2, "linear", 1.0)
+    assert (x, y) == (0.5, 0.5) and abs(z - 1.2) < 1e-9
+    assert motion.dynamic("out", 0.2, "linear", 0.0)[2] == pytest.approx(1.2)
+    assert motion.dynamic("out", 0.2, "linear", 1.0)[2] == pytest.approx(1.0)
+    # a pan keeps its zoom and moves from one edge to the other (as far as the zoom leaves room)
+    a, b = motion.dynamic("left", 0.2, "linear", 0.0), motion.dynamic("left", 0.2, "linear", 1.0)
+    assert a[2] == b[2] == pytest.approx(1.2) and a[0] > 0.5 > b[0]
+    assert b[0] == pytest.approx(0.5 / 1.2)                 # the window's left edge on the picture's
+    assert motion.dynamic("up", 0.2, "linear", 0.0)[1] > motion.dynamic("up", 0.2, "linear", 1.0)[1]
+    # zoom out and pan left: the view ends wide and moves left on the way
+    seq = [motion.dynamic("out_left", 0.2, "linear", u) for u in (0.0, 0.5, 1.0)]
+    assert seq[0][0] > seq[1][0] > seq[2][0] - 1e-9 and seq[-1][2] == pytest.approx(1.0)
+    # easing starts and ends gently, linear doesn't
+    assert motion.ease(0.1, "both") < 0.1 < motion.ease(0.9, "both") and motion.ease(0.1, "linear") == 0.1
+
+
+def test_preview_window_is_the_zoomed_part_of_the_picture():
+    img = (np.random.default_rng(0).random((360, 640, 3)) * 255).astype(np.uint8)
+    # zoom 2 on the centre: the middle half of the picture, enlarged
+    got = reframe.render(img, 320, 180, "fill", window=(0.5, 0.5, 2.0, 0.0))
+    want = reframe.render(img[90:270, 160:480], 320, 180, "fill")
+    assert np.abs(got.astype(int) - want.astype(int)).mean() < 1.0
+    # no movement: exactly the still framing
+    assert np.array_equal(reframe.render(img, 320, 180, "fill", window=(0.5, 0.5, 1.0, 0.0)),
+                          reframe.render(img, 320, 180, "fill"))
+
+
+def _clip_file(tmp_path, size="640x360", dur=3):
+    src = str(tmp_path / "src.mp4")
+    try:
+        run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=30:duration={dur}",
+             "-pix_fmt", "yuv420p", "-y", src])
+    except Exception as e:   # noqa: BLE001
+        pytest.skip(f"FFmpeg can't make the test clip: {e}")
+    i = probe(src)
+    return Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+
+
+def _frames(path, w=320, h=180):
+    raw = subprocess.run([ffmpeg_bin(), "-v", "error", "-i", path, "-vf", f"scale={w}:{h}", "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3)
+
+
+def test_export_drives_the_window_by_command(tmp_path):
+    f = Footage(str(tmp_path / "x.mp4"), 10.0, 1920, 1080, 30.0, False)
+    p = Project()
+    p.footage = {f.id: f}
+    p.clips = [TimelineClip(f.id, 0.0, 2.0, motion="in", motion_amount=0.2), TimelineClip(f.id, 3.0, 4.0)]
+    args = build_export(p, ExportSettings(str(tmp_path / "out.mp4"), p.settings.aspect, "1080p", 30.0,
+                                          use_gpu=False), str(tmp_path))
+    graph = open(tmp_path / args[args.index("-/filter_complex") + 1]).read()
+    assert "sendcmd=f=motion_0.txt" in graph and "scale@c0s" in graph and "crop@c0c" in graph
+    assert "motion_1.txt" not in graph                       # a clip without movement: the plain framing
+    cmds = open(tmp_path / "motion_0.txt").read().splitlines()
+    assert len(cmds) == 60 and "rotate@" not in cmds[0]
+    first, last = (int(c.split("scale@c0s w ")[1].split(",")[0]) for c in (cmds[0], cmds[-1]))
+    assert first < last                                      # zooms in over the clip
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+@pytest.mark.parametrize("kind", ["in_right", "up"])
+def test_exported_dynamic_zoom_matches_the_preview(tmp_path, kind):
+    f = _clip_file(tmp_path)
+    p = Project()
+    p.footage = {f.id: f}
+    c = TimelineClip(f.id, 0.0, 2.0, motion=kind, motion_amount=0.5, motion_ease="linear")
+    p.clips = [c]
+    out = str(tmp_path / "out.mp4")
+    try:
+        export(p, ExportSettings(out, p.settings.aspect, "720p", 30.0, use_gpu=False))
+    except FFmpegError as e:
+        pytest.skip(f"export needs a newer FFmpeg: {e}")
+    s, o = _frames(f.path, 640, 360), _frames(out)
+    m = motion.of_clip(c, f, 16 / 9)
+    pl = reframe.place(640, 360, 320, 180, "fill")
+    for n in (15, 30, 59):
+        win = m.window(n / 30, c.src_at(n / 30), pl.scaled_w / pl.crop_w, pl.scaled_h / pl.crop_h)
+        moved = reframe.render(s[n], 320, 180, "fill", window=win).astype(float)
+        still = reframe.render(s[n], 320, 180, "fill").astype(float)
+        assert np.abs(o[n] - moved).mean() < 8.0 < np.abs(o[n] - still).mean()
+
+
+def _shaky(path, n=90, seed=1):
+    """A slow pan over a texture with a shaking, turning camera."""
+    rng = np.random.default_rng(seed)
+    big = cv2.resize((rng.random((90, 160, 3)) * 255).astype(np.uint8), (1280, 720), interpolation=cv2.INTER_CUBIC)
+    big = cv2.GaussianBlur(big, (0, 0), 2)
+    jx, jy, ja = rng.normal(0, 6, n), rng.normal(0, 6, n), rng.normal(0, 0.8, n)
+    pan = np.linspace(0, 120, n)
+    out = av.open(path, "w")
+    st = out.add_stream("libx264", rate=30)
+    st.width, st.height, st.pix_fmt = 640, 360, "yuv420p"
+    st.options = {"crf": "12"}
+    for k in range(n):
+        cx, cy = 480 + pan[k] + jx[k], 360 + jy[k]
+        m = cv2.getRotationMatrix2D((cx, cy), ja[k], 1.0)
+        m[:, 2] += [320 - cx, 180 - cy]
+        for pk in st.encode(av.VideoFrame.from_ndarray(cv2.warpAffine(big, m, (640, 360)), format="rgb24")):
+            out.mux(pk)
+    for pk in st.encode():
+        out.mux(pk)
+    out.close()
+
+
+def _jitter(seq) -> float:
+    """How much the picture shakes: frame-to-frame movement less its slow part (pixels)."""
+    g = [cv2.cvtColor(np.ascontiguousarray(x), cv2.COLOR_RGB2GRAY) for x in seq]
+    mv = np.array([stabilize.frame_motion(a, b)[:2] for a, b in zip(g, g[1:])])
+    slow = np.array([np.convolve(mv[:, j], np.ones(9) / 9, mode="same") for j in (0, 1)]).T
+    return float(np.sqrt(((mv - slow)[4:-4] ** 2).mean()))
+
+
+@pytest.mark.skipif(not ffmpeg_bin(), reason="needs FFmpeg")
+def test_stabilize_holds_a_shaky_camera_steady(tmp_path, monkeypatch):
+    monkeypatch.setattr(stabilize, "cache_dir", lambda sub: tmp_path)
+    monkeypatch.setattr(stabilize, "_tracks", {})
+    monkeypatch.setattr(stabilize, "_corrections", {})
+    src = str(tmp_path / "shaky.mp4")
+    _shaky(src)
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    c = TimelineClip(f.id, 0.5, 2.5, stabilize=0.6)
+    p = Project()
+    p.footage = {f.id: f}
+    p.clips = [c]
+    assert stabilize.missing(p) == [(f, 0.5 - stabilize.HANDLE, 2.5 + stabilize.HANDLE)]
+    assert motion.of_clip(c, f) is None                     # not measured yet: shown as it is
+    stabilize.analyze(f, 0.0, f.duration, use_proxy=False)
+    assert stabilize.missing(p) == [] and stabilize.load(f).covers(0.0, f.duration)
+    m = motion.of_clip(c, f, 16 / 9)
+    assert m is not None and 1.02 < m.stab.zoom < 1.5
+    s = _frames(src, 640, 360)
+    pl = reframe.place(640, 360, 320, 180, "fill")
+    orig, steady = [], []
+    for k in range(60):
+        off = k / 30
+        n = int(round(c.src_at(off) * 30))
+        win = m.window(off, c.src_at(off), pl.scaled_w / pl.crop_w, pl.scaled_h / pl.crop_h)
+        orig.append(reframe.render(s[n], 320, 180, "fill"))
+        steady.append(reframe.render(s[n], 320, 180, "fill", window=win))
+    assert _jitter(steady) < 0.25 * _jitter(orig)
+    out = str(tmp_path / "out.mp4")
+    try:
+        export(p, ExportSettings(out, p.settings.aspect, "720p", 30.0, use_gpu=False))
+    except FFmpegError as e:
+        pytest.skip(f"export needs a newer FFmpeg: {e}")
+    e = _frames(out)
+    assert len(e) == 60 and _jitter(list(e)) < 0.25 * _jitter(orig)
+    assert np.mean([np.abs(e[k].astype(float) - steady[k]).mean() for k in range(5, 55)]) < 12.0

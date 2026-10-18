@@ -109,6 +109,12 @@ class TimelineClip:
     view_roll: float = 0.0
     view_fov: float = 100.0
     view_tiny: bool = False        # the whole sphere as a "tiny planet"
+    # Movement inside the framed picture (see motion.py): a dynamic zoom (motion.MOTIONS key, how much it
+    # zooms, motion.EASES key) and stabilization strength (0 = off, up to 1).
+    motion: str = ""
+    motion_amount: float = 0.12
+    motion_ease: str = "both"
+    stabilize: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property

@@ -42,19 +42,42 @@ def place(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float = 1.0,
     return Placement(w, h, cx, cy, cw, ch, (tw - cw) // 2, (th - ch) // 2)
 
 
+def window_matrix(sw: int, sh: int, p: Placement, window: tuple) -> np.ndarray:
+    """The 2 x 3 affine map from a sw x sh source to its framed picture (p.crop_w x p.crop_h) showing a motion
+    window (centre x, centre y as parts of the framed picture, zoom, turn in degrees clockwise; see motion.py)."""
+    cx, cy, z, turn = window
+    a = np.radians(turn)
+    r = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]) * z
+    lin = r @ np.diag([p.scaled_w / sw, p.scaled_h / sh])
+    centre = np.array([p.crop_x + cx * p.crop_w, p.crop_y + cy * p.crop_h])
+    t = np.array([p.crop_w / 2.0, p.crop_h / 2.0]) - r @ centre
+    return np.hstack([lin, t[:, None]]).astype(np.float64)
+
+
+def is_still(window: Optional[tuple]) -> bool:
+    return window is None or (abs(window[2] - 1.0) < 1e-6 and abs(window[3]) < 1e-6
+                              and abs(window[0] - 0.5) < 1e-6 and abs(window[1] - 0.5) < 1e-6)
+
+
 def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
            ox: float = 0.0, oy: float = 0.0,
-           pixel_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None) -> np.ndarray:
-    """Reframe an RGB image onto a tw x th canvas (viewer path).
+           pixel_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+           window: Optional[tuple] = None) -> np.ndarray:
+    """Reframe an RGB image onto a tw x th canvas (viewer path). `window`: the part of the framed picture
+    shown, enlarged to it (a dynamic zoom or stabilization, see motion.py).
 
     `pixel_fn` (a per-pixel color transform) is applied only to the visible pixels, before padding.
     """
     fn = pixel_fn or (lambda a: a)
     sh, sw = img.shape[:2]
     p = place(sw, sh, tw, th, mode, zoom, ox, oy)
-    scaled = cv2.resize(img, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA
-                        if p.scaled_w < sw else cv2.INTER_LINEAR)
-    crop = fn(np.ascontiguousarray(scaled[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w]))
+    if not is_still(window):
+        crop = fn(cv2.warpAffine(img, window_matrix(sw, sh, p, window), (p.crop_w, p.crop_h),
+                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE))
+    else:
+        scaled = cv2.resize(img, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA
+                            if p.scaled_w < sw else cv2.INTER_LINEAR)
+        crop = fn(np.ascontiguousarray(scaled[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w]))
     if p.crop_w == tw and p.crop_h == th:
         return np.ascontiguousarray(crop)
     if mode == "blur":
@@ -70,31 +93,49 @@ def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
     return canvas
 
 
+def _moving(p: Placement, tag: str, opts: str, to: str, ss: int, rotates: bool) -> str:
+    """Scale and crop whose size and position follow a motion command file per frame (see motion.export_plan):
+    the crop is cut ss times larger and scaled down to the framed picture; turned when `rotates`."""
+    fg = (f"scale@{tag}s={p.scaled_w * ss}:{p.scaled_h * ss}:flags=lanczos{opts}{to},"
+          f"crop@{tag}c={p.crop_w * ss}:{p.crop_h * ss}:{p.crop_x * ss}:{p.crop_y * ss}")
+    if ss > 1:
+        fg += f",scale={p.crop_w}:{p.crop_h}:flags=lanczos"
+    if rotates:
+        fg += f",rotate@{tag}r=0:ow=iw:oh=ih:c=black"
+    return fg
+
+
 def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox: float, oy: float,
-                  inp: str, out: str, tag: str, convert: str = "") -> str:
+                  inp: str, out: str, tag: str, convert: str = "", motion: Optional[tuple] = None) -> str:
     """Filtergraph snippet reframing label `inp` into label `out` (export path). convert: scale options and the
     pixel format to convert to in the same pass (e.g. ":in_color_matrix=bt709:in_range=auto", "gbrp16le" as
-    "opts|fmt"): one swscale pass resizes and converts (not with the blurred background, which mixes two)."""
+    "opts|fmt"): one swscale pass resizes and converts (not with the blurred background, which mixes two).
+    motion: (command file, supersampling, turns) of a clip moving inside its picture (see motion.export_plan)."""
     p = place(sw, sh, tw, th, mode, zoom, ox, oy)
     opts, fmt = convert.split("|") if convert else ("", "")
     to = f",format={fmt}" if fmt else ""
     fg = (f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos{opts}{to},"
           f"crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y}")
+    cmds = ""
+    if motion:
+        cmds = f"sendcmd=f={motion[0]},"
+        fg = _moving(p, tag, opts, to, motion[1], motion[2])
     if p.crop_w == tw and p.crop_h == th:
-        return f"[{inp}]{fg},setsar=1[{out}]"
+        return f"[{inp}]{cmds}{fg},setsar=1[{out}]"
     if mode == "blur":
-        fg = (f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos,"
+        fg = (_moving(p, tag, "", "", motion[1], motion[2]) if motion else
+              f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos,"
               f"crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y}")
         bp = place(sw, sh, tw, th, "fill")
         return (
-            f"[{inp}]split=2[{tag}bgi][{tag}fgi];"
+            f"[{inp}]{cmds}split=2[{tag}bgi][{tag}fgi];"
             f"[{tag}bgi]scale={_even(bp.scaled_w / 8)}:{_even(bp.scaled_h / 8)}:flags=area,"
             f"gblur=sigma=3,scale={bp.scaled_w}:{bp.scaled_h}:flags=bilinear,"
             f"crop={tw}:{th}:{bp.crop_x}:{bp.crop_y},colorlevels=romax=0.7:gomax=0.7:bomax=0.7[{tag}bg];"
             f"[{tag}fgi]{fg}[{tag}fg];"
             f"[{tag}bg][{tag}fg]overlay={p.pad_x}:{p.pad_y},setsar=1[{out}]"
         )
-    return f"[{inp}]{fg},pad={tw}:{th}:{p.pad_x}:{p.pad_y}:black,setsar=1[{out}]"
+    return f"[{inp}]{cmds}{fg},pad={tw}:{th}:{p.pad_x}:{p.pad_y}:black,setsar=1[{out}]"
 
 
 # ----------------------------------------------------------------------------- rotation

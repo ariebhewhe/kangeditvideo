@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from . import keying, reframe, spherical
+from . import keying, motion, reframe, spherical, stabilize
 from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
@@ -412,8 +412,19 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
         if color or halation:
             convert = f":in_color_matrix={matrix}:in_range=auto|{GRADE_FMT}"
         mode = "fill" if box else s.fit_mode
-        chain.append(reframe.ffmpeg_filter(sw, sh, box[2] if box else tw, box[3] if box else th, mode, clip.zoom,
-                                           clip.offset_x, clip.offset_y, f"v{j}a", f"v{j}b", f"c{j}", convert))
+        bw, bh = (box[2], box[3]) if box else (tw, th)
+        moving = None
+        mv = motion.of_clip(clip, f, bw / bh)
+        if mv is not None:                 # a dynamic zoom / stabilization: a window per frame, by command
+            pl = reframe.place(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y)
+            ss = 2 if pl.crop_w * 2 <= 4096 else 1
+            mp = motion.export_plan(mv, clip, pl, sw, sh, cp.v_frames, cp.pre_f, s.fps, f"c{j}", ss)
+            name = f"motion_{i}.txt"
+            with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(mp.commands) + "\n")
+            moving = (name, ss, mp.rotates)
+        chain.append(reframe.ffmpeg_filter(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y,
+                                           f"v{j}a", f"v{j}b", f"c{j}", convert, moving))
         post = f"[v{j}b]"
         if convert and f"format={GRADE_FMT}" not in chain[-1].split("overlay")[-1]:
             post += f"scale={convert.split('|')[0][1:]},format={GRADE_FMT},"     # (blurred background)
@@ -634,10 +645,23 @@ def _export_parts(project: Project, s: ExportSettings, workdir: str, parts: list
     return _write_concat(workdir, files)
 
 
+def measure_shake(project: Project, use_proxies: bool, progress: Optional[ProgressCb] = None,
+                 cancel: Optional[threading.Event] = None) -> int:
+    """Measure the camera's shake in the stabilized clips not measured yet (see stabilize.py). Returns how many."""
+    todo = stabilize.missing(project)
+    for n, (f, t0, t1) in enumerate(todo):
+        def step(p, n=n, f=f):
+            if progress is not None:
+                progress(0.0, f"Measuring the camera shake ({n + 1} of {len(todo)}): {f.name} {p * 100:.0f} %")
+        stabilize.analyze(f, t0, t1, use_proxies, step, cancel)
+    return len(todo)
+
+
 def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] = None,
            cancel: Optional[threading.Event] = None) -> str:
     if not project.clips:
         raise RuntimeError("The timeline is empty")
+    measure_shake(project, s.use_proxies, progress, cancel)
     encoder = gpu_encoder(s)
     name = os.path.basename(s.output)
     workdir = tempfile.mkdtemp(prefix="export_", dir=str(cache_dir("tmp")))

@@ -34,7 +34,7 @@ from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
-from .. import polish, scenes
+from .. import polish, scenes, stabilize
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
                         load_model, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
@@ -70,6 +70,7 @@ from .viewer import ADJUST_MODES, Viewer
 
 log = logging.getLogger(__name__)
 
+AUDIO_SLOW_MS = 2500       # a preview mix taking longer than this is shown in the status bar
 REFINE_MIN_WIDTH = 300     # the Refine panel can be dragged this narrow (its tabs then scroll sideways)
 FACE_SAMPLES = 9           # frames of a clip searched for its main face (Zoom to face)
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
@@ -207,6 +208,9 @@ class MainWindow(QMainWindow):
             self.tray = Tray(self, self.tasks)
             self.tray.show()
 
+        self._measuring: set = set()     # (footage id, from, to) whose shake is being measured (stabilize.py)
+        self._audio_done = True          # the latest preview mix is made (or failed)
+        self._audio_said = False         # the status bar says a mix is being made
         self._audio_timer = QTimer(self, singleShot=True, interval=700)
         self._audio_timer.timeout.connect(self._render_audio)
         QTimer.singleShot(800, self._offer_legacy_cache)
@@ -1385,8 +1389,9 @@ class MainWindow(QMainWindow):
                     ff.proxy_path = path
                     self.viewer.drop_decoders()
                     self.project.dirty = True
+                    # (The preview sound is not mixed again: a proxy sounds the same, and each new mix cancels the
+                    # one being made, so proxies finishing one after another kept a new mix from ever finishing.)
                     self.refresh_all(captions=False)
-                    self._schedule_audio()
 
             self.tasks.submit(f"Proxy {f.name}", lambda p, c, f=f: generate_proxy(f, height, p, c, use_gpu), done,
                               self._task_error(f"Proxy for {f.name}"))
@@ -2635,6 +2640,7 @@ class MainWindow(QMainWindow):
         self.inspector.set_clip(self._inspected())
 
     def _on_timeline_finished(self):
+        self.measure_shake()          # a stabilized clip trimmed or slipped onto a part not measured yet
         self.refresh_all()
         self._schedule_audio()
 
@@ -3493,15 +3499,45 @@ class MainWindow(QMainWindow):
             self._on_timeline_edited()
             self.tl.refresh()
             self._schedule_audio()
+            self.measure_shake()
         elif kind == "footage_color":
             self.bin.refresh()
             self.viewer.refresh()
         elif kind == "audio":
             self.tl.update()
             self._schedule_audio()
+        elif kind == "stabilize":
+            self.measure_shake()
+            self.viewer.refresh()
         else:
             self.viewer.refresh()
         self._update_title()
+
+    def measure_shake(self):
+        """Measure, in the background, the camera's movement for the stabilized clips that need it (once per
+        range of a file; trimming or slipping past it measures the new part)."""
+        todo = [x for x in stabilize.missing(self.project) if (x[0].id, x[1], x[2]) not in self._measuring]
+        if not todo:
+            return
+        use_proxies = self.project.settings.use_proxies
+        for f, t0, t1 in todo:
+            key = (f.id, t0, t1)
+            self._measuring.add(key)
+
+            def job(progress, cancel, f=f, t0=t0, t1=t1):
+                stabilize.analyze(f, t0, t1, use_proxies, lambda p: progress(p, f"Measuring the shake: {f.name}"),
+                                  cancel)
+
+            def done(_res, key=key):
+                self._measuring.discard(key)
+                self.viewer.refresh()
+                self.inspector.show_stab_state()
+
+            def failed(*a, key=key, f=f):
+                self._measuring.discard(key)
+                self._task_error(f"Stabilizing {f.name}")(*a)
+
+            self.tasks.submit(f"Stabilize {f.name}", job, done, failed)
 
     def _graded_clips(self) -> list:
         """Every clip whose picture can be graded: the main track and the video on the layers (pictures on the
@@ -3909,6 +3945,7 @@ class MainWindow(QMainWindow):
         self._audio_cancel = threading.Event()
         cancel = self._audio_cancel
         self._audio_version += 1
+        self._audio_done = False
         ver = self._audio_version
         proj = self._clone_project()
         use_proxies = self.project.settings.use_proxies
@@ -3927,13 +3964,27 @@ class MainWindow(QMainWindow):
                     self.audio_failed.emit(ver, str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__)
 
         threading.Thread(target=work, daemon=True).start()
+        QTimer.singleShot(AUDIO_SLOW_MS, lambda v=ver: self._audio_slow(v))
+
+    def _audio_slow(self, ver: int):
+        """A new preview mix is taking a while: say that playback has the earlier sound until it is ready (a music
+        track or sound just added is heard once it is)."""
+        if ver == self._audio_version and not self._audio_done:
+            self._audio_said = True
+            self.lbl_status.setText("Mixing the preview sound… until it is ready, playback has the sound from before "
+                                    "the last change (music or sounds just added are heard once it is)")
 
     def _on_audio_ready(self, ver: int, path: str):
         if ver == self._audio_version:
+            self._audio_done = True
             self.viewer.set_audio(path)   # also while playing: sound edits are heard right away
+            if self._audio_said:
+                self._audio_said = False
+                self.lbl_status.setText("The preview sound is ready")
 
     def _on_audio_failed(self, ver: int, reason: str):
         if ver == self._audio_version:
+            self._audio_done, self._audio_said = True, False
             self.lbl_status.setText(f"Playback has no sound: the preview sound couldn't be made ({reason[:200]})")
 
     def _on_play_state(self, playing: bool):

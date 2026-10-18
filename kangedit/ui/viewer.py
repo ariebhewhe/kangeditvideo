@@ -13,7 +13,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, Q
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
-from .. import reframe, spherical
+from .. import motion, reframe, spherical
 from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
 from ..color import Grade
 from ..config import frame_size
@@ -657,7 +657,15 @@ class Viewer(QWidget):
                     clip.offset_y, f, rot=clip.rotation,
                     box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else (),
                     speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur,
-                    view=spherical.view_of(clip) if spherical.is_360(f) else None)
+                    view=spherical.view_of(clip) if spherical.is_360(f) else None,
+                    motion=motion.of_clip(clip, f, self._aspect(clip)))
+
+    def _aspect(self, clip) -> float:
+        """Width / height of the picture a main-track clip shows in (its box, or the frame)."""
+        tw, th = self.preview_size()
+        if clip.box_w > 0 and clip.box_h > 0:
+            tw, th = clip.box_w * tw, clip.box_h * th
+        return tw / max(1e-6, th)
 
     def _shots(self) -> list[Shot]:
         out, t = [], 0.0
