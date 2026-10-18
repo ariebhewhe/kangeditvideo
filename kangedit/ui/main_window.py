@@ -322,6 +322,9 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Make a highlight reel (9:16)…", self.highlight_reel, None,
                               "Turn the edit into a 30-60 s vertical reel of its best moments, framed on the faces "
                               "(Undo brings the edit back)"))
+        m.addAction(self._act("Make a thumbnail…", lambda: self.thumbnail_dialog(), None,
+                              "A thumbnail from the edit's best stills (or the frame at the playhead), framed on the "
+                              "face, with big text, saved as a JPG"))
         m.addAction(self._act("YouTube chapters…", lambda: self.chapters_dialog(), None,
                               "Chapter timestamps for the video's description, from the edit's scenes and what is "
                               "said; title cards for them"))
@@ -2691,6 +2694,19 @@ class MainWindow(QMainWindow):
                                 + (f" ({locked} item(s) in use were kept)" if locked else ""))
 
     # ================================================================== timeline editing
+    def thumbnail_dialog(self):
+        from .. import thumbnail as th
+        from .thumbnail_dialog import ThumbnailDialog
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Make an edit first (✨ Auto Edit or clips on the timeline).")
+            return
+        idx, off = self.project.clip_at(self.viewer.t)
+        here = None
+        if idx is not None:
+            c = self.project.clips[idx]
+            here = th.Still(c.footage_id, c.src_at(off), 0.0, c.id)
+        ThumbnailDialog(self.project, self.analyses, here, self, self.project.settings.use_proxies).exec()
+
     def chapters_dialog(self):
         from .chapters_dialog import ChaptersDialog
         if not self.project.clips:
