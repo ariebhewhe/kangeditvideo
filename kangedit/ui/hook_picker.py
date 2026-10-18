@@ -46,9 +46,11 @@ class HookPicker(QDialog):
         self.fetch, self.thumbs, self.names, self.length_for = fetch, thumbs, names, length_for
         self.shown: list[TimelineClip] = []      # every moment offered (More suggestions offers others)
         self.cards: list[tuple[QToolButton, TimelineClip]] = []
+        self.order: list[QToolButton] = []       # the ticked cards, in the order they were ticked
         lay = QVBoxLayout(self)
         intro = QLabel("The strongest moments of the whole video (movement, faces, people laughing or cheering). "
-                       "The ticked ones open the video, in this order. Tick the ones you like.")
+                       "The ticked ones open the video in the order you tick them (the number on each). "
+                       "Tick the ones you like.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         row = QHBoxLayout()
@@ -86,21 +88,26 @@ class HookPicker(QDialog):
         return self.sp_count.value()
 
     def _load(self, fresh: bool = False) -> None:
+        """Offer the strongest moments (fresh), or others not offered yet: the ticked ones stay, first, in the
+        order they were ticked."""
+        kept = [] if fresh else self.chosen()
         avoid = [] if fresh else list(self.shown)
         got = self.fetch(self.count, avoid)
         if not got and not fresh:                # every strong moment was offered: start the round again
-            self.shown = []
-            got = self.fetch(self.count, [])
+            self.shown = list(kept)
+            got = self.fetch(self.count, kept)
         self.shown += [TimelineClip.from_dict(c.to_dict()) for c in got]
         self._length = self.length_for(self.count)
-        self._show(got)
+        self._show(kept + got[:max(0, len(got) - len(kept))] if kept else got, len(kept))
 
-    def _show(self, clips: list) -> None:
+    def _show(self, clips: list, ticked: int = 0) -> None:
+        """Cards for `clips`; the first `ticked` stay ticked in that order, else the strongest are ticked."""
         while self.grid.count():
             w = self.grid.takeAt(0).widget()
             if w is not None:
                 w.deleteLater()
         self.cards = []
+        self.order = []
         cols = 3
         for k, c in enumerate(clips):
             b = QToolButton()
@@ -112,18 +119,35 @@ class HookPicker(QDialog):
                 b.setIconSize(QSize(pix.width(), pix.height()))
             b.setText(self.names(c))
             b.setToolTip("Start · middle · end of the moment. Click to tick or untick it.")
-            b.toggled.connect(self._update)
+            b.toggled.connect(lambda on, b=b: self._toggled(b, on))
             self.grid.addWidget(b, k // cols, k % cols)
             self.cards.append((b, c))
-        self._tick_best()
+        if ticked:
+            self._tick([b for b, _ in self.cards[:ticked]])
+        else:
+            self._tick_best()
         if not clips:
             self.lbl.setText("No strong moment left that the edit doesn't already show.")
 
     def _tick_best(self) -> None:
-        for k, (b, _) in enumerate(self.cards):
+        """Tick the strongest moments, as many as the hook has clips (strongest first)."""
+        self._tick([b for b, _ in self.cards[:self.count]])
+
+    def _tick(self, buttons: list) -> None:
+        """Tick exactly `buttons`, in that order."""
+        for b, _ in self.cards:
             b.blockSignals(True)
-            b.setChecked(k < self.count)
+            b.setChecked(b in buttons)
             b.blockSignals(False)
+        self.order = list(buttons)
+        self._update()
+
+    def _toggled(self, b: QToolButton, on: bool) -> None:
+        """A card ticked goes last in the hook; one unticked leaves it (the ones after move up)."""
+        if on and b not in self.order:
+            self.order.append(b)
+        elif not on and b in self.order:
+            self.order.remove(b)
         self._update()
 
     def _count_changed(self) -> None:
@@ -131,25 +155,28 @@ class HookPicker(QDialog):
         if self._length is not None and abs(self.length_for(self.count) - self._length) > 0.05:
             self.shown = []
             self._load(fresh=True)
-        else:
-            self._tick_best()
+            return
+        # Same moments: keep the ones ticked (in their order), add the strongest others or drop the last ones.
+        order = self.order[:self.count]
+        order += [b for b, _ in self.cards if b not in order][:self.count - len(order)]
+        self._tick(order)
 
     def more(self) -> None:
         self._load()
 
     def _update(self) -> None:
-        n = len(self.chosen())
-        for k, (b, c) in enumerate(self.cards):
-            order = [x for x, _ in self.cards if x.isChecked()]
-            b.setText(("✔ " + str(order.index(b) + 1) + "  " if b.isChecked() else "") + self.names(c))
+        n = len(self.order)
+        for b, c in self.cards:
+            b.setText((f"✔ {self.order.index(b) + 1}  " if b in self.order else "") + self.names(c))
         self.btn_ok.setEnabled(n > 0)
         if self.cards:
             self.lbl.setText(f"{n} ticked: the hook is {n} clip(s), "
                              f"{sum(c.duration for c in self.chosen()):.1f} s" if n else "Tick at least one moment.")
 
     def chosen(self) -> list[TimelineClip]:
-        """The ticked moments, in the order shown (strongest first)."""
-        return [c for b, c in self.cards if b.isChecked()]
+        """The ticked moments, in the order they were ticked (the hook plays them in that order)."""
+        clip_of = {id(b): c for b, c in self.cards}
+        return [clip_of[id(b)] for b in self.order if id(b) in clip_of]
 
 
 def card_name(c: TimelineClip, footage_name: str) -> str:

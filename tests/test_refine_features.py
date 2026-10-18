@@ -344,8 +344,10 @@ def test_hook_button_offers_the_strongest_moments_as_thumbnails(window, monkeypa
         assert [b.isChecked() for b, _ in dlg.cards][:3] == [True, True, False]
         assert all(abs(c.duration - 2.0) < 0.05 for _, c in dlg.cards)
         before = [(c.footage_id, c.src_in) for _, c in dlg.cards]
-        dlg.more()                                                  # others, not offered yet
-        assert not set(before) & {(c.footage_id, c.src_in) for _, c in dlg.cards}
+        dlg.more()                                                  # others, not offered yet; the ticked stay
+        now = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        assert now[:2] == before[:2] and [b.isChecked() for b, _ in dlg.cards][:3] == [True, True, False]
+        assert not set(before) & set(now[2:])
         dlg.cards[0][0].setChecked(False)
         dlg.cards[2][0].setChecked(True)
         seen["chosen"] = [(c.footage_id, c.src_in) for c in dlg.chosen()]
@@ -360,3 +362,47 @@ def test_hook_button_offers_the_strongest_moments_as_thumbnails(window, monkeypa
     assert window.last_auto.hook_clips == 2                         # the next auto edit's hook has 2 clips
     window.undo()
     assert [(c.src_in, c.label) for c in window.project.clips] == [(2.0, ""), (12.0, "")]
+
+
+def test_hook_plays_the_moments_in_the_order_they_were_ticked(window, monkeypatch):
+    from kangedit.ui.hook_picker import HookPicker
+    footage, analyses = two_files()
+    window.project.footage = footage
+    window.analyses.update(analyses)
+    window.project.settings.video_format = "short"
+    window.last_auto = AutoEditSettings(clip_min=1.5, clip_max=3.0, min_gap=1.0)
+    fa = next(iter(footage))
+    window.project.clips = [TimelineClip(fa, 2.0, 5.0), TimelineClip(fa, 12.0, 15.0)]
+    picked = []
+
+    def moment(c):
+        return (c.footage_id, c.src_in)
+
+    def run(dlg):
+        dlg.sp_count.setValue(3)
+        cards = dlg.cards
+        for b, _ in cards:                                # start from nothing ticked
+            b.setChecked(False)
+        a, b_, c = cards[0], cards[1], cards[2]
+        for card in (c, a, b_):                           # tick C, then A, then B
+            card[0].setChecked(True)
+        assert [moment(x) for x in dlg.chosen()] == [moment(c[1]), moment(a[1]), moment(b_[1])]
+        assert c[0].text().startswith("✔ 1") and a[0].text().startswith("✔ 2") and b_[0].text().startswith("✔ 3")
+        a[0].setChecked(False)                            # untick A: B moves up
+        a[0].setChecked(True)                             # and ticked again, it goes last
+        assert [moment(x) for x in dlg.chosen()] == [moment(c[1]), moment(b_[1]), moment(a[1])]
+        before = [moment(x) for x in dlg.chosen()]
+        dlg.more()                                        # other suggestions keep the ticked ones, in order
+        assert [moment(x) for x in dlg.chosen()] == before
+        dlg.sp_count.setValue(2)                          # fewer clips: the last ticked goes
+        assert [moment(x) for x in dlg.chosen()] == before[:2]
+        dlg.sp_count.setValue(3)
+        dlg.cards[-1][0].setChecked(True)
+        assert len(dlg.chosen()) == 4
+        picked[:] = [moment(x) for x in dlg.chosen()]
+        return HookPicker.Accepted
+
+    monkeypatch.setattr(HookPicker, "exec", run)
+    window.new_hook()
+    hooks = [c for c in window.project.clips if c.label == "hook"]
+    assert [moment(c) for c in hooks] == picked and window.project.clips[:len(hooks)] == hooks

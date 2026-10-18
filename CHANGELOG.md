@@ -19,7 +19,8 @@ and the Release workflow uses that section as the GitHub release notes.
   its words) to slip the clip to start on it.
 - **Choose the hook**: 🎣 Hook (H) no longer swaps in a random strong moment. It shows the strongest moments
   of the whole video as thumbnails (start, middle, end), the best ticked; tick the ones you like, set how many
-  clips the hook has (1-5) or ask for more suggestions.
+  clips the hook has (1-5) or ask for more suggestions. The hook plays the moments in the order they were
+  ticked (the number on each card); the ticked ones stay when you ask for more suggestions.
 - **Hook clips** setting in ✨ Auto Edit: a hook of 1 to 5 clips (a teaser of 2 s moments), or automatic
   (1 in short-form, 3 in long-form).
 
