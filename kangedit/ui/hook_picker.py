@@ -55,8 +55,9 @@ class MomentPreview(QLabel):
         self.clip_id = clip.id
         self.setText("Loading…")
         cancel = self._cancel = threading.Event()
+        c = TimelineClip.from_dict(clip.to_dict())      # a private copy for the decoding thread
 
-        def work(c=TimelineClip.from_dict(clip.to_dict())):
+        def work():
             try:
                 frames = self.decode(c, cancel)
             except Exception:  # noqa: BLE001 - a moment that can't be decoded just isn't previewed
